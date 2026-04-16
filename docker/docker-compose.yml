@@ -22,8 +22,6 @@ services:
       - /path/to/monbooru/data:/data
     environment:
       - MONBOORU_SERVER_BIND_ADDRESS=0.0.0.0:8080
-      # - MONBOORU_AUTH_API_TOKEN=your_token_here
-      # - MONBOORU_AUTH_ENABLE_PASSWORD=true
     healthcheck:
       test: ["CMD-SHELL", "curl --fail --silent --max-time 5 http://localhost:8080/health || exit 1"]
       interval: 30s
