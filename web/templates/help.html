@@ -1,0 +1,124 @@
+{{define "help.html"}}
+{{template "layout_head" .}}
+<div id="sidebar-inner">
+  <nav class="help-nav">
+    <a href="#upload">Uploading Images</a>
+    <a href="#tag-input">Adding Tags</a>
+    <a href="#search-syntax">Search Syntax</a>
+    <a href="#keymap">Keyboard Shortcuts</a>
+    <a href="#settings">Settings &amp; Maintenance</a>
+  </nav>
+</div>
+{{template "layout_mid" .}}
+
+<div id="help-page">
+  <h2>Help</h2>
+
+  <section id="upload">
+    <h3>Uploading Images</h3>
+    <p>Use the <a href="/upload">Upload</a> page to add images directly through your browser.</p>
+    <ul>
+      <li>Select one or more files (JPEG, PNG, WebP, GIF, MP4, WebM).</li>
+      <li>Optionally add tags that will be applied to all uploaded files.</li>
+      <li>Choose a destination folder (e.g. <code>2026/april</code>) to place the files under; leave blank to save at the gallery root. Missing folders are created automatically.</li>
+    </ul>
+  </section>
+
+  <hr class="help-sep">
+
+  <section id="tag-input">
+    <h3>Adding Tags</h3>
+    <p>In the tag input on the image detail page:</p>
+    <ul>
+      <li>Type one or more tags separated by spaces and press Add. Each whitespace-separated token becomes its own tag. Wrap a multi-word tag in double quotes to collapse internal spaces to underscores: <code>"red hair"</code> → <code>red_hair</code>. You can also use <code>_</code> directly.</li>
+      <li>Use <code>category:tagname</code> to add a tag to a specific category.</li>
+      <li>Example: <code>artist:"john doe" blue_eyes 1girl</code> adds "john_doe" as an artist tag and "blue_eyes" and "1girl" as general tags.</li>
+      <li>Autocomplete suggestions appear as you type — use ↑/↓ arrows to navigate, Enter to select.</li>
+    </ul>
+    <h4>Tag names</h4>
+    <ul>
+      <li>Lowercase only: <code>a-z</code>, <code>0-9</code>, <code>_</code>, <code>(</code>, <code>)</code>, <code>!</code>, <code>@</code>, <code>#</code>, <code>$</code>, <code>.</code>, <code>~</code>, <code>+</code>, <code>-</code></li>
+      <li>Maximum 200 characters.</li>
+    </ul>
+  </section>
+
+  <hr class="help-sep">
+
+  <section id="search-syntax">
+    <h3>Search Syntax</h3>
+    <table class="help-table">
+      <thead><tr><th>Syntax</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>tagname</code></td><td>Images with this tag</td></tr>
+        <tr><td><code>-tagname</code></td><td>Exclude images with this tag</td></tr>
+        <tr><td><code>tagA tagB</code></td><td>Images with both tags (AND)</td></tr>
+        <tr><td><code>tagA OR tagB</code></td><td>Images with either tag</td></tr>
+        <tr><td><code>red*</code></td><td>Wildcard: tags starting with "red" (e.g. red_hair, red_eyes)</td></tr>
+        <tr><td><code>*hair*</code></td><td>Wildcard: tags containing "hair"</td></tr>
+        <tr><td><code>fav:true</code></td><td>Favorited images only</td></tr>
+        <tr><td><code>source:ai</code></td><td>Any AI-generated image (a1111 and/or comfyui metadata present)</td></tr>
+        <tr><td><code>source:a1111</code></td><td>Images generated with A1111/Forge</td></tr>
+        <tr><td><code>source:comfyui</code></td><td>Images generated with ComfyUI</td></tr>
+        <tr><td><code>source:none</code></td><td>Images with no detected generation metadata</td></tr>
+        <tr><td><code>folder:path/to</code></td><td>Images directly in that folder (subfolders not included)</td></tr>
+        <tr><td><code>folder:"path with spaces"</code></td><td>Folder path with spaces (use quotes)</td></tr>
+        <tr><td><code>character:tagname</code></td><td>Tag "tagname" in the "character" category specifically</td></tr>
+        <tr><td><code>cat:character</code></td><td>Images with any tag in the given category</td></tr>
+        <tr><td><code>width:&gt;=1920</code></td><td>Filter by image width (supports <code>&gt;=</code> <code>&lt;=</code> <code>&gt;</code> <code>&lt;</code> <code>=</code>)</td></tr>
+        <tr><td><code>height:&lt;768</code></td><td>Filter by image height</td></tr>
+        <tr><td><code>date:&gt;2024-01-01</code></td><td>Images ingested after a date</td></tr>
+        <tr><td><code>date:2024-01..2024-06</code></td><td>Images ingested within a date range</td></tr>
+        <tr><td><code>date:2024-03-15</code></td><td>Images ingested on an exact date</td></tr>
+        <tr><td><code>missing:true</code></td><td>Show images whose files are missing from disk</td></tr>
+        <tr><td><code>animated:true</code></td><td>Only animated files (GIF, MP4, WebM). <code>animated:false</code> excludes them.</td></tr>
+      </tbody>
+    </table>
+    <p class="field-hint">All searches are case-insensitive. Missing images are hidden by default.</p>
+    <h4>Sort options</h4>
+    <table class="help-table">
+      <thead><tr><th>Sort</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td>Newest</td><td>Sort by ingest date (default). Use ↑/↓ to flip direction.</td></tr>
+        <tr><td>File size</td><td>Sort by file size, largest first.</td></tr>
+        <tr><td>Random (⇄)</td><td>Shuffle images randomly. Stable across page turns; click again to re-shuffle.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <hr class="help-sep">
+
+  <section id="keymap">
+    <h3>Keyboard Shortcuts</h3>
+    <table class="help-table">
+      <thead><tr><th>Key</th><th>Context</th><th>Action</th></tr></thead>
+      <tbody>
+        <tr><td><kbd>t</kbd></td><td>Gallery</td><td>Focus search bar</td></tr>
+        <tr><td><kbd>h</kbd></td><td>Gallery</td><td>Previous page</td></tr>
+        <tr><td><kbd>l</kbd></td><td>Gallery</td><td>Next page</td></tr>
+        <tr><td><kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd></td><td>Gallery</td><td>Navigate image grid</td></tr>
+        <tr><td><kbd>Enter</kbd></td><td>Gallery</td><td>Open focused image</td></tr>
+        <tr><td><kbd>←</kbd> <kbd>→</kbd></td><td>Image detail</td><td>Previous / next image</td></tr>
+        <tr><td><kbd>f</kbd></td><td>Image detail</td><td>Toggle favorite</td></tr>
+        <tr><td><kbd>t</kbd></td><td>Image detail</td><td>Focus tag input</td></tr>
+        <tr><td><kbd>Delete</kbd></td><td>Image detail</td><td>Delete image</td></tr>
+        <tr><td><kbd>Escape</kbd></td><td>Any</td><td>Close dialog / blur input / go back</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <hr class="help-sep">
+
+  <section id="settings">
+    <h3>Settings &amp; Maintenance</h3>
+    <p>The <a href="/settings">Settings</a> page provides:</p>
+    <ul>
+      <li><strong>General</strong> — toggle the gallery file watcher, set the max file size, and change the number of images per page.</li>
+      <li><strong>Authentication</strong> — set or remove a password, regenerate the API token.</li>
+      <li><strong>Auto-Tagger</strong> — enable one or more taggers (each subfolder of the models directory), set per-tagger confidence thresholds, and run bulk tagging on untagged or all images.</li>
+      <li><strong>Maintenance</strong> — prune missing images, clean up orphaned thumbnails, rebuild thumbnails, recalculate tag counts, re-extract metadata, vacuum the database, and list or remove duplicate file paths.</li>
+    </ul>
+  </section>
+</div>
+
+{{template "layout_end" .}}
+{{end}}

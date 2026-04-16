@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Login — Monbooru</title>
+  <link rel="stylesheet" href="/static/main.css">
+</head>
+<body>
+  <div class="login-wrap">
+    <div class="login-box">
+      <h1>MONBOORU</h1>
+      {{if .Error}}
+        <div class="login-error">{{.Error}}</div>
+      {{end}}
+      <form method="POST" action="/login">
+        <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+        <input type="password" name="password" placeholder="Password" autofocus>
+        <button type="submit">Login</button>
+      </form>
+    </div>
+  </div>
+</body>
+</html>

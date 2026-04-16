@@ -1,0 +1,281 @@
+{{define "settings.html"}}
+{{template "layout_head" .}}
+<div id="sidebar-inner">
+  <nav class="settings-nav">
+    <a href="#general">General</a>
+    <a href="#auth">Auth</a>
+    <a href="#tagger">Tagger</a>
+    <a href="#maintenance">Maintenance</a>
+  </nav>
+</div>
+{{template "layout_mid" .}}
+
+{{$csrf := index . "CSRFToken"}}
+{{$cfg  := index . "Config"}}
+
+<div id="settings-page">
+  <h2>Settings</h2>
+
+  <section id="general" class="settings-section">
+    <h3>General</h3>
+    <div id="flash-general"></div>
+    <div class="settings-sub">
+      <h4>Files</h4>
+      <form hx-post="/settings/gallery" hx-target="#flash-general" hx-swap="innerHTML">
+        <input type="hidden" name="_csrf" value="{{$csrf}}">
+        <div class="field">
+          <label>
+            <input type="checkbox" name="watch_enabled" {{if $cfg.Gallery.WatchEnabled}}checked{{end}}>
+            Watch gallery for new files automatically
+          </label>
+        </div>
+        <div class="field">
+          <label>Max file size (MB)</label>
+          <input type="number" name="max_file_size_mb" value="{{$cfg.Gallery.MaxFileSizeMB}}" min="1">
+          <span class="field-hint">Files larger than this are skipped during sync.</span>
+        </div>
+        <button type="submit">Save</button>
+      </form>
+    </div>
+    <div class="settings-sub">
+      <h4>UI</h4>
+      <form hx-post="/settings/ui" hx-target="#flash-general" hx-swap="innerHTML">
+        <input type="hidden" name="_csrf" value="{{$csrf}}">
+        <div class="field">
+          <label>Page size</label>
+          <input type="number" name="page_size" value="{{$cfg.UI.PageSize}}" min="1" max="500">
+        </div>
+        <button type="submit">Save</button>
+      </form>
+    </div>
+  </section>
+
+  <section id="auth" class="settings-section">
+    <h3>Authentication</h3>
+    <div id="flash-auth"></div>
+    {{template "partials/auth_password_section.html" (dict "AuthEnabled" $cfg.Auth.EnablePassword "CSRFToken" $csrf)}}
+    <div class="settings-sub">
+      <h4>API Token</h4>
+      <form hx-post="/settings/auth/token" hx-target="#flash-auth" hx-swap="innerHTML">
+        <input type="hidden" name="_csrf" value="{{$csrf}}">
+        <button type="submit">Regenerate API token</button>
+      </form>
+    </div>
+  </section>
+
+  <section id="tagger" class="settings-section">
+    <h3>Auto-Tagger
+      {{template "partials/tagger_mode_badge.html" (dict "UseCUDA" $cfg.Tagger.UseCUDA)}}
+    </h3>
+    <div id="flash-tagger"></div>
+    {{$taggers := index . "Taggers"}}
+    {{if $taggers}}
+    <form hx-post="/settings/tagger" hx-target="#flash-tagger" hx-swap="innerHTML">
+      <input type="hidden" name="_csrf" value="{{$csrf}}">
+      <div class="settings-sub">
+        <h4>Workers / GPU</h4>
+        <div class="field">
+          <label><input type="checkbox" name="use_cuda"{{if $cfg.Tagger.UseCUDA}} checked{{end}}> Use GPU (CUDA)</label>
+          <p class="field-hint">Requires a CUDA-capable image and a GPU passed into the container.</p>
+        </div>
+        <div class="field">
+          <label>Parallel workers <input type="number" name="parallel" value="{{$cfg.Tagger.Parallel}}" min="1" style="width:6em"></label>
+          <p class="field-hint">Images tagged in parallel. Helps mostly on GPU, where preprocessing otherwise keeps the GPU idle.</p>
+        </div>
+      </div>
+      <div class="settings-sub">
+        <h4>Taggers</h4>
+        <p class="field-hint">Each subfolder of <code>{{$cfg.Paths.ModelPath}}</code> is listed below. Enable one or more; when several are enabled they run together on every image and duplicate tags are applied once.</p>
+      <table class="tagger-table">
+        <thead>
+          <tr><th>Tagger</th><th>Enabled</th><th>Confidence</th><th>Status</th><th>Actions</th></tr>
+        </thead>
+        <tbody>
+          {{range $taggers}}
+          <tr>
+            <td><strong>{{.Name}}</strong></td>
+            <td>
+              <input type="hidden" name="tagger_names" value="{{.Name}}">
+              {{if .Enabled}}<span class="status-ok" title="Enabled">✓</span>{{else}}<span class="status-err" title="Disabled">✗</span>{{end}}
+            </td>
+            <td>
+              <input type="number" name="tagger_{{.Name}}_threshold" value="{{.ConfidenceThreshold}}" min="0" max="1" step="0.01" style="width:6em">
+            </td>
+            <td>
+              {{if .Available}}<span class="status-ok">active</span>{{else}}<span class="status-err">unavailable — {{.Reason}}</span>{{end}}
+            </td>
+            <td>
+              <div class="tagger-actions">
+                {{if and .Enabled .Available}}
+                <button type="button" class="btn-autotag"
+                        hx-post="/internal/autotag" hx-target="#flash-tagger" hx-swap="innerHTML"
+                        hx-vals='{"mode":"never","tagger_name":"{{.Name}}","_csrf":"{{$csrf}}"}'
+                        hx-on::after-request="if(event.detail.successful){document.getElementById('job-status').setAttribute('hx-trigger','load');htmx.trigger('#job-status','load')}">Run untagged</button>
+                <button type="button" class="btn-autotag"
+                        hx-post="/internal/autotag" hx-target="#flash-tagger" hx-swap="innerHTML"
+                        hx-vals='{"mode":"all","tagger_name":"{{.Name}}","_csrf":"{{$csrf}}"}'
+                        hx-confirm="Re-tag ALL images with {{.Name}}? This will overwrite its existing auto-tags."
+                        hx-on::after-request="if(event.detail.successful){document.getElementById('job-status').setAttribute('hx-trigger','load');htmx.trigger('#job-status','load')}">Run all</button>
+                {{end}}
+                <button type="button" class="btn-sm btn-warning"
+                        hx-post="/settings/tagger/remove-autotagged" hx-target="#flash-tagger" hx-swap="innerHTML"
+                        hx-vals='{"tagger_name":"{{.Name}}","_csrf":"{{$csrf}}"}'
+                        hx-confirm="Remove all auto-tags produced by {{.Name}} from every image?">Remove auto-tagged</button>
+                {{if .Enabled}}
+                <button type="button" class="btn-sm"
+                        hx-post="/settings/tagger/{{.Name}}/disable" hx-target="#flash-tagger" hx-swap="innerHTML"
+                        hx-vals='{"_csrf":"{{$csrf}}"}'>Disable</button>
+                {{else if .Available}}
+                <button type="button" class="btn-sm btn-success"
+                        hx-post="/settings/tagger/{{.Name}}/enable" hx-target="#flash-tagger" hx-swap="innerHTML"
+                        hx-vals='{"_csrf":"{{$csrf}}"}'>Enable</button>
+                {{end}}
+              </div>
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+      <button type="submit">Save</button>
+      </div>
+    </form>
+    {{$enabledCount := index . "EnabledCount"}}
+    <div class="settings-sub">
+      <h4>Run Auto-Tagger</h4>
+      <p class="field-hint">Runs every enabled tagger on the selected images.</p>
+      <div class="tagger-bulk-actions">
+        {{if $enabledCount}}
+        <form hx-post="/internal/autotag" hx-target="#flash-tagger" hx-swap="innerHTML"
+              hx-on::after-request="if(event.detail.successful){document.getElementById('job-status').setAttribute('hx-trigger','load');htmx.trigger('#job-status','load')}">
+          <input type="hidden" name="_csrf" value="{{$csrf}}">
+          <input type="hidden" name="mode" value="never">
+          <button type="submit" class="btn-autotag">Run on untagged images</button>
+        </form>
+        <form hx-post="/internal/autotag" hx-target="#flash-tagger" hx-swap="innerHTML"
+              hx-on::after-request="if(event.detail.successful){document.getElementById('job-status').setAttribute('hx-trigger','load');htmx.trigger('#job-status','load')}"
+              hx-confirm="Re-tag ALL images? This will overwrite existing auto-tags.">
+          <input type="hidden" name="_csrf" value="{{$csrf}}">
+          <input type="hidden" name="mode" value="all">
+          <button type="submit" class="btn-autotag">Run on all images</button>
+        </form>
+        {{end}}
+        <form hx-post="/settings/tagger/remove-autotagged" hx-target="#flash-tagger" hx-swap="innerHTML"
+              hx-confirm="Remove every auto-tag from every image? Manual tags are kept.">
+          <input type="hidden" name="_csrf" value="{{$csrf}}">
+          <button type="submit" class="btn-warning">Remove all auto-tags</button>
+        </form>
+        <form hx-post="/settings/tagger/remove-user-tags" hx-target="#flash-tagger" hx-swap="innerHTML"
+              hx-confirm="Remove every user (manual) tag from every image? Auto-tags are kept.">
+          <input type="hidden" name="_csrf" value="{{$csrf}}">
+          <button type="submit" class="btn-warning">Remove all user tags</button>
+        </form>
+        <form hx-post="/settings/tagger/remove-all-tags" hx-target="#flash-tagger" hx-swap="innerHTML"
+              hx-confirm="Remove EVERY tag (user and auto) from every image? This cannot be undone.">
+          <input type="hidden" name="_csrf" value="{{$csrf}}">
+          <button type="submit" class="btn-warning">Remove all tags</button>
+        </form>
+      </div>
+    </div>
+    {{else}}
+    <p class="field-hint">No tagger subfolders found in <code>{{$cfg.Paths.ModelPath}}</code>. Create one directory per tagger with <code>model.onnx</code> and <code>tags.csv</code> inside, then reload this page.</p>
+    {{end}}
+  </section>
+
+  <section id="maintenance" class="settings-section">
+    <h3>Maintenance</h3>
+    <div id="flash-maintenance"></div>
+    <table class="maintenance-table">
+      <tbody>
+        <tr>
+          <td><strong>Missing images</strong> <span class="field-hint">— remove DB entries whose files are gone (<a href="/?q=missing:true">view</a>)</span></td>
+          <td>
+            <form hx-post="/settings/maintenance/prune-missing" hx-target="#flash-maintenance" hx-swap="innerHTML" style="display:inline">
+              <input type="hidden" name="_csrf" value="{{$csrf}}">
+              <button type="submit" class="btn-danger btn-sm">Prune</button>
+            </form>
+          </td>
+        </tr>
+        <tr>
+          <td><strong>Orphaned thumbnails</strong> <span class="field-hint">— remove thumbnail files with no matching image</span></td>
+          <td>
+            <form hx-post="/settings/maintenance/prune-orphaned-thumbnails" hx-target="#flash-maintenance" hx-swap="innerHTML" style="display:inline">
+              <input type="hidden" name="_csrf" value="{{$csrf}}">
+              <button type="submit" class="btn-sm">Remove</button>
+            </form>
+          </td>
+        </tr>
+        <tr>
+          <td><strong>Rebuild thumbnails</strong> <span class="field-hint">— regenerate thumbnail files for every image</span></td>
+          <td>
+            <form hx-post="/settings/maintenance/rebuild-thumbnails" hx-target="#flash-maintenance" hx-swap="innerHTML"
+                  hx-on::after-request="if(event.detail.successful){document.getElementById('job-status').setAttribute('hx-trigger','load');htmx.trigger('#job-status','load')}"
+                  style="display:inline">
+              <input type="hidden" name="_csrf" value="{{$csrf}}">
+              <button type="submit" class="btn-sm">Rebuild</button>
+            </form>
+          </td>
+        </tr>
+        <tr>
+          <td><strong>Tag counts</strong> <span class="field-hint">— recompute usage counts and prune zero-usage tags</span></td>
+          <td>
+            <form hx-post="/settings/maintenance/recalc-tags" hx-target="#flash-maintenance" hx-swap="innerHTML" style="display:inline">
+              <input type="hidden" name="_csrf" value="{{$csrf}}">
+              <button type="submit" class="btn-sm">Recalculate</button>
+            </form>
+          </td>
+        </tr>
+        <tr>
+          <td><strong>Merge general tags</strong> <span class="field-hint">— merge each auto-tagged-only general tag into its unique categorized counterpart, e.g. <code>general:hakurei_reimu</code> into <code>character:hakurei_reimu</code>. General tags you applied yourself are preserved.</span></td>
+          <td>
+            <form hx-post="/settings/maintenance/merge-general-tags" hx-target="#flash-maintenance" hx-swap="innerHTML"
+                  hx-confirm="Merge auto-tagged-only general tags into their unique categorized counterparts? The original general tags become aliases. User-tagged general tags are skipped."
+                  style="display:inline">
+              <input type="hidden" name="_csrf" value="{{$csrf}}">
+              <button type="submit" class="btn-sm">Merge</button>
+            </form>
+          </td>
+        </tr>
+        <tr>
+          <td><strong>Re-extract metadata</strong> <span class="field-hint">— re-parse SD/ComfyUI metadata for every image</span></td>
+          <td>
+            <form hx-post="/settings/maintenance/re-extract-metadata" hx-target="#flash-maintenance" hx-swap="innerHTML" style="display:inline">
+              <input type="hidden" name="_csrf" value="{{$csrf}}">
+              <button type="submit" class="btn-sm">Re-extract</button>
+            </form>
+          </td>
+        </tr>
+        <tr>
+          <td><strong>Vacuum database</strong> <span class="field-hint">— compact the SQLite file after mass deletions</span></td>
+          <td>
+            <form hx-post="/settings/maintenance/vacuum-db" hx-target="#flash-maintenance" hx-swap="innerHTML" style="display:inline">
+              <input type="hidden" name="_csrf" value="{{$csrf}}">
+              <button type="submit" class="btn-sm">Vacuum</button>
+            </form>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="settings-sub">
+      <h4>Duplicate images</h4>
+      <p class="field-hint">Images stored at multiple paths (same content, different locations). Each row is one image with its canonical path and aliases.</p>
+      <form hx-post="/settings/maintenance/remove-duplicates"
+            hx-target="#flash-maintenance" hx-swap="innerHTML"
+            hx-on::after-request="if(event.detail.successful){document.getElementById('duplicates-list').innerHTML=''}"
+            hx-confirm="Remove all duplicate alias paths and their files from disk?">
+        <input type="hidden" name="_csrf" value="{{$csrf}}">
+        <input type="hidden" name="all" value="true">
+        <button type="submit" class="btn-danger">Remove all duplicate paths</button>
+      </form>
+      <div id="duplicates-list" style="margin-top:8px"></div>
+      <button type="button"
+              hx-get="/settings/maintenance/duplicates-list"
+              hx-target="#duplicates-list"
+              hx-swap="innerHTML"
+              class="btn-sm" style="margin-top:4px">List duplicate paths</button>
+    </div>
+  </section>
+</div>
+
+{{template "layout_end" .}}
+{{end}}

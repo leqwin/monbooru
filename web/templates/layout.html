@@ -1,0 +1,95 @@
+{{define "layout_head"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}}</title>
+  <meta name="csrf-token" content="{{.CSRFToken}}">
+  <link rel="icon" type="image/png" href="/static/favicon.png">
+  <link rel="stylesheet" href="/static/main.css">
+  <script src="/static/htmx.min.js" defer></script>
+  <script src="/static/main.js" defer></script>
+</head>
+<body>
+  <div id="topbar">
+    <button id="sidebar-toggle" aria-label="Toggle sidebar">☰</button>
+    <a href="/" id="logo">
+      <img src="/static/logo.png" alt="" class="topbar-logo">
+      <span>MONBOORU</span>
+    </a>
+    <nav id="nav">
+      <a href="/"        {{if eq .ActiveNav "gallery"}} class="active"{{end}}>Images</a>
+      <a href="/upload"  {{if eq .ActiveNav "upload"}}  class="active"{{end}}>Upload</a>
+      <a href="/categories" {{if eq .ActiveNav "categories"}} class="active"{{end}}>Categories</a>
+      <a href="/tags"    {{if eq .ActiveNav "tags"}}    class="active"{{end}}>Tags</a>
+      <a href="/settings"{{if eq .ActiveNav "settings"}}class="active"{{end}}>Settings</a>
+      <a href="/help"    {{if eq .ActiveNav "help"}}    class="active"{{end}}>Help</a>
+    </nav>
+    <div id="topbar-right">
+      <div id="job-status"
+           hx-get="/internal/job/status"
+           hx-trigger="load, every 2s"
+           hx-swap="outerHTML"></div>
+      {{if not .Degraded}}
+      <form hx-post="/internal/sync" hx-swap="none"
+            hx-on:htmx:before-request="document.getElementById('job-status').innerHTML='<span class=&quot;job-running&quot;>syncing…</span>'"
+            hx-on:sync-started="document.getElementById('job-status').setAttribute('hx-trigger','every 2s');htmx.process('#job-status')"
+            hx-on:htmx:response-error="document.getElementById('sync-flash').innerHTML=event.detail.xhr.responseText;refreshJobStatus();setTimeout(function(){var el=document.getElementById('sync-flash');if(el)el.innerHTML='';},5000)"
+            style="display:inline">
+        <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+        <button type="submit" title="Sync gallery">⟳</button>
+      </form>
+      <span id="sync-flash"></span>
+      {{end}}
+      {{if .AuthEnabled}}
+        <form method="POST" action="/logout" style="display:inline">
+          <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+          <button type="submit">Logout</button>
+        </form>
+      {{end}}
+    </div>
+  </div>
+  {{if .Degraded}}
+  <div id="degraded-banner" class="degraded-banner">
+    ⚠ Gallery path is unreadable — sync and watch are disabled. Check your configuration.
+  </div>
+  {{end}}
+  <div id="main-layout">
+    <aside id="sidebar">
+{{end}}
+
+{{define "layout_mid"}}
+    </aside>
+    <main id="content">
+{{end}}
+
+{{define "layout_end"}}
+    </main>
+  </div>
+  <footer id="footer">
+    <a href="{{.RepoURL}}" target="_blank" rel="noopener">monbooru{{if .Variant}} ({{.Variant}}){{end}}</a> {{.Version}} · <a href="/api/v1/docs" target="_blank" rel="noopener">API</a>
+  </footer>
+  <dialog id="confirm-dialog">
+    <p id="confirm-dialog-msg"></p>
+    <p id="confirm-dialog-danger" class="confirm-dialog-danger"></p>
+    <div class="dialog-actions">
+      <button type="button" id="confirm-dialog-ok" class="btn-danger">OK</button>
+      <button type="button" id="confirm-dialog-cancel">Cancel</button>
+    </div>
+  </dialog>
+  <dialog id="page-jump-dialog">
+    <form id="page-jump-form" onsubmit="event.preventDefault(); submitPageJump();">
+      <p>Go to page (1–<span id="page-jump-total">1</span>):</p>
+      <div class="field">
+        <input type="number" id="page-jump-input" name="page" min="1" required>
+      </div>
+      <div class="dialog-actions">
+        <button type="submit">Go</button>
+        <button type="button" onclick="document.getElementById('page-jump-dialog').close()">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>
+{{end}}

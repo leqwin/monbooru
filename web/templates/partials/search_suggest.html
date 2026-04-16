@@ -1,0 +1,15 @@
+{{define "partials/search_suggest.html"}}
+{{if .Suggestions}}
+<div class="suggest-list">
+  {{range .Suggestions}}
+  <button type="button" class="suggest-item"
+          style="color:{{.CategoryColor}}"
+          data-tag-name="{{.Name}}"
+          onclick="applySearchSuggest(this.dataset.tagName)">
+    <span class="suggest-name">{{.Name}}</span>
+    <span class="suggest-count">{{.UsageCount}}</span>
+  </button>
+  {{end}}
+</div>
+{{end}}
+{{end}}

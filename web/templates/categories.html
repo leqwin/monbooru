@@ -1,0 +1,171 @@
+{{define "categories.html"}}
+{{template "layout_head" .}}
+<div id="sidebar-inner"></div>
+{{template "layout_mid" .}}
+
+{{$csrf := index . "CSRFToken"}}
+
+<div id="categories-page">
+  <h2>Categories</h2>
+
+  <div id="cat-flash"></div>
+  <table class="cat-table">
+    <thead><tr><th>Name</th><th>Color</th><th>Actions</th></tr></thead>
+    <tbody id="cat-list">
+      {{range index . "Categories"}}
+      <tr id="cat-row-{{.ID}}">
+        <td>
+          {{if not .IsBuiltin}}
+          <form hx-post="/tags/categories/{{.ID}}/rename"
+                hx-target="#cat-flash" hx-swap="innerHTML"
+                style="display:inline">
+            <input type="hidden" name="_csrf" value="{{$csrf}}">
+            <input type="text" name="name" value="{{.Name}}" class="rename-input-sm" required style="color:{{.Color}}">
+            <button type="submit" class="btn-sm" title="Rename">✎</button>
+          </form>
+          {{else}}
+          <span style="color:{{.Color}}">{{.Name}}</span>
+          {{end}}
+        </td>
+        <td>
+          {{if not .IsBuiltin}}
+          <form hx-patch="/settings/categories/{{.ID}}"
+                hx-target="#cat-flash" hx-swap="innerHTML"
+                hx-on::after-request="if(event.detail.successful){setTimeout(function(){location.reload()},1500)}"
+                style="display:inline">
+            <input type="hidden" name="_csrf" value="{{$csrf}}">
+            <span style="color:{{.Color}}">{{.Color}}</span>
+            <input type="color" name="color" value="{{.Color}}" onchange="this.form.requestSubmit()">
+          </form>
+          {{else}}
+          <span style="color:{{.Color}}">{{.Color}}</span>
+          {{end}}
+        </td>
+        <td>
+          {{if not .IsBuiltin}}
+          <button class="btn-danger btn-sm btn-delete-category"
+                  data-id="{{.ID}}" data-name="{{.Name}}"
+                  data-csrf="{{$csrf}}">×</button>
+          {{end}}
+        </td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  <form hx-post="/tags/categories"
+        hx-target="#cat-flash" hx-swap="innerHTML"
+        class="add-cat-form">
+    <input type="hidden" name="_csrf" value="{{$csrf}}">
+    <input type="text" name="name" placeholder="New category" required>
+    <input type="color" name="color" value="#888888">
+    <button type="submit">Add</button>
+  </form>
+</div>
+
+<!-- Delete category dialog -->
+<dialog id="delete-cat-dialog">
+  <p>Delete category <strong id="del-cat-name"></strong>?</p>
+  <p id="del-cat-tag-info" class="field-hint"></p>
+  <div id="del-cat-move-section">
+    <div class="field">
+      <label>Move tags to category:</label>
+      <select id="del-cat-target">
+        {{range index . "Categories"}}
+        <option value="{{.ID}}">{{.Name}}</option>
+        {{end}}
+      </select>
+    </div>
+  </div>
+  <div id="del-cat-flash"></div>
+  <div class="dialog-actions" id="del-cat-actions">
+    <button type="button" id="del-cat-move-btn" class="btn-sm">Move tags &amp; delete</button>
+    <button type="button" id="del-cat-delete-all-btn" class="btn-danger btn-sm">Delete all tags &amp; category</button>
+    <button type="button" onclick="document.getElementById('delete-cat-dialog').close()">Cancel</button>
+  </div>
+</dialog>
+
+<script>
+// Delete category with prompt
+document.querySelectorAll('.btn-delete-category').forEach(function(btn) {
+  btn.addEventListener('click', function() {
+    var catId = this.dataset.id;
+    var catName = this.dataset.name;
+    var csrf = this.dataset.csrf;
+    document.getElementById('del-cat-name').textContent = catName;
+    document.getElementById('del-cat-flash').innerHTML = '';
+
+    fetch('/tags/categories/' + catId + '/count')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var count = data.count || 0;
+        var info = document.getElementById('del-cat-tag-info');
+        var moveSection = document.getElementById('del-cat-move-section');
+        var deleteAllBtn = document.getElementById('del-cat-delete-all-btn');
+        var moveBtn = document.getElementById('del-cat-move-btn');
+
+        var targetSel = document.getElementById('del-cat-target');
+        Array.from(targetSel.options).forEach(function(opt) {
+          opt.disabled = (opt.value == catId);
+          if (opt.disabled && targetSel.value == catId) {
+            var first = Array.from(targetSel.options).find(function(o) { return !o.disabled; });
+            if (first) targetSel.value = first.value;
+          }
+        });
+
+        if (count === 0) {
+          info.textContent = 'No tags in this category.';
+          moveSection.style.display = 'none';
+          deleteAllBtn.textContent = 'Delete category';
+          moveBtn.style.display = 'none';
+        } else {
+          info.textContent = count + ' tag(s) will be affected.';
+          moveSection.style.display = '';
+          deleteAllBtn.textContent = 'Delete all ' + count + ' tag(s) & category';
+          moveBtn.style.display = '';
+        }
+
+        deleteAllBtn.onclick = function() {
+          doDeleteCategory(catId, csrf, 'delete_all', null);
+        };
+        moveBtn.onclick = function() {
+          var targetId = document.getElementById('del-cat-target').value;
+          doDeleteCategory(catId, csrf, 'move', targetId);
+        };
+
+        document.getElementById('delete-cat-dialog').showModal();
+      })
+      .catch(function() {
+        showConfirm('Delete category "' + catName + '"?', function() {
+          doDeleteCategory(catId, csrf, 'delete_all', null);
+        });
+      });
+  });
+});
+
+function doDeleteCategory(catId, csrf, action, targetCatId) {
+  var url = '/tags/categories/' + catId + '?action=' + encodeURIComponent(action);
+  if (targetCatId) url += '&target_id=' + encodeURIComponent(targetCatId);
+  fetch(url, {
+    method: 'DELETE',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRF-Token': csrf},
+    body: '_csrf=' + encodeURIComponent(csrf)
+  }).then(function(r) {
+    if (r.ok) {
+      document.getElementById('delete-cat-dialog').close();
+      window.location.href = window.location.pathname + window.location.search;
+    } else {
+      r.text().then(function(t) {
+        var el = document.getElementById('del-cat-flash');
+        var div = document.createElement('div');
+        div.className = 'flash flash-err';
+        div.textContent = t;
+        el.innerHTML = '';
+        el.appendChild(div);
+      });
+    }
+  });
+}
+</script>
+
+{{template "layout_end" .}}
+{{end}}

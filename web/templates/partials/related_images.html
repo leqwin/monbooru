@@ -1,0 +1,15 @@
+{{define "partials/related_images.html"}}
+{{if .}}
+<div class="related-images">
+  <h3>Similar images</h3>
+  <div class="related-mini-grid">
+    {{range .}}
+    <a href="/images/{{.ID}}" class="related-mini-card" title="Image {{.ID}}">
+      <img src="/thumbnails/{{.ID}}.jpg" alt="image {{.ID}}" loading="lazy"
+           onerror="this.parentElement.innerHTML='?'">
+    </a>
+    {{end}}
+  </div>
+</div>
+{{end}}
+{{end}}

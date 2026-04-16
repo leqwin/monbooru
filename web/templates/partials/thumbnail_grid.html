@@ -1,0 +1,58 @@
+{{define "partials/thumbnail_grid.html"}}
+<div class="thumb-grid">
+  {{range .Result.Results}}
+  <div class="thumb-card" data-id="{{.ID}}"
+       {{if or (eq .FileType "mp4") (eq .FileType "webm") (eq .FileType "gif")}}data-hover="/thumbnails/{{.ID}}_hover.webp"{{end}}>
+    <input type="checkbox" class="thumb-checkbox" name="ids" value="{{.ID}}">
+    <a href="/images/{{.ID}}?back_q={{$.Query}}&back_sort={{$.Sort}}&back_order={{$.Order}}&back_page={{$.Page}}{{if $.RandomSeed}}&back_seed={{$.RandomSeed}}{{end}}" class="thumb-link">
+      <img src="/thumbnails/{{.ID}}.jpg" alt="image {{.ID}}" loading="lazy"
+           class="thumb-img"
+           onerror="this.parentElement.innerHTML='<div class=thumb-placeholder>?</div>'">
+      <div class="thumb-overlay">
+        {{if or (eq .FileType "mp4") (eq .FileType "webm")}}
+          <span class="badge badge-video">▶</span>
+        {{end}}
+        {{if .IsFavorited}}
+          <span class="badge fav-star">★</span>
+        {{end}}
+        {{if .IsMissing}}
+          <span class="badge badge-missing">✗</span>
+        {{end}}
+        {{if eq $.Sort "filesize"}}
+          <span class="badge badge-filesize">{{humanBytes .FileSize}}</span>
+        {{end}}
+      </div>
+    </a>
+  </div>
+  {{else}}
+  <div class="no-results">No images found.</div>
+  {{end}}
+</div>
+
+{{if gt .TotalPages 1}}
+{{$seed := .RandomSeed}}
+<div class="pagination">
+  {{if and (gt .Page 1) (gt .TotalPages 2)}}
+    <a href="/?q={{.Query}}&sort={{.Sort}}&order={{.Order}}{{if $seed}}&seed={{$seed}}{{end}}&page=1"
+       hx-get="/?q={{.Query}}&sort={{.Sort}}&order={{.Order}}{{if $seed}}&seed={{$seed}}{{end}}&page=1"
+       hx-target="#gallery-grid" hx-swap="innerHTML" hx-push-url="true">« First</a>
+  {{end}}
+  {{if gt .Page 1}}
+    <a href="/?q={{.Query}}&sort={{.Sort}}&order={{.Order}}{{if $seed}}&seed={{$seed}}{{end}}&page={{sub .Page 1}}"
+       hx-get="/?q={{.Query}}&sort={{.Sort}}&order={{.Order}}{{if $seed}}&seed={{$seed}}{{end}}&page={{sub .Page 1}}"
+       hx-target="#gallery-grid" hx-swap="innerHTML" hx-push-url="true">← Prev</a>
+  {{end}}
+  <button type="button" class="page-jump current" data-current="{{.Page}}" data-total="{{.TotalPages}}" title="Go to page…">Page {{.Page}} / {{.TotalPages}}</button>
+  {{if lt .Page .TotalPages}}
+    <a href="/?q={{.Query}}&sort={{.Sort}}&order={{.Order}}{{if $seed}}&seed={{$seed}}{{end}}&page={{add .Page 1}}"
+       hx-get="/?q={{.Query}}&sort={{.Sort}}&order={{.Order}}{{if $seed}}&seed={{$seed}}{{end}}&page={{add .Page 1}}"
+       hx-target="#gallery-grid" hx-swap="innerHTML" hx-push-url="true">Next →</a>
+  {{end}}
+  {{if and (lt .Page .TotalPages) (gt .TotalPages 2)}}
+    <a href="/?q={{.Query}}&sort={{.Sort}}&order={{.Order}}{{if $seed}}&seed={{$seed}}{{end}}&page={{.TotalPages}}"
+       hx-get="/?q={{.Query}}&sort={{.Sort}}&order={{.Order}}{{if $seed}}&seed={{$seed}}{{end}}&page={{.TotalPages}}"
+       hx-target="#gallery-grid" hx-swap="innerHTML" hx-push-url="true">Last »</a>
+  {{end}}
+</div>
+{{end}}
+{{end}}

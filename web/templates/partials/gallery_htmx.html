@@ -1,0 +1,9 @@
+{{define "partials/gallery_htmx.html"}}
+{{template "partials/thumbnail_grid.html" .}}
+{{/* OOB sidebar update: replaces #sidebar-inner with current page's tags/folders */}}
+<div id="sidebar-inner" hx-swap-oob="true">
+  {{template "partials/sidebar_content.html" .}}
+</div>
+{{/* OOB result count so "N images" in the header reflects the new search */}}
+<span id="result-count" class="result-count" hx-swap-oob="true">{{.Result.Total}} images</span>
+{{end}}

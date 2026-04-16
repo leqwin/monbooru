@@ -1,0 +1,33 @@
+services:
+  monbooru:
+    container_name: monbooru
+    image: github.com/leqwin/monbooru:latest
+    ports:
+      - "127.0.0.1:8080:8080"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - FOWNER
+      - SETGID
+      - SETUID
+      - DAC_READ_SEARCH
+      - DAC_OVERRIDE
+    volumes:
+      - /path/to/your/models:/models:ro
+      - /path/to/your/gallery:/gallery
+      - /path/to/monbooru/config:/config
+      - /path/to/monbooru/data:/data
+    environment:
+      - MONBOORU_SERVER_BIND_ADDRESS=0.0.0.0:8080
+      # - MONBOORU_AUTH_API_TOKEN=your_token_here
+      # - MONBOORU_AUTH_ENABLE_PASSWORD=true
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent --max-time 5 http://localhost:8080/health || exit 1"]
+      interval: 30s
+      retries: 3
+      start_period: 10s
+      timeout: 5s
+    restart: unless-stopped

@@ -1,0 +1,18 @@
+{{define "partials/duplicates_list.html"}}
+{{if not .Aliases}}
+<p class="field-hint">No duplicates found.</p>
+{{else}}
+<table class="help-table">
+  <thead><tr><th>Image</th><th>Canonical</th><th>Alias</th></tr></thead>
+  <tbody>
+    {{range .Aliases}}
+    <tr>
+      <td><a href="/images/{{.ImageID}}">#{{.ImageID}}</a></td>
+      <td>{{.CanonicalPath}}</td>
+      <td>{{.AliasPath}}</td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{end}}
+{{end}}

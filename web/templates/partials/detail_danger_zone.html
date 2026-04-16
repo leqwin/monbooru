@@ -1,0 +1,50 @@
+{{define "partials/detail_danger_zone.html"}}
+<div id="detail-danger-zone"{{if .OOB}} hx-swap-oob="true"{{end}}>
+  <div class="danger-zone">
+    {{if .ImageTags}}
+    <button class="btn-warning"
+            hx-delete="/images/{{.ImageID}}/tags"
+            hx-target="#image-tags"
+            hx-swap="outerHTML"
+            hx-headers='{"X-CSRF-Token":"{{.CSRFToken}}"}'>Remove all tags</button>
+    {{end}}
+    {{if .HasUserTags}}
+    <button class="btn-warning"
+            hx-delete="/images/{{.ImageID}}/user-tags"
+            hx-target="#image-tags"
+            hx-swap="outerHTML"
+            hx-headers='{"X-CSRF-Token":"{{.CSRFToken}}"}'>Remove user tags</button>
+    {{end}}
+    {{if .ImageTaggers}}
+    <button class="btn-warning" type="button"
+            onclick="document.getElementById('remove-auto-dialog').showModal()">Remove all auto-tagged tags</button>
+    {{end}}
+    <button class="btn-danger danger-zone-delete"
+            id="delete-image-btn"
+            hx-delete="/images/{{.ImageID}}?back_q={{.BackQuery}}&back_sort={{.BackSort}}&back_order={{.BackOrder}}{{if .BackPage}}&back_page={{.BackPage}}{{end}}{{if .BackSeed}}&back_seed={{.BackSeed}}{{end}}"
+            hx-swap="none"
+            hx-headers='{"X-CSRF-Token":"{{.CSRFToken}}"}'
+            hx-confirm="Delete this image?"
+            data-confirm-danger="Files are permanently deleted from disk. This cannot be undone.">Delete image</button>
+  </div>
+
+  {{if .ImageTaggers}}
+  <dialog id="remove-auto-dialog">
+    <p>Remove auto-tagged tags from this image. Pick the auto-taggers to remove (none selected = all of them).</p>
+    <form id="remove-auto-form">
+      <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+      <div class="field">
+        {{range .ImageTaggers}}
+        <label style="display:block"><input type="checkbox" name="taggers" value="{{.}}"> {{.}}</label>
+        {{end}}
+      </div>
+      <div class="dialog-actions">
+        <button type="button" class="btn-warning"
+                onclick="submitRemoveAutoTags({{.ImageID}})">Remove</button>
+        <button type="button" onclick="document.getElementById('remove-auto-dialog').close()">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+  {{end}}
+</div>
+{{end}}

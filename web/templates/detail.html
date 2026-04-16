@@ -1,0 +1,352 @@
+{{define "detail.html"}}
+{{template "layout_head" .}}
+{{/* Detail sidebar: image tags grouped by category + related tags */}}
+<div id="sidebar-inner" class="detail-sidebar-inner">
+  {{template "partials/detail_sidebar.html" .}}
+</div>
+{{template "layout_mid" .}}
+
+<div id="detail-page">
+  {{/* Missing image banner */}}
+  {{if .Image.IsMissing}}
+  <div class="missing-banner">
+    <span>⚠ This file is no longer present on disk.</span>
+    <button class="btn-danger btn-sm"
+            hx-delete="/images/{{.Image.ID}}"
+            hx-swap="none"
+            hx-headers='{"X-CSRF-Token":"{{.CSRFToken}}"}'
+            hx-confirm="Remove this missing image from the library?">Remove from library</button>
+  </div>
+  {{end}}
+
+  <div id="autotag-result"></div>
+
+  {{/* Top bar: back link | prev/next + download/fav (mirrors body column layout) */}}
+  <div class="detail-topbar">
+    <div class="detail-nav-group">
+      {{if or .BackQuery .BackSort}}
+      <a href="/?q={{.BackQuery}}&sort={{.BackSort}}&order={{.BackOrder}}{{if .BackPage}}&page={{.BackPage}}{{end}}{{if .BackSeed}}&seed={{.BackSeed}}{{end}}#img-{{.Image.ID}}" class="back-link">← Images</a>
+      {{else}}
+      <a href="/#img-{{.Image.ID}}" class="back-link">← Images</a>
+      {{end}}
+    </div>
+    <div class="detail-topbar-right">
+      <div class="detail-meta-nav">
+        {{if .PrevID}}
+        <a href="/images/{{deref64 .PrevID}}?back_q={{.BackQuery}}&back_sort={{.BackSort}}&back_order={{.BackOrder}}{{if .BackPage}}&back_page={{.BackPage}}{{end}}{{if .BackSeed}}&back_seed={{.BackSeed}}{{end}}"
+           class="nav-arrow" title="Previous image (←)">← Prev</a>
+        {{end}}
+        {{if .NextID}}
+        <a href="/images/{{deref64 .NextID}}?back_q={{.BackQuery}}&back_sort={{.BackSort}}&back_order={{.BackOrder}}{{if .BackPage}}&back_page={{.BackPage}}{{end}}{{if .BackSeed}}&back_seed={{.BackSeed}}{{end}}"
+           class="nav-arrow" title="Next image (→)">Next →</a>
+        {{end}}
+      </div>
+      <div class="detail-actions">
+        {{if .EnabledTaggers}}
+        <button type="button" class="btn-autotag" title="Auto-tag this image"
+                onclick="document.getElementById('autotag-dialog').showModal()">Auto-tag</button>
+        {{end}}
+        <a href="/images/{{.Image.ID}}/file" download class="btn-sm" title="Download image">↓</a>
+        <form id="fav-form" hx-post="/images/{{.Image.ID}}/favorite"
+              hx-target="#fav-btn" hx-swap="outerHTML"
+              hx-headers='{"X-CSRF-Token":"{{.CSRFToken}}"}' style="display:inline">
+          <button type="submit" id="fav-btn" class="btn-fav{{if .Image.IsFavorited}} active{{end}}"
+                  title="{{if .Image.IsFavorited}}Unfavorite{{else}}Favorite{{end}}">
+            {{if .Image.IsFavorited}}★{{else}}☆{{end}}
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  {{if .EnabledTaggers}}
+  <dialog id="autotag-dialog">
+    <form hx-post="/images/{{.Image.ID}}/autotag"
+          hx-target="#autotag-result"
+          hx-swap="innerHTML"
+          hx-headers='{"X-CSRF-Token":"{{.CSRFToken}}"}'
+          hx-on::after-request="if(event.detail.successful)document.getElementById('autotag-dialog').close()">
+      <p>Auto-tag this image. Pick which tagger to run (blank = all enabled taggers).</p>
+      <div class="field">
+        <label>Tagger</label>
+        <select name="tagger_name" class="autotag-picker">
+          <option value="">All enabled taggers</option>
+          {{range .EnabledTaggers}}<option value="{{.Name}}">{{.Name}}</option>{{end}}
+        </select>
+      </div>
+      <div class="dialog-actions">
+        <button type="submit">Auto-tag</button>
+        <button type="button" onclick="document.getElementById('autotag-dialog').close()">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+  {{end}}
+
+  <div class="detail-body">
+    {{/* Left: media + nav */}}
+    <div class="detail-main">
+      {{/* Media */}}
+      <div class="detail-media">
+        {{if or (eq .Image.FileType "mp4") (eq .Image.FileType "webm")}}
+        <video src="/images/{{.Image.ID}}/file" controls loop preload="metadata" class="detail-video">
+          Your browser does not support video.
+        </video>
+        {{else}}
+        <a href="/images/{{.Image.ID}}/file" target="_blank">
+          <img src="/images/{{.Image.ID}}/file" alt="Image {{.Image.ID}}" class="detail-img"
+               onerror="if(!this.dataset.fallback){this.dataset.fallback='1';this.src='/thumbnails/{{.Image.ID}}.jpg';}else{this.onerror=null;}">
+        </a>
+        {{end}}
+      </div>
+
+      {{/* Tag editor */}}
+      <div class="tag-editor-section">
+        <h3>Tags</h3>
+        {{template "partials/tag_list.html" (dict "ImageID" .Image.ID "ImageTags" .ImageTags "CSRFToken" .CSRFToken)}}
+        <div class="add-tag-wrapper" style="position:relative">
+          <form id="add-tag-form" class="add-tag-form"
+                hx-post="/images/{{.Image.ID}}/tags"
+                hx-target="#image-tags"
+                hx-swap="outerHTML">
+            <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+            <input type="text" name="tag" id="tag-input" placeholder="Add tag… (category:name or plain name)" autocomplete="off"
+                   hx-get="/internal/tags/suggest"
+                   hx-trigger="input changed delay:200ms"
+                   hx-target="#tag-suggest-dropdown"
+                   hx-swap="innerHTML"
+                   hx-include="this"
+                   onkeydown="handleSuggestKey(event, 'tag-suggest-dropdown', 'tag-input')">
+            <button type="submit">Add</button>
+          </form>
+          <div id="tag-suggest-dropdown" class="suggest-dropdown tag-suggest-dropdown"></div>
+        </div>
+      </div>
+
+      {{/* Danger zone: delete + remove all tags + remove auto-tagged. Rendered
+           via a partial so HTMX tag-list updates can refresh it via OOB swap. */}}
+      {{template "partials/detail_danger_zone.html" (dict "ImageID" .Image.ID "ImageTags" .ImageTags "HasUserTags" .HasUserTags "ImageTaggers" .ImageTaggers "CSRFToken" .CSRFToken "BackQuery" .BackQuery "BackSort" .BackSort "BackOrder" .BackOrder "BackPage" .BackPage "BackSeed" .BackSeed)}}
+      <script>
+      function submitRemoveAutoTags(imageId) {
+        var form = document.getElementById('remove-auto-form');
+        var names = Array.from(form.querySelectorAll('input[name="taggers"]:checked')).map(function(cb){ return cb.value; });
+        var qs = names.length ? ('?taggers=' + encodeURIComponent(names.join(','))) : '';
+        var csrf = form.querySelector('[name="_csrf"]').value;
+        window.htmx.ajax('DELETE', '/images/' + imageId + '/auto-tags' + qs, {
+          target: '#image-tags', swap: 'outerHTML', headers: {'X-CSRF-Token': csrf}
+        }).then(function(){ document.getElementById('remove-auto-dialog').close(); });
+      }
+      </script>
+    </div>
+
+    {{/* Right: metadata panel */}}
+    <div class="detail-meta-col">
+    <details class="detail-meta-panel" open>
+      <summary>▶ Metadata</summary>
+      <div class="detail-meta-content">
+
+        {{/* Basic metadata table */}}
+        <table class="meta-table">
+          <tbody>
+            <tr><th>Path</th><td class="mono-small">{{.Image.CanonicalPath}}</td></tr>
+            <tr><th>Type</th><td>{{.Image.FileType}}
+              {{if and .Image.SourceType (ne .Image.SourceType "none")}}
+                <span class="source-badge">AI</span>
+                {{if eq .Image.SourceType "a1111,comfyui"}}
+                  <span class="source-badge source-badge-sub">a1111</span>
+                  <span class="source-badge source-badge-sub">comfyui</span>
+                {{else}}
+                  <span class="source-badge source-badge-sub">{{.Image.SourceType}}</span>
+                {{end}}
+              {{end}}
+            </td></tr>
+            {{if .Image.Width}}
+            <tr><th>Resolution</th><td>{{deref .Image.Width}} × {{deref .Image.Height}}</td></tr>
+            {{end}}
+            <tr><th>File size</th><td>{{humanBytes .Image.FileSize}}</td></tr>
+            <tr><th>SHA-256</th><td class="mono-small sha-truncated" title="{{.Image.SHA256}}">{{.Image.SHA256}}</td></tr>
+            <tr><th>Ingested</th><td>{{.Image.IngestedAt.Format "2006-01-02 15:04:05"}}</td></tr>
+            {{if .Image.AutoTaggedAt}}
+            <tr><th>Auto-tagged</th><td>{{.Image.AutoTaggedAt.Format "2006-01-02 15:04:05"}}</td></tr>
+            {{end}}
+            {{if .Image.IsMissing}}
+            <tr><th>Status</th><td class="text-warning">⚠ File missing from disk</td></tr>
+            {{end}}
+          </tbody>
+        </table>
+
+        {{/* SD Generation metadata */}}
+        {{if .SDMeta}}
+        <details class="gen-details" open>
+          <summary>► Generation data (SD / Forge)</summary>
+          <div class="node-list">
+            {{if .SDMeta.GenerationHash}}
+            <div class="node-entry">
+              <div class="node-header"><span class="node-title">Generation hash</span>
+                <a class="gen-hash-link" href="/?q=generated:{{.SDMeta.GenerationHash}}" title="Find images with the same recipe">{{.SDMeta.GenerationHash}}</a>
+              </div>
+            </div>
+            {{end}}
+            {{if .SDMeta.Prompt}}
+            <div class="node-entry">
+              <div class="node-header"><span class="node-title">Prompt</span></div>
+              <pre class="gen-text">{{.SDMeta.Prompt}}</pre>
+            </div>
+            {{end}}
+            {{if .SDMeta.NegativePrompt}}
+            <div class="node-entry">
+              <div class="node-header"><span class="node-title">Negative prompt</span></div>
+              <pre class="gen-text">{{.SDMeta.NegativePrompt}}</pre>
+            </div>
+            {{end}}
+            {{if .SDMeta.ParsedParams}}
+            <div class="node-entry">
+              <div class="node-header"><span class="node-title">Parameters</span></div>
+              <table class="node-params">
+                {{range .SDMeta.ParsedParams}}
+                <tr><td class="node-param-name">{{.Key}}</td><td class="node-param-value">
+                  {{if isLongValue .Val}}<details class="long-value"><summary>{{truncate .Val 140}}…</summary><pre class="long-value-full">{{.Val}}</pre></details>{{else}}{{.Val}}{{end}}
+                </td></tr>
+                {{end}}
+              </table>
+            </div>
+            {{else if or .SDMeta.Model .SDMeta.Seed .SDMeta.Sampler .SDMeta.Steps .SDMeta.CFGScale}}
+            <div class="node-entry">
+              <div class="node-header"><span class="node-title">Parameters</span></div>
+              <table class="node-params">
+                {{if .SDMeta.Model}}<tr><td class="node-param-name">Model</td><td class="node-param-value">
+                  {{if isLongValue .SDMeta.Model}}<details class="long-value"><summary>{{truncate .SDMeta.Model 140}}…</summary><pre class="long-value-full">{{.SDMeta.Model}}</pre></details>{{else}}{{.SDMeta.Model}}{{end}}
+                </td></tr>{{end}}
+                {{if .SDMeta.Seed}}<tr><td class="node-param-name">Seed</td><td class="node-param-value">{{deref64 .SDMeta.Seed}}</td></tr>{{end}}
+                {{if .SDMeta.Sampler}}<tr><td class="node-param-name">Sampler</td><td class="node-param-value">{{.SDMeta.Sampler}}</td></tr>{{end}}
+                {{if .SDMeta.Steps}}<tr><td class="node-param-name">Steps</td><td class="node-param-value">{{deref .SDMeta.Steps}}</td></tr>{{end}}
+                {{if .SDMeta.CFGScale}}<tr><td class="node-param-name">CFG Scale</td><td class="node-param-value">{{printf "%.1f" (deref64f .SDMeta.CFGScale)}}</td></tr>{{end}}
+              </table>
+            </div>
+            {{end}}
+          </div>
+        </details>
+        {{end}}
+
+        {{if .GenericMeta}}
+        <details class="gen-details">
+          <summary>► Other metadata</summary>
+          <div class="node-list">
+            <div class="node-entry">
+              <table class="node-params">
+                {{range .GenericMeta}}
+                <tr><td class="node-param-name">{{.Key}}</td><td class="node-param-value">
+                  {{if isLongValue .Val}}<details class="long-value"><summary>{{truncate .Val 140}}…</summary><pre class="long-value-full">{{.Val}}</pre></details>{{else}}{{.Val}}{{end}}
+                </td></tr>
+                {{end}}
+              </table>
+            </div>
+          </div>
+        </details>
+        {{end}}
+
+        {{if .ComfyMeta}}
+        <details class="gen-details" open>
+          <summary>► Generation data (ComfyUI)</summary>
+          {{if .ComfyMeta.GenerationHash}}
+          <div class="node-list">
+            <div class="node-entry">
+              <div class="node-header"><span class="node-title">Generation hash</span>
+                <a class="gen-hash-link" href="/?q=generated:{{.ComfyMeta.GenerationHash}}" title="Find images with the same recipe">{{.ComfyMeta.GenerationHash}}</a>
+              </div>
+            </div>
+          </div>
+          {{end}}
+          {{if .ComfyNodes}}
+          <div class="node-list">
+            {{range .ComfyNodes}}
+            <div class="node-entry">
+              <div class="node-header"><span class="node-key">[{{.Key}}]</span> <span class="node-title">{{.Title}}</span>{{if ne .Title .ClassType}} <span class="node-class">{{.ClassType}}</span>{{end}}</div>
+              {{if .Params}}
+              <table class="node-params">
+                {{range .Params}}
+                <tr><td class="node-param-name">{{.Name}}</td><td class="node-param-value{{if .IsRef}} node-ref{{end}}">
+                  {{if isLongValue .Value}}<details class="long-value"><summary>{{truncate .Value 140}}…</summary><pre class="long-value-full">{{.Value}}</pre></details>{{else}}{{.Value}}{{end}}
+                </td></tr>
+                {{end}}
+              </table>
+              {{end}}
+            </div>
+            {{end}}
+          </div>
+          {{else}}
+          <p class="field-hint">No workflow nodes extracted.</p>
+          {{end}}
+        </details>
+        {{end}}
+
+        {{/* Alias paths section */}}
+        {{if gt (len .ImagePaths) 1}}
+        <div class="aliases-section">
+          <h3>Aliases</h3>
+          <table class="meta-table">
+            <tbody>
+              {{range .ImagePaths}}
+              <tr>
+                <td class="mono-small">{{.Path}}</td>
+                <td>
+                  {{if .IsCanonical}}
+                  <span class="badge-canonical">canonical</span>
+                  {{else}}
+                  <form method="POST" action="/images/{{$.Image.ID}}/canonical-path" style="display:inline">
+                    <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+                    <input type="hidden" name="path" value="{{.Path}}">
+                    <button type="submit" class="btn-sm">Set canonical</button>
+                  </form>
+                  <button class="btn-sm btn-danger"
+                          hx-delete="/images/{{$.Image.ID}}/aliases/{{.ID}}"
+                          hx-target="closest tr"
+                          hx-swap="outerHTML"
+                          hx-headers='{"X-CSRF-Token":"{{$.CSRFToken}}"}'>Remove</button>
+                  {{end}}
+                </td>
+              </tr>
+              {{end}}
+            </tbody>
+          </table>
+        </div>
+        {{end}}
+
+      </div>
+    </details>
+    <div hx-get="/images/{{.Image.ID}}/related" hx-trigger="load" hx-swap="outerHTML"></div>
+    </div>{{/* end detail-meta-col */}}
+  </div>
+</div>
+
+<script>
+// Clear autotag-result message once job finishes, but guarantee a minimum
+// display time so the "Auto-tagger started…" flash is always readable even
+// when the job finishes inside one poll interval.
+var _autotagFlashShownAt = 0;
+var _autotagMinVisibleMs = 3000;
+document.body.addEventListener('htmx:afterSettle', function(e) {
+  var el = e.detail ? e.detail.elt : null;
+  if (el && el.id === 'autotag-result' && el.innerHTML.trim() !== '') {
+    _autotagFlashShownAt = Date.now();
+    window._autotagFlashShownAt = _autotagFlashShownAt;
+    return;
+  }
+  if (!el || el.id !== 'job-status') return;
+  if (el.querySelector('.job-done') || (!el.querySelector('.job-running') && !el.querySelector('.job-done') && !el.querySelector('.job-error'))) {
+    var ar = document.getElementById('autotag-result');
+    if (!ar || ar.innerHTML.trim() === '') return;
+    var elapsed = Date.now() - _autotagFlashShownAt;
+    if (elapsed >= _autotagMinVisibleMs) {
+      ar.innerHTML = '';
+    } else {
+      setTimeout(function() {
+        var ar2 = document.getElementById('autotag-result');
+        if (ar2) ar2.innerHTML = '';
+      }, _autotagMinVisibleMs - elapsed);
+    }
+  }
+});
+</script>
+
+{{template "layout_end" .}}
+{{end}}

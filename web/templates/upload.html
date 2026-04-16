@@ -1,0 +1,130 @@
+{{define "upload.html"}}
+{{template "layout_head" .}}
+<div id="sidebar-inner"></div>
+{{template "layout_mid" .}}
+
+<div class="upload-page">
+  <h2>Upload Images</h2>
+  <p class="field-hint">Upload one or more image or video files to your gallery.</p>
+
+  <form id="upload-form"
+        hx-post="/upload"
+        hx-target="#upload-result"
+        hx-swap="innerHTML"
+        hx-encoding="multipart/form-data"
+        hx-on::after-request="if(event.target===this&&event.detail.successful){this.reset();document.getElementById('upload-file-list').innerHTML='';}">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+    <div class="field">
+      <label>Files</label>
+      <div id="upload-drop-zone" class="upload-drop-zone">
+        <span class="upload-drop-hint">Drop files here or use the button.</span>
+        <button type="button" id="upload-pick-btn" class="btn-sm">Choose files</button>
+        <input type="file" name="files" id="upload-file-input" multiple accept="{{.AcceptFileTypes}}" hidden>
+        <ul id="upload-file-list" class="upload-file-list"></ul>
+      </div>
+    </div>
+    <div class="field">
+      <label>Destination folder (optional)</label>
+      <input type="text" name="folder" id="upload-folder-input" class="upload-wide-input" placeholder="e.g. april/15 (blank = gallery root)" autocomplete="off">
+      <span class="field-hint">Missing folders and subfolders are created automatically.</span>
+    </div>
+    <div class="field">
+      <label>Add the following tags to these images (optional, space-separated)</label>
+      <div class="upload-tags-wrap">
+        <input type="text" name="tags" id="upload-tags-input" class="upload-wide-input" data-multi-tags="1" placeholder="e.g. character:hakurei_reimu" autocomplete="off"
+               hx-get="/internal/tags/suggest"
+               hx-trigger="input changed delay:200ms"
+               hx-target="#upload-tags-suggest"
+               hx-swap="innerHTML"
+               hx-vals='js:{tag: document.getElementById("upload-tags-input").value.split(/\s+/).pop()}'
+               onkeydown="handleSuggestKey(event, 'upload-tags-suggest', 'upload-tags-input')">
+        <div id="upload-tags-suggest" class="suggest-dropdown tag-suggest-dropdown"></div>
+      </div>
+    </div>
+    <div class="field">
+      <label>
+        <input type="checkbox" name="autotag" id="upload-autotag"{{if not .TaggerAvailable}} disabled{{end}}>
+        Auto-tag uploaded files after upload{{if not .TaggerAvailable}} <span class="field-hint">(auto-tagger unavailable)</span>{{end}}
+      </label>
+      {{if .EnabledTaggers}}
+      <select name="tagger_name" id="upload-tagger-picker" class="autotag-picker" hidden>
+        <option value="">All enabled taggers</option>
+        {{range .EnabledTaggers}}<option value="{{.Name}}">{{.Name}}</option>{{end}}
+      </select>
+      {{end}}
+    </div>
+    <div class="upload-actions">
+      <button type="submit" id="upload-submit-btn">Upload</button>
+      <button type="reset" id="upload-reset-btn">Reset form</button>
+    </div>
+  </form>
+
+  <div id="upload-result" style="margin-top:16px"></div>
+</div>
+
+<script>
+// Defer setup until DOMContentLoaded so deferred scripts (main.js) have
+// finished loading and helpers like initSuggestDismiss are defined.
+document.addEventListener('DOMContentLoaded', function() {
+  var dz = document.getElementById('upload-drop-zone');
+  var input = document.getElementById('upload-file-input');
+  var list = document.getElementById('upload-file-list');
+  var pickBtn = document.getElementById('upload-pick-btn');
+  if (!dz || !input || !list) return;
+
+  function renderList() {
+    list.innerHTML = '';
+    var files = input.files;
+    for (var i = 0; i < files.length; i++) {
+      var li = document.createElement('li');
+      li.textContent = files[i].name + ' (' + Math.round(files[i].size / 1024) + ' KiB)';
+      list.appendChild(li);
+    }
+  }
+
+  input.addEventListener('change', renderList);
+  if (pickBtn) {
+    pickBtn.addEventListener('click', function(e) { e.preventDefault(); input.click(); });
+  }
+
+  ['dragenter', 'dragover'].forEach(function(ev) {
+    dz.addEventListener(ev, function(e) { e.preventDefault(); dz.classList.add('drag-over'); });
+  });
+  ['dragleave', 'drop'].forEach(function(ev) {
+    dz.addEventListener(ev, function(e) { e.preventDefault(); dz.classList.remove('drag-over'); });
+  });
+
+  dz.addEventListener('drop', function(e) {
+    if (!e.dataTransfer || !e.dataTransfer.files) return;
+    var dt = new DataTransfer();
+    for (var i = 0; i < e.dataTransfer.files.length; i++) dt.items.add(e.dataTransfer.files[i]);
+    input.files = dt.files;
+    renderList();
+  });
+
+  var form = document.getElementById('upload-form');
+  if (form) {
+    form.addEventListener('reset', function() {
+      list.innerHTML = '';
+      var dd = document.getElementById('upload-tags-suggest');
+      if (dd) dd.innerHTML = '';
+    });
+  }
+
+  // Close the tag suggest dropdown when clicking outside.
+  initSuggestDismiss('upload-tags-suggest', 'upload-tags-input');
+
+  // Reveal the tagger picker only when the user opts into auto-tagging.
+  var autotagBox = document.getElementById('upload-autotag');
+  var picker = document.getElementById('upload-tagger-picker');
+  if (autotagBox && picker) {
+    var sync = function() { picker.hidden = !autotagBox.checked; };
+    autotagBox.addEventListener('change', sync);
+    if (form) form.addEventListener('reset', function() { setTimeout(sync, 0); });
+    sync();
+  }
+});
+</script>
+
+{{template "layout_end" .}}
+{{end}}

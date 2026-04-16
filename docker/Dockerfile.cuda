@@ -1,0 +1,50 @@
+# GPU variant — uses the CUDA-enabled ONNX Runtime build on an NVIDIA CUDA 12
+# + cuDNN 9 runtime base so the tagger can load the CUDA execution provider.
+# The image is ~3-4 GB (vs ~250 MB for docker/Dockerfile); prefer the default
+# Dockerfile unless you plan to enable tagger.use_cuda. The same binary still
+# runs on CPU when use_cuda=false, so this image works for both cases.
+
+# Stage 1: Build
+FROM golang:1.25-bookworm AS builder
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN VERSION=$(cat VERSION.md 2>/dev/null | tr -d '[:space:]') && \
+    CGO_ENABLED=1 go build -tags tagger \
+    -ldflags="-s -w -X 'github.com/leqwin/monbooru/internal/web.Version=${VERSION}' -X 'github.com/leqwin/monbooru/internal/web.Variant=cuda'" \
+    -o /monbooru ./cmd/monbooru
+
+# Stage 2: Runtime — NVIDIA CUDA 12 + cuDNN 9 runtime (x86_64 only; NVIDIA does
+# not publish a general-purpose arm64 base for this image).
+FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu22.04
+
+# The CUDA runtime image installs the cuda-compat-* package, which pre-creates
+# libcuda.so and its SONAME symlinks under /usr/local/cuda/compat/. When
+# AddDevice=nvidia.com/gpu=all (CDI) is passed, the NVIDIA create-symlinks and
+# enable-cuda-compat hooks try to write those same symlinks and crun aborts
+# with "read status from sync socket: File exists" before the entrypoint runs.
+# The host driver provides libcuda.so via CDI at runtime, so the compat shim
+# is not needed here.
+RUN apt-get update && apt-get remove -y --purge 'cuda-compat-*' && \
+    rm -rf /usr/local/cuda/compat /var/lib/apt/lists/*
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# CUDA-enabled ONNX Runtime: pulls libonnxruntime.so plus the CUDA provider
+# shared libs. onnxruntime_go requests ORT API v21 (ORT 1.21.x).
+ARG ORT_VERSION=1.21.0
+RUN curl -fsSL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-gpu-${ORT_VERSION}.tgz" \
+      | tar -xz -C /tmp && \
+    cp /tmp/onnxruntime-linux-x64-gpu-${ORT_VERSION}/lib/libonnxruntime*.so* /usr/lib/ && \
+    ln -sf /usr/lib/libonnxruntime.so.${ORT_VERSION} /usr/lib/libonnxruntime.so && \
+    ldconfig && \
+    rm -rf /tmp/onnxruntime-*
+
+COPY --from=builder /monbooru /usr/local/bin/monbooru
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/monbooru", "-config", "/config/monbooru.toml"]

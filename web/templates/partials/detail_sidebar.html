@@ -1,0 +1,21 @@
+{{define "partials/detail_sidebar.html"}}
+  {{if .ImageTags}}
+  <div class="detail-tag-groups">
+    {{range groupByImageTags .ImageTags}}
+    <div class="tag-group">
+      <div class="tag-category-label" style="color:{{.Color}}">{{.Name}}</div>
+      <ul class="tag-list-sidebar">
+        {{range .Tags}}
+        <li class="tag-entry {{if .IsAuto}}tag-auto-entry{{end}}" data-name="{{.TagName}}">
+          {{if .IsAuto}}<span class="auto-dot" title="auto-tagged">·</span>{{else}}<span class="auto-dot-spacer"></span>{{end}}
+          <a href="/?q={{.TagName}}" class="tag-link" style="color:{{.Color}}">{{.TagName}}</a>
+          <span class="tag-count">{{.UsageCount}}</span>
+        </li>
+        {{end}}
+      </ul>
+    </div>
+    {{end}}
+  </div>
+  {{end}}
+
+{{end}}

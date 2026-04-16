@@ -1,0 +1,210 @@
+{{define "gallery.html"}}
+{{template "layout_head" .}}
+{{template "partials/tag_sidebar.html" .}}
+{{template "layout_mid" .}}
+
+<div id="gallery-header">
+  <form id="search-form" hx-get="/" hx-target="#gallery-grid" hx-push-url="true" hx-swap="innerHTML">
+    <div style="position:relative;flex:1;min-width:0;">
+      <input type="text" name="q" id="search-input" value="{{.Query}}" placeholder="Search tags…" autocomplete="off"
+             hx-get="/internal/search/suggest"
+             hx-trigger="input changed delay:200ms"
+             hx-target="#search-suggest"
+             hx-swap="innerHTML"
+             hx-include="this"
+             onkeydown="handleSuggestKey(event, 'search-suggest', 'search-input')">
+      <div id="search-suggest" class="suggest-dropdown search-suggest-dropdown"></div>
+    </div>
+    <select name="sort" id="search-sort">
+      <option value="newest"   {{if eq .Sort "newest"}}selected{{end}}>Newest</option>
+      <option value="filesize" {{if eq .Sort "filesize"}}selected{{end}}>File size</option>
+    </select>
+    <select name="order">
+      <option value="desc" {{if eq .Order "desc"}}selected{{end}}>↓</option>
+      <option value="asc"  {{if eq .Order "asc"}}selected{{end}}>↑</option>
+    </select>
+    {{if .RandomSeed}}<input type="hidden" name="seed" value="{{.RandomSeed}}">{{end}}
+    <button type="submit">Search</button>
+    <button type="button" id="fav-filter-btn" class="{{if eq .Query "fav:true"}}active{{end}}"
+            onclick="toggleFavFilter()" title="Show favorites">★</button>
+    <button type="button" id="random-sort-btn" class="{{if eq .Sort "random"}}active{{end}}"
+            onclick="applyRandomSort()" title="{{if eq .Sort "random"}}Re-shuffle{{else}}Random order{{end}}">⇄</button>
+    <span id="result-count" class="result-count">{{.Result.Total}} images</span>
+  </form>
+  <div id="save-search-area">
+    <button id="save-search-btn" type="button" onclick="document.getElementById('save-search-dialog').showModal()">Save search</button>
+    <button id="delete-search-btn" type="button" class="btn-danger" onclick="openDeleteSearchDialog()" title="Delete all images in current search">Delete all</button>
+  </div>
+</div>
+
+<div id="batch-bar" class="batch-bar hidden">
+  <button onclick="selectAll()">Select all</button>
+  <span id="batch-count">0 selected</span>
+  <form id="batch-delete-form">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+    <button type="button" class="btn-danger" onclick="batchDeleteSelected()">Delete selected</button>
+  </form>
+  <button onclick="clearSelection()">Cancel</button>
+</div>
+
+<div id="gallery-grid">
+{{template "partials/thumbnail_grid.html" .}}
+</div>
+
+<!-- Save search dialog -->
+<dialog id="save-search-dialog">
+  <form hx-post="/search/saved"
+        hx-target="#save-search-result"
+        hx-swap="innerHTML">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+    <input type="hidden" name="query" id="save-search-query" value="{{.Query}}">
+    <p>Save search: <code id="save-search-preview">{{.Query}}</code></p>
+    <div class="field">
+      <label>Name</label>
+      <input type="text" name="name" id="save-search-name" placeholder="My search" required
+             onkeydown="if(event.key==='Enter'){event.preventDefault();this.closest('form').requestSubmit();}">
+    </div>
+    <div id="save-search-result"></div>
+    <div class="dialog-actions">
+      <button type="submit">Save</button>
+      <button type="button" onclick="document.getElementById('save-search-dialog').close()">Cancel</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- Delete search dialog -->
+<dialog id="delete-search-dialog">
+  <p>Delete <strong id="delete-search-count-display">{{.Result.Total}}</strong> images in current search?</p>
+  <p style="color:var(--error);font-size:12px">Files are permanently deleted from disk. This cannot be undone.</p>
+  <div id="delete-search-flash"></div>
+  <div class="dialog-actions">
+    <button type="button" class="btn-danger" onclick="confirmDeleteSearch()">Delete</button>
+    <button type="button" onclick="document.getElementById('delete-search-dialog').close()">Cancel</button>
+  </div>
+</dialog>
+
+<!-- Delete selected dialog -->
+<dialog id="delete-selected-dialog">
+  <p>Delete <strong id="delete-selected-count">0</strong> selected image(s)?</p>
+  <p style="color:var(--error);font-size:12px">Files are permanently deleted from disk. This cannot be undone.</p>
+  <div id="delete-selected-flash"></div>
+  <div class="dialog-actions">
+    <button type="button" class="btn-danger" onclick="confirmDeleteSelected()">Delete</button>
+    <button type="button" onclick="document.getElementById('delete-selected-dialog').close()">Cancel</button>
+  </div>
+</dialog>
+
+<script>
+function openDeleteSearchDialog() {
+  // Sync count from the result-count span (reflects current search results)
+  var rcEl = document.querySelector('.result-count');
+  if (rcEl) {
+    var m = rcEl.textContent.match(/(\d+)/);
+    if (m) {
+      var cd = document.getElementById('delete-search-count-display');
+      if (cd) cd.textContent = m[1];
+    }
+  }
+  document.getElementById('delete-search-dialog').showModal();
+}
+
+function confirmDeleteSelected() {
+  var form = document.getElementById('batch-delete-form');
+  if (!form) return;
+  var checked = document.querySelectorAll('.thumb-checkbox:checked');
+  if (checked.length === 0) return;
+  var csrfEl = form.querySelector('[name="_csrf"]');
+  var csrf = csrfEl ? csrfEl.value : '';
+  var ids = Array.from(checked).map(function(cb) { return cb.value; });
+  var body = '_csrf=' + encodeURIComponent(csrf)
+    + '&' + ids.map(function(id) { return 'ids=' + encodeURIComponent(id); }).join('&');
+  var flash = document.getElementById('delete-selected-flash');
+  if (flash) flash.innerHTML = '';
+  fetch('/internal/batch-delete', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRF-Token': csrf},
+    body: body
+  }).then(function(res) {
+    if (res.ok) {
+      document.getElementById('delete-selected-dialog').close();
+      clearSelection();
+      _pendingGalleryReload = true;
+      refreshJobStatus();
+    } else {
+      res.text().then(function(t) {
+        if (flash) flash.innerHTML = t || '<div class="flash flash-err">Delete failed.</div>';
+      });
+    }
+  }).catch(function() {
+    if (flash) flash.innerHTML = '<div class="flash flash-err">Delete request failed.</div>';
+  });
+}
+
+function confirmDeleteSearch() {
+  var flash = document.getElementById('delete-search-flash');
+  if (flash) flash.innerHTML = '';
+  var si = document.getElementById('search-input');
+  var q = si ? si.value : '';
+  var sortEl = document.getElementById('search-sort');
+  var sort = sortEl ? sortEl.value : 'newest';
+  var orderEl = document.querySelector('#search-form select[name="order"]');
+  var order = orderEl ? orderEl.value : 'desc';
+  var csrfEl = document.querySelector('input[name="_csrf"]');
+  var csrf = csrfEl ? csrfEl.value : '';
+  var body = '_csrf=' + encodeURIComponent(csrf) +
+    '&q=' + encodeURIComponent(q) +
+    '&sort=' + encodeURIComponent(sort) +
+    '&order=' + encodeURIComponent(order);
+  fetch('/internal/delete-search', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRF-Token': csrf},
+    body: body
+  }).then(function(res) {
+    if (res.ok) {
+      document.getElementById('delete-search-dialog').close();
+      _pendingGalleryReload = true;
+      refreshJobStatus();
+    } else {
+      res.text().then(function(t) {
+        if (flash) flash.innerHTML = t || '<div class="flash flash-err">Delete failed.</div>';
+      });
+    }
+  }).catch(function() {
+    if (flash) flash.innerHTML = '<div class="flash flash-err">Delete request failed.</div>';
+  });
+}
+
+function toggleFavFilter() {
+  var si = document.getElementById('search-input');
+  if (!si) return;
+  if (si.value.trim() === 'fav:true') {
+    si.value = '';
+  } else {
+    si.value = 'fav:true';
+  }
+  document.getElementById('search-form').dispatchEvent(new Event('submit', {bubbles:true}));
+}
+
+function applyRandomSort() {
+  var si = document.getElementById('search-input');
+  var q = si ? si.value : '';
+  var seed = Math.floor(Math.random() * 2147483647) + 1;
+  window.location.href = '/?q=' + encodeURIComponent(q) + '&sort=random&seed=' + seed;
+}
+
+// Close save-search dialog after success and reload so sidebar updates
+document.addEventListener('htmx:afterSettle', function(e) {
+  var el = e.detail.elt;
+  if (!el || el.id !== 'save-search-result') return;
+  var ok = el.querySelector('.flash-ok');
+  if (ok) {
+    setTimeout(function() {
+      document.getElementById('save-search-dialog').close();
+      window.location.reload();
+    }, 600);
+  }
+});
+</script>
+
+{{template "layout_end" .}}
+{{end}}

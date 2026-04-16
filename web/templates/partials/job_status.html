@@ -1,0 +1,25 @@
+{{define "partials/job_status.html"}}
+<div id="job-status"
+     hx-get="/internal/job/status"
+     hx-trigger="every 2s"
+     hx-swap="outerHTML"
+     {{if and . .Running}}class="job-running"{{end}}
+     {{if and . .FinishedAt}}data-finished-at="{{.FinishedAt.UnixNano}}"{{end}}>
+  {{if and . .Running}}
+    <span class="job-type">{{.JobType}}</span>
+    {{if gt .Total 0}}
+      <span class="job-progress">{{.Processed}}/{{.Total}}</span>
+    {{end}}
+    <span class="job-msg">{{.Message}}</span>
+    {{if eq .JobType "autotag"}}
+    <button class="job-dismiss" onclick="cancelJobStatus()" title="Stop auto-tagging">×</button>
+    {{end}}
+  {{else if and . .Summary}}
+    <span class="job-done" id="job-done-msg">✓ {{.Summary}}</span>
+    <button class="job-dismiss" onclick="dismissJobStatus()" title="Dismiss">×</button>
+  {{else if and . .Error}}
+    <span class="job-error" id="job-error-msg">✗ {{.Error}}</span>
+    <button class="job-dismiss" onclick="dismissJobStatus()" title="Dismiss">×</button>
+  {{end}}
+</div>
+{{end}}

@@ -1,0 +1,236 @@
+{{define "tags.html"}}
+{{template "layout_head" .}}
+<div id="sidebar-inner">
+  <div class="sidebar-section">
+    <h3>Filter</h3>
+    <form hx-get="/tags" hx-target="body" hx-push-url="true">
+      <input type="text" name="q" value="{{.Prefix}}" placeholder="Search tags…">
+      <select name="sort">
+        <option value="usage" {{if eq (.Sort) "usage"}}selected{{end}}>By usage</option>
+        <option value="name"  {{if eq (.Sort) "name"}}selected{{end}}>By name</option>
+      </select>
+      <select name="cat">
+        <option value="">All categories</option>
+        {{range .Categories}}
+        <option value="{{.ID}}" {{if eq (printf "%d" .ID) $.CategoryID}}selected{{end}}>{{.Name}}</option>
+        {{end}}
+      </select>
+      <select name="origin">
+        <option value=""     {{if eq (.Origin) ""}}selected{{end}}>All origins</option>
+        <option value="user" {{if eq (.Origin) "user"}}selected{{end}}>User</option>
+        <option value="auto" {{if eq (.Origin) "auto"}}selected{{end}}>Auto</option>
+      </select>
+      <button type="submit">Filter</button>
+    </form>
+  </div>
+</div>
+{{template "layout_mid" .}}
+
+<div id="tags-page">
+  <h2>Tags <span class="count-badge">{{.Total}}</span></h2>
+
+  <div id="tag-flash"></div>
+
+  <table class="tag-table">
+    <thead>
+      <tr><th>ID</th><th>Name</th><th>Category</th><th>Usage</th><th>Origin</th><th>Action</th></tr>
+    </thead>
+    <tbody>
+      {{$csrf := .CSRFToken}}
+      {{$cats := .Categories}}
+      {{range .Tags}}
+      {{$tag := .}}
+      <tr class="tag-row" id="tag-row-{{.ID}}">
+        <td class="tag-id">{{.ID}}</td>
+        <td class="tag-name-cell">
+          <a href="/?q={{.Name}}" style="color:{{.CategoryColor}}">{{.Name}}</a>
+          {{if .IsAlias}}<span class="alias-badge">alias</span>{{end}}
+        </td>
+        <td>
+          <select class="cat-select"
+                  name="category_id"
+                  hx-patch="/tags/{{.ID}}/category"
+                  hx-trigger="change"
+                  hx-target="#tag-flash"
+                  hx-swap="innerHTML"
+                  hx-headers='{"X-CSRF-Token":"{{$csrf}}"}'
+                  hx-on::after-request="if(event.detail.successful){updateTagColor(this);setTimeout(function(){window.location.reload()},400)}"
+                  onchange="updateTagColor(this)">
+            {{range $cats}}
+            <option value="{{.ID}}" data-color="{{.Color}}" {{if eq .ID $tag.CategoryID}}selected{{end}}>{{.Name}}</option>
+            {{end}}
+          </select>
+        </td>
+        <td>{{.UsageCount}}</td>
+        <td>{{if .IsAutoOnly}}<span class="auto-badge">auto</span>{{else}}user{{end}}</td>
+        <td>
+          <div class="tag-actions">
+            <button class="btn-sm btn-rename-trigger"
+                    title="Rename this tag"
+                    data-id="{{.ID}}" data-name="{{.Name}}">Rename</button>
+            <button class="btn-sm btn-merge-trigger"
+                    title="Merge this tag into another"
+                    data-id="{{.ID}}" data-name="{{.Name}}">Merge→</button>
+            <button class="btn-sm btn-danger btn-delete-tag"
+                    title="Delete this tag from every image"
+                    data-id="{{.ID}}" data-name="{{.Name}}">Delete</button>
+          </div>
+        </td>
+      </tr>
+      {{else}}
+      <tr><td colspan="6" class="no-results">No tags found.</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+
+  {{$page := .Page}}
+  {{$total := .TotalPages}}
+  {{if gt $total 1}}
+  <div class="pagination">
+    {{if and (gt $page 2) (gt $total 2)}}
+    <a href="/tags?q={{.Prefix}}&sort={{.Sort}}&cat={{.CategoryID}}&origin={{.Origin}}&page=1">« First</a>
+    {{end}}
+    {{if gt $page 1}}
+    <a href="/tags?q={{.Prefix}}&sort={{.Sort}}&cat={{.CategoryID}}&origin={{.Origin}}&page={{sub $page 1}}">← Prev</a>
+    {{end}}
+    <button type="button" class="page-jump current" data-current="{{$page}}" data-total="{{$total}}" title="Go to page…">Page {{$page}} / {{$total}}</button>
+    {{if lt $page $total}}
+    <a href="/tags?q={{.Prefix}}&sort={{.Sort}}&cat={{.CategoryID}}&origin={{.Origin}}&page={{add $page 1}}">Next →</a>
+    {{end}}
+    {{if and (lt $page $total) (gt $total 2)}}
+    <a href="/tags?q={{.Prefix}}&sort={{.Sort}}&cat={{.CategoryID}}&origin={{.Origin}}&page={{$total}}">Last »</a>
+    {{end}}
+  </div>
+  {{end}}
+
+</div>
+
+<!-- Rename dialog -->
+<dialog id="rename-dialog">
+  <form id="rename-form"
+        hx-post=""
+        hx-target="#tag-flash"
+        hx-swap="innerHTML"
+        hx-on::after-request="if(event.detail.successful){window.location.reload()}">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+    <p>Rename <strong id="rename-src-name"></strong></p>
+    <div class="field">
+      <label>New name</label>
+      <input type="text" name="name" id="rename-new-name" required autocomplete="off">
+    </div>
+    <div class="dialog-actions">
+      <button type="submit">Rename</button>
+      <button type="button" onclick="document.getElementById('rename-dialog').close()">Cancel</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- Merge dialog -->
+<dialog id="merge-dialog">
+  <form hx-post="/tags/merge"
+        hx-target="#merge-error"
+        hx-swap="innerHTML"
+        hx-on::after-request="handleMergeResult(event)">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+    <p>Merge <strong id="merge-src-name"></strong> <span class="merge-arrow">→</span> into:</p>
+    <input type="hidden" name="alias_id" id="merge-alias-id">
+    <div class="field">
+      <label>Target tag name or ID</label>
+      <div style="position:relative">
+        <input type="text" name="canonical_id" id="merge-canon-input"
+               placeholder="tag name or ID" required autocomplete="off"
+               hx-get="/internal/tags/suggest"
+               hx-trigger="input changed delay:200ms"
+               hx-target="#merge-suggest"
+               hx-swap="innerHTML"
+               hx-include="this"
+               onkeydown="handleSuggestKey(event, 'merge-suggest', 'merge-canon-input')">
+        <div id="merge-suggest" class="suggest-dropdown"></div>
+      </div>
+    </div>
+    <div id="merge-error"></div>
+    <div class="dialog-actions">
+      <button type="submit" class="btn-danger">Merge</button>
+      <button type="button" onclick="document.getElementById('merge-dialog').close()">Cancel</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+document.querySelectorAll('.btn-rename-trigger').forEach(function(btn) {
+  btn.addEventListener('click', function() {
+    var id = this.dataset.id;
+    var name = this.dataset.name;
+    var form = document.getElementById('rename-form');
+    form.setAttribute('hx-post', '/tags/' + id + '/rename');
+    if (window.htmx) window.htmx.process(form);
+    document.getElementById('rename-src-name').textContent = name;
+    var input = document.getElementById('rename-new-name');
+    input.value = name;
+    document.getElementById('rename-dialog').showModal();
+    input.focus();
+    input.select();
+  });
+});
+
+document.querySelectorAll('.btn-delete-tag').forEach(function(btn) {
+  btn.addEventListener('click', function() {
+    var id = this.dataset.id;
+    var name = this.dataset.name;
+    showConfirm('Delete tag "' + name + '" and remove it from every image?', function() {
+      var csrf = getCSRFToken();
+      fetch('/tags/' + id, {
+        method: 'DELETE',
+        headers: {'X-CSRF-Token': csrf}
+      }).then(function(r) {
+        if (r.ok) {
+          window.location.reload();
+        } else {
+          r.text().then(function(t) {
+            var el = document.getElementById('tag-flash');
+            if (el) el.innerHTML = '<div class="flash flash-err">' + (t || 'Delete failed.') + '</div>';
+          });
+        }
+      });
+    }, 'This cannot be undone.');
+  });
+});
+
+document.querySelectorAll('.btn-merge-trigger').forEach(function(btn) {
+  btn.addEventListener('click', function() {
+    var id = this.dataset.id;
+    var name = this.dataset.name;
+    document.getElementById('merge-src-name').textContent = name;
+    document.getElementById('merge-alias-id').value = id;
+    document.getElementById('merge-canon-input').value = '';
+    document.getElementById('merge-error').innerHTML = '';
+    var ms = document.getElementById('merge-suggest');
+    if (ms) ms.innerHTML = '';
+    document.getElementById('merge-dialog').showModal();
+  });
+});
+
+function handleMergeResult(event) {
+  // Only close/reload on success (no flash-err in the response)
+  var elt = event.detail.elt;
+  if (elt && elt.querySelector && elt.querySelector('.flash-err')) return;
+  if (event.detail.xhr.status === 204 || event.detail.xhr.status === 302) {
+    document.getElementById('merge-dialog').close();
+    window.location.reload();
+  }
+}
+
+function updateTagColor(sel) {
+  var opt = sel.options[sel.selectedIndex];
+  var color = opt ? opt.dataset.color : '';
+  var row = sel.closest('tr');
+  if (row && color) {
+    var link = row.querySelector('.tag-name-cell a');
+    if (link) link.style.color = color;
+  }
+}
+
+</script>
+
+{{template "layout_end" .}}
+{{end}}

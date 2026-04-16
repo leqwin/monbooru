@@ -1,0 +1,43 @@
+{{define "partials/tag_list.html"}}
+<div id="image-tags" data-image-id="{{.ImageID}}">
+  {{if .ErrMsg}}<div class="flash flash-err" style="margin-bottom:4px">{{.ErrMsg}}</div>{{end}}
+  {{$groups := groupByImageSource .ImageTags}}
+  {{if $groups}}
+    {{range $groups}}
+    <div class="tag-source-group" data-source="{{.Source}}">
+      <h4 class="tag-source-title">{{.Title}}</h4>
+      <ul class="tag-list" data-source="{{.Source}}">
+        {{range .Tags}}
+        <li class="tag-item" data-tag-id="{{.TagID}}" data-source="{{if .IsAuto}}auto{{else}}user{{end}}">
+          <a href="/?q={{.TagName}}" class="tag-chip-name" style="color:{{.Color}}">{{.TagName}}</a>
+          {{if .IsAuto}}<span class="auto-badge" title="auto-tagged">auto</span>{{end}}
+          <button class="tag-remove-btn"
+                  hx-delete="/images/{{$.ImageID}}/tags/{{.TagID}}"
+                  hx-target="#image-tags"
+                  hx-swap="outerHTML"
+                  hx-headers='{"X-CSRF-Token":"{{$.CSRFToken}}"}'
+                  title="Remove tag">×</button>
+        </li>
+        {{end}}
+      </ul>
+    </div>
+    {{end}}
+  {{else}}
+  <ul class="tag-list"><li class="no-tags">No tags yet.</li></ul>
+  {{end}}
+  <hr class="tag-list-divider" hidden>
+  <h4 class="tag-list-added-title" hidden>Just added</h4>
+  <ul class="tag-list tag-list-added"></ul>
+</div>
+{{if .ClearInput}}<script>
+(function(){var i=document.getElementById('tag-input');if(i){i.value='';var d=document.getElementById('tag-suggest-dropdown');if(d)d.innerHTML='';}})();
+</script>{{end}}
+{{if .SidebarTags}}
+<div id="sidebar-inner" class="detail-sidebar-inner" hx-swap-oob="true">
+  {{template "partials/detail_sidebar.html" .}}
+</div>
+{{end}}
+{{if .DangerZone}}
+{{template "partials/detail_danger_zone.html" (dict "ImageID" .ImageID "ImageTags" .ImageTags "HasUserTags" .HasUserTags "ImageTaggers" .ImageTaggers "CSRFToken" .CSRFToken "BackQuery" .BackQuery "BackSort" .BackSort "BackOrder" .BackOrder "BackPage" .BackPage "BackSeed" .BackSeed "OOB" true)}}
+{{end}}
+{{end}}
