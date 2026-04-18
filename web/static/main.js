@@ -378,11 +378,12 @@ function initSectionToggle(toggleId, listId, cookieKey, forceOpen) {
 function initFolderTree() {
   var expanded = getFolderCookie();
 
-  // Determine current folder from URL query
+  // Determine current folder from URL query. Both folder:PATH (recursive)
+  // and folderonly:PATH (exact) drive the same sidebar auto-expand path.
   var currentFolder = '';
   var urlParams = new URLSearchParams(window.location.search);
   var q = urlParams.get('q') || '';
-  var folderMatch = q.match(/(?:^|\s)folder:"([^"]+)"|(?:^|\s)folder:([^\s]*)/);
+  var folderMatch = q.match(/(?:^|\s)folder(?:only)?:(?:"([^"]+)"|([^\s]*))/);
   if (folderMatch) {
     currentFolder = folderMatch[1] || folderMatch[2];
   }
@@ -477,6 +478,25 @@ function applyTagSuggest(btn) {
   if (form && form.id === 'add-tag-form') {
     form.requestSubmit();
   }
+}
+
+// ---------------------------------------------------------------------------
+// Folder suggest: apply selected folder path to the input that opened the dropdown.
+// Used by the move-image and move-selected dialogs. Keeps focus on the input so
+// the user can keep typing; the dialog's submit button finishes the move.
+// ---------------------------------------------------------------------------
+function applyFolderSuggest(btn) {
+  var folder = btn.dataset.folderPath;
+  if (folder == null) return;
+  var dd = btn.closest('.suggest-dropdown');
+  if (!dd) return;
+  var container = dd.parentElement;
+  if (!container) return;
+  var input = container.querySelector('input[type="text"]');
+  if (!input) return;
+  dd.innerHTML = '';
+  input.value = folder;
+  input.focus();
 }
 
 // ---------------------------------------------------------------------------
@@ -746,6 +766,8 @@ function initSuggestDismiss(dropdownId, inputId) {
 initSuggestDismiss('search-suggest', 'search-input');
 initSuggestDismiss('tag-suggest-dropdown', 'tag-input');
 initSuggestDismiss('merge-suggest', 'merge-canon-input');
+initSuggestDismiss('move-selected-suggest', 'move-selected-folder');
+initSuggestDismiss('move-image-suggest', 'move-image-folder');
 
 // ---------------------------------------------------------------------------
 // Detail page: separate tags added during the current session from the rest.

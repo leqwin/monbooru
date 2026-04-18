@@ -2783,6 +2783,176 @@ func (s *Server) runBulkDelete(targets []search.DeleteTarget) {
 	s.jobs.Complete(fmt.Sprintf("Deleted %d image(s).", processed))
 }
 
+// batchMove kicks off a background `move` job that relocates the selected
+// image IDs into the requested folder. Collisions on filename auto-suffix via
+// UniqueDestPath. The watcher suppresses its events while this job runs so
+// the Rename pairs don't flap the images as missing in transit.
+func (s *Server) batchMove(w http.ResponseWriter, r *http.Request) {
+	if !parseFormOK(w, r) {
+		return
+	}
+	idStrs := r.Form["ids"]
+	targetFolder := strings.TrimSpace(r.FormValue("folder"))
+
+	// Validate the folder once up-front so the user sees the error inline
+	// rather than as a per-image log entry once the job starts.
+	if _, err := gallery.ResolveSubdir(s.galleryPath(), targetFolder); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`<div class="flash flash-err">` + html.EscapeString(err.Error()) + `</div>`))
+		return
+	}
+
+	var ids []int64
+	for _, idStr := range idStrs {
+		id, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil {
+			continue
+		}
+		ids = append(ids, id)
+	}
+
+	if len(ids) == 0 {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+
+	if err := s.jobs.Start("move"); err != nil {
+		w.WriteHeader(http.StatusConflict)
+		w.Write([]byte(`<div class="flash flash-err">A job is already running.</div>`))
+		return
+	}
+	go s.runBatchMove(ids, targetFolder)
+	w.WriteHeader(http.StatusAccepted)
+}
+
+// runBatchMove processes move targets one image at a time. Each MoveImage has
+// its own small write txn + Rename; per-image failures are logged and counted
+// but don't stop the run so a single unreadable file can't strand the rest.
+// Empty source folders are cleaned up at the end, matching single-image move.
+func (s *Server) runBatchMove(ids []int64, targetFolder string) {
+	ctx := s.jobs.Context()
+	total := len(ids)
+	moved, failed := 0, 0
+	cancelled := false
+	oldFolders := map[string]struct{}{}
+
+	s.jobs.Update(0, total, fmt.Sprintf("moving 0/%d…", total))
+
+	for i, id := range ids {
+		if ctx.Err() != nil {
+			cancelled = true
+			break
+		}
+		res, err := gallery.MoveImage(s.db(), s.galleryPath(), id, targetFolder)
+		if err != nil {
+			logx.Warnf("batch move %d: %v", id, err)
+			failed++
+			continue
+		}
+		if res.OldFolderPath != res.NewFolderPath && res.OldFolderPath != "" {
+			oldFolders[res.OldFolderPath] = struct{}{}
+		}
+		moved++
+		if (i+1)%25 == 0 || i == total-1 {
+			s.jobs.Update(i+1, total, fmt.Sprintf("moving %d/%d…", i+1, total))
+		}
+	}
+
+	for fp := range oldFolders {
+		gallery.DeleteEmptyFolderIfEmpty(s.galleryPath(), fp)
+	}
+
+	if moved > 0 {
+		s.Active().InvalidateCaches()
+	}
+	if cancelled {
+		s.jobs.Complete(fmt.Sprintf("move cancelled (%d/%d moved)", moved, total))
+		return
+	}
+	summary := fmt.Sprintf("Moved %d image(s).", moved)
+	if failed > 0 {
+		summary = fmt.Sprintf("Moved %d image(s), %d failed.", moved, failed)
+	}
+	s.jobs.Complete(summary)
+}
+
+// moveImage relocates the one image at {id} into the requested folder. A `move`
+// job is used even for single-image moves to reuse the watcher suppression
+// pattern from batch moves; the job is brief and auto-dismisses like any other.
+func (s *Server) moveImage(w http.ResponseWriter, r *http.Request) {
+	if !parseFormOK(w, r) {
+		return
+	}
+	idStr := r.PathValue("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		http.Error(w, "bad id", http.StatusBadRequest)
+		return
+	}
+	targetFolder := strings.TrimSpace(r.FormValue("folder"))
+
+	if err := s.jobs.Start("move"); err != nil {
+		w.WriteHeader(http.StatusConflict)
+		w.Write([]byte(`<div class="flash flash-err">A job is already running.</div>`))
+		return
+	}
+
+	res, moveErr := gallery.MoveImage(s.db(), s.galleryPath(), id, targetFolder)
+	if moveErr != nil {
+		s.jobs.Fail(moveErr.Error())
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`<div class="flash flash-err">` + html.EscapeString(moveErr.Error()) + `</div>`))
+		return
+	}
+	if res.OldFolderPath != res.NewFolderPath && res.OldFolderPath != "" {
+		gallery.DeleteEmptyFolderIfEmpty(s.galleryPath(), res.OldFolderPath)
+	}
+	s.Active().InvalidateCaches()
+	s.jobs.Complete("Moved image.")
+
+	if isHTMXRequest(r) {
+		w.Header().Set("HX-Redirect", "/images/"+idStr)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	http.Redirect(w, r, "/images/"+idStr, http.StatusSeeOther)
+}
+
+// foldersSuggest returns up to 10 existing folder paths whose name or leading
+// segments match the typed prefix. Drives the autocomplete dropdown on the
+// move dialogs. Root (” folder_path) is excluded from suggestions because it
+// maps to an empty input anyway.
+func (s *Server) foldersSuggest(w http.ResponseWriter, r *http.Request) {
+	prefix := strings.TrimSpace(r.URL.Query().Get("prefix"))
+	rows, err := s.db().Read.Query(
+		`SELECT DISTINCT folder_path FROM images
+		 WHERE is_missing = 0 AND folder_path != '' AND folder_path LIKE ?
+		 ORDER BY folder_path LIMIT 10`,
+		prefix+"%",
+	)
+	if err != nil {
+		logx.Warnf("folders suggest: %v", err)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	defer rows.Close()
+	var folders []string
+	for rows.Next() {
+		var fp string
+		if err := rows.Scan(&fp); err != nil {
+			continue
+		}
+		folders = append(folders, fp)
+	}
+	if len(folders) == 0 {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	s.renderTemplate(w, "partials/folder_suggest.html", map[string]any{
+		"Folders": folders,
+	})
+}
+
 func (s *Server) deleteFolderPost(w http.ResponseWriter, r *http.Request) {
 	if !parseFormOK(w, r) {
 		return
@@ -2906,7 +3076,7 @@ func (s *Server) searchSuggest(w http.ResponseWriter, r *http.Request) {
 			val := last[colonIdx+1:]
 			// For value-only filter keywords, don't suggest tags.
 			switch key {
-			case "fav", "source", "width", "height", "date", "missing", "folder", "generated":
+			case "fav", "source", "width", "height", "date", "missing", "folder", "folderonly", "generated":
 				// no tag suggestions
 			default:
 				// key is a category name - suggest tags from that category

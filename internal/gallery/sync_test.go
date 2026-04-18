@@ -246,6 +246,48 @@ func TestFolderTree_WithImages(t *testing.T) {
 	}
 }
 
+func TestFolderTree_RecursiveCount(t *testing.T) {
+	database, env, galleryDir := setupSyncTest(t)
+
+	// parent/ has zero direct images but two subfolders with one each, so
+	// parent should roll up to 2 even though nothing sits at parent/ itself.
+	parentDir := filepath.Join(galleryDir, "parent")
+	subA := filepath.Join(parentDir, "a")
+	subB := filepath.Join(parentDir, "b")
+	os.MkdirAll(subA, 0755)
+	os.MkdirAll(subB, 0755)
+	createTestPNGFileSize(t, subA, "a.png", 10, 10)
+	createTestPNGFileSize(t, subB, "b.png", 11, 10)
+
+	env.sync(t, database)
+
+	nodes, err := FolderTree(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := nodes[0]
+	if root.Count != 2 {
+		t.Errorf("root count = %d, want 2", root.Count)
+	}
+	var parent *FolderNode
+	for i := range root.Children {
+		if root.Children[i].Name == "parent" {
+			parent = &root.Children[i]
+		}
+	}
+	if parent == nil {
+		t.Fatal("parent folder not found in tree")
+	}
+	if parent.Count != 2 {
+		t.Errorf("parent count = %d, want 2 (recursive)", parent.Count)
+	}
+	for _, c := range parent.Children {
+		if c.Count != 1 {
+			t.Errorf("%s count = %d, want 1", c.Name, c.Count)
+		}
+	}
+}
+
 func TestCountSlashes(t *testing.T) {
 	tests := []struct {
 		s    string

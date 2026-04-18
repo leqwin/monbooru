@@ -221,6 +221,8 @@ func NewServer(cfg *config.Config, configPath string, jobManager *jobs.Manager) 
 				return "Stop re-extraction"
 			case "rebuild-thumbs":
 				return "Stop thumbnail rebuild"
+			case "move":
+				return "Stop moving"
 			}
 			return "Stop"
 		},
@@ -389,6 +391,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /images/{id}/favorite", s.toggleFavorite)
 	mux.HandleFunc("DELETE /images/{id}", s.deleteImage)
 	mux.HandleFunc("POST /images/{id}/canonical-path", s.promoteCanonical)
+	mux.HandleFunc("POST /images/{id}/move", s.moveImage)
 	mux.HandleFunc("DELETE /images/{id}/aliases/{pathID}", s.deleteAlias)
 
 	mux.HandleFunc("GET /tags", s.tagsHandler)
@@ -439,10 +442,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /internal/sync", s.syncTrigger)
 	mux.HandleFunc("POST /internal/autotag", s.autotagTrigger)
 	mux.HandleFunc("POST /internal/batch-delete", s.batchDelete)
+	mux.HandleFunc("POST /internal/batch-move", s.batchMove)
 	mux.HandleFunc("POST /internal/delete-search", s.deleteSearchPost)
 	mux.HandleFunc("POST /internal/delete-folder", s.deleteFolderPost)
 	mux.HandleFunc("GET /internal/tags/suggest", s.tagSuggest)
 	mux.HandleFunc("GET /internal/search/suggest", s.searchSuggest)
+	mux.HandleFunc("GET /internal/folders/suggest", s.foldersSuggest)
 	mux.HandleFunc("GET /internal/sidebar", s.gallerySidebar)
 	mux.HandleFunc("POST /images/{id}/autotag", s.autotagImage)
 	mux.HandleFunc("GET /images/{id}/tags", s.getImageTagsHandler)

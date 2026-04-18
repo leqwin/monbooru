@@ -12,7 +12,7 @@
       <span class="job-progress">{{.Processed}}/{{.Total}}</span>
     {{end}}
     <span class="job-msg">{{.Message}}</span>
-    {{if or (eq .JobType "autotag") (eq .JobType "sync") (eq .JobType "delete") (eq .JobType "re-extract") (eq .JobType "rebuild-thumbs")}}
+    {{if or (eq .JobType "autotag") (eq .JobType "sync") (eq .JobType "delete") (eq .JobType "re-extract") (eq .JobType "rebuild-thumbs") (eq .JobType "move")}}
     <button class="job-dismiss" onclick="cancelJobStatus()" title="{{cancelTitle .JobType}}">×</button>
     {{end}}
   {{else if and . .Summary}}

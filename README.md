@@ -25,7 +25,7 @@ A self-hosted, lightweight, booru-style gallery for a personal image collection.
 - Optional auto-tagging with local ONNX models (WD14, JoyTag, or any compatible model), CPU or GPU
 - Search with wildcards, OR, exclusions, plus filters on folder, date, size, dimensions, category, generation recipe...
 - Browser upload, multi-file, with tags and a destination folder
-- Batch operations: bulk delete, bulk auto-tag, delete-all-search-results
+- Batch operations: bulk delete, bulk move (with folder autocomplete), bulk auto-tag, delete-all-search-results
 - Daily maintenance schedule: scheduled sync, auto-tag, recompute counts, merge general tags, and vacuum databases...
 - Create multiple galleries with their own filesystem and switch between them
 - REST API for third-party integrations (e.g. adding images to the gallery from an external app)
@@ -51,8 +51,9 @@ Tags separated by spaces means AND. Everything else stacks on top:
 | `blue*` / `*hair*` | wildcards |
 | `fav:true` | favorites only |
 | `source:a1111` / `source:comfyui` / `source:none` | by metadata source |
-| `folder:2024/january` | exact folder, no recursion |
+| `folder:2024/january` | images in this folder or any subfolder |
 | `folder:"my set 1"` | quote paths that contain spaces |
+| `folderonly:2024/january` | only images directly in this folder, no subfolders |
 | `width:>=1920` `height:<768` | dimensions |
 | `date:2024-03-15` `date:>2024-01-01` `date:2024-01..2024-06` | dates |
 | `cat:character` | any tag in that category |

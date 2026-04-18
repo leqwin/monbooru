@@ -665,7 +665,20 @@ func (b *whereBuilder) buildFilterExpr(e FilterExpr) string {
 
 	case "folder":
 		if e.Val == "" {
-			// Root folder: only images directly at the gallery root.
+			// `folder:` alone is the recursive root: every non-missing image
+			// lives at or below the gallery root, so the filter is a no-op.
+			// Use `folderonly:` with an empty value for "root directly".
+			return "1=1"
+		}
+		// Recursive: images in this folder or anywhere beneath it. Matches
+		// how clicking a folder in the sidebar is expected to surface the
+		// full subtree rather than just the directly-contained images.
+		b.args = append(b.args, e.Val, e.Val+"/%")
+		return "(i.folder_path = ? OR i.folder_path LIKE ?)"
+
+	case "folderonly":
+		if e.Val == "" {
+			// Gallery root directly, excluding every subfolder.
 			return "i.folder_path = ''"
 		}
 		b.args = append(b.args, e.Val)

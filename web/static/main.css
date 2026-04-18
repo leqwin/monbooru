@@ -220,7 +220,17 @@ button:hover { border-color: var(--accent); }
   text-overflow: ellipsis;
 }
 .folder-link:hover { text-decoration: underline; color: var(--accent); }
-.folder-children { list-style: none; margin: 0; padding: 0; }
+.folder-only-btn {
+  color: var(--fg-dim);
+  text-decoration: none;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 4px;
+  flex-shrink: 0;
+}
+.folder-only-btn:hover { color: var(--accent); }
+.folder-only-btn.active { color: var(--accent); }
+.folder-children { list-style: none; margin: 0; padding: 0 0 0 12px; }
 
 /* Tag group headers in sidebar */
 .tag-group { margin-bottom: 2px; }
@@ -274,7 +284,7 @@ button:hover { border-color: var(--accent); }
   font-size: 10px;
 }
 .folder-tree { list-style: none; margin: 0; padding: 0 0 0 4px; }
-.folder-children { list-style: none; margin: 0; padding: 0; }
+.folder-children { list-style: none; margin: 0; padding: 0 0 0 12px; }
 .folder-toggle-btn[data-path] {
   background: none;
   border: none;
@@ -1044,6 +1054,7 @@ dialog .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
 .status-badge.status-off { color: var(--fg-dim); }
 
 .upload-page .field input[type="text"].upload-wide-input { max-width: none; width: 100%; }
+dialog .field input[type="text"].upload-wide-input { width: 100%; min-width: 420px; max-width: none; }
 .upload-tags-wrap { position: relative; }
 .upload-actions { display: flex; gap: 8px; margin-top: 8px; }
 .upload-drop-zone {

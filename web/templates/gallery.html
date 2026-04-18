@@ -43,6 +43,7 @@
   <form id="batch-delete-form">
     <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
     <button type="button" class="btn-danger" onclick="batchDeleteSelected()">Delete selected</button>
+    <button type="button" onclick="openMoveSelectedDialog()">Move selected</button>
   </form>
   <button onclick="clearSelection()">Cancel</button>
 </div>
@@ -94,6 +95,30 @@
   </div>
 </dialog>
 
+<!-- Move selected dialog -->
+<dialog id="move-selected-dialog">
+  <p>Move <strong id="move-selected-count">0</strong> selected image(s) to folder:</p>
+  <form id="move-selected-form" onsubmit="event.preventDefault(); confirmMoveSelected();">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+    <div class="field" style="position:relative">
+      <input type="text" name="folder" id="move-selected-folder" class="upload-wide-input"
+             placeholder="e.g. april/15 (blank = gallery root)" autocomplete="off"
+             hx-get="/internal/folders/suggest"
+             hx-trigger="input changed delay:200ms"
+             hx-target="#move-selected-suggest"
+             hx-swap="innerHTML"
+             hx-vals='js:{prefix: document.getElementById("move-selected-folder").value}'
+             onkeydown="handleSuggestKey(event, 'move-selected-suggest', 'move-selected-folder')">
+      <div id="move-selected-suggest" class="suggest-dropdown folder-suggest-dropdown"></div>
+    </div>
+    <div id="move-selected-flash"></div>
+    <div class="dialog-actions">
+      <button type="submit">Move</button>
+      <button type="button" onclick="document.getElementById('move-selected-dialog').close()">Cancel</button>
+    </div>
+  </form>
+</dialog>
+
 <script>
 function openDeleteSearchDialog() {
   // Sync count from the result-count span (reflects current search results)
@@ -137,6 +162,55 @@ function confirmDeleteSelected() {
     }
   }).catch(function() {
     if (flash) flash.innerHTML = '<div class="flash flash-err">Delete request failed.</div>';
+  });
+}
+
+function openMoveSelectedDialog() {
+  var checked = document.querySelectorAll('.thumb-checkbox:checked');
+  if (checked.length === 0) return;
+  var countEl = document.getElementById('move-selected-count');
+  if (countEl) countEl.textContent = checked.length;
+  var flash = document.getElementById('move-selected-flash');
+  if (flash) flash.innerHTML = '';
+  var input = document.getElementById('move-selected-folder');
+  if (input) input.value = '';
+  var sg = document.getElementById('move-selected-suggest');
+  if (sg) sg.innerHTML = '';
+  document.getElementById('move-selected-dialog').showModal();
+  if (input) input.focus();
+}
+
+function confirmMoveSelected() {
+  var form = document.getElementById('move-selected-form');
+  if (!form) return;
+  var checked = document.querySelectorAll('.thumb-checkbox:checked');
+  if (checked.length === 0) return;
+  var csrfEl = form.querySelector('[name="_csrf"]');
+  var csrf = csrfEl ? csrfEl.value : '';
+  var folder = document.getElementById('move-selected-folder').value;
+  var ids = Array.from(checked).map(function(cb) { return cb.value; });
+  var body = '_csrf=' + encodeURIComponent(csrf)
+    + '&folder=' + encodeURIComponent(folder)
+    + '&' + ids.map(function(id) { return 'ids=' + encodeURIComponent(id); }).join('&');
+  var flash = document.getElementById('move-selected-flash');
+  if (flash) flash.innerHTML = '';
+  fetch('/internal/batch-move', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRF-Token': csrf},
+    body: body
+  }).then(function(res) {
+    if (res.ok) {
+      document.getElementById('move-selected-dialog').close();
+      clearSelection();
+      _pendingGalleryReload = true;
+      refreshJobStatus();
+    } else {
+      res.text().then(function(t) {
+        if (flash) flash.innerHTML = t || '<div class="flash flash-err">Move failed.</div>';
+      });
+    }
+  }).catch(function() {
+    if (flash) flash.innerHTML = '<div class="flash flash-err">Move request failed.</div>';
   });
 }
 

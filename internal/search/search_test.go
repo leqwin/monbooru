@@ -150,7 +150,40 @@ func TestParse_Empty(t *testing.T) {
 }
 
 func TestBuildWhere_FolderFilter(t *testing.T) {
+	// folder:PATH is recursive: images in PATH or any subfolder under it.
 	expr := FilterExpr{Key: "folder", Val: "2024/jan"}
+	where, args, _ := buildWhere(expr)
+	if len(args) != 2 {
+		t.Fatalf("expected 2 args, got %d", len(args))
+	}
+	if args[0] != "2024/jan" {
+		t.Errorf("arg[0] = %v", args[0])
+	}
+	if args[1] != "2024/jan/%" {
+		t.Errorf("arg[1] = %v", args[1])
+	}
+	if !strings.Contains(where, "folder_path") || !strings.Contains(where, "LIKE") {
+		t.Errorf("where clause should combine exact and LIKE match: %s", where)
+	}
+}
+
+func TestBuildWhere_FolderFilterEmpty(t *testing.T) {
+	// `folder:` (empty value) is now the recursive-root case: every
+	// non-missing image lives at or under the root, so the filter is a
+	// no-op (`1=1`). Root-only stays reachable via `folderonly:`.
+	expr := FilterExpr{Key: "folder", Val: ""}
+	where, args, _ := buildWhere(expr)
+	if len(args) != 0 {
+		t.Fatalf("expected 0 args for empty folder, got %d", len(args))
+	}
+	if strings.Contains(where, "folder_path") {
+		t.Errorf("empty folder: should no longer constrain folder_path: %s", where)
+	}
+}
+
+func TestBuildWhere_FolderOnlyFilter(t *testing.T) {
+	// folderonly:PATH is exact: only images whose folder_path matches verbatim.
+	expr := FilterExpr{Key: "folderonly", Val: "2024/jan"}
 	where, args, _ := buildWhere(expr)
 	if len(args) != 1 {
 		t.Fatalf("expected 1 arg, got %d", len(args))
@@ -158,20 +191,20 @@ func TestBuildWhere_FolderFilter(t *testing.T) {
 	if args[0] != "2024/jan" {
 		t.Errorf("arg[0] = %v", args[0])
 	}
-	if !strings.Contains(where, "folder_path") {
-		t.Errorf("where clause missing folder_path: %s", where)
+	if !strings.Contains(where, "folder_path = ?") {
+		t.Errorf("where clause should match folder_path exactly: %s", where)
 	}
 }
 
-func TestBuildWhere_FolderFilterEmpty(t *testing.T) {
-	// Empty folder (root) matches images directly at the gallery root only.
-	expr := FilterExpr{Key: "folder", Val: ""}
+func TestBuildWhere_FolderOnlyFilterEmpty(t *testing.T) {
+	// folderonly: (empty) is the gallery root directly, no recursion.
+	expr := FilterExpr{Key: "folderonly", Val: ""}
 	where, args, _ := buildWhere(expr)
 	if len(args) != 0 {
-		t.Fatalf("expected 0 args for empty folder, got %d", len(args))
+		t.Fatalf("expected 0 args for empty folderonly, got %d", len(args))
 	}
 	if !strings.Contains(where, "folder_path = ''") {
-		t.Errorf("where clause for root folder should match empty folder_path: %s", where)
+		t.Errorf("where clause for root-only should match empty folder_path: %s", where)
 	}
 }
 

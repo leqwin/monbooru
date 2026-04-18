@@ -100,8 +100,11 @@ func (w *Watcher) Run(ctx context.Context) error {
 			// tree itself and ingests via its own transaction, so a
 			// concurrent watcher Ingest would race on the image_paths
 			// UNIQUE and fail with "constraint failed: UNIQUE ... (2067)".
+			// Move jobs are suppressed for the same reason: every rename
+			// fires a CREATE + REMOVE pair that would otherwise trip
+			// markFileMissing on the source.
 			if w.jobs != nil {
-				if st := w.jobs.Get(); st != nil && st.Running && st.JobType == "sync" {
+				if st := w.jobs.Get(); st != nil && st.Running && (st.JobType == "sync" || st.JobType == "move") {
 					continue
 				}
 			}

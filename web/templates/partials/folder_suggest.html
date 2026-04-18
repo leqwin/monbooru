@@ -1,0 +1,13 @@
+{{define "partials/folder_suggest.html"}}
+{{if .Folders}}
+<div class="suggest-list">
+  {{range .Folders}}
+  <button type="button" class="suggest-item"
+          data-folder-path="{{.}}"
+          onclick="applyFolderSuggest(this)">
+    <span class="suggest-name">{{.}}</span>
+  </button>
+  {{end}}
+</div>
+{{end}}
+{{end}}

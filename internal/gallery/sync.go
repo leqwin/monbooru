@@ -392,8 +392,11 @@ func DeleteEmptyFolderIfEmpty(galleryPath, folderPath string) {
 	}
 }
 
-// FolderTree returns the folder tree from DB image records.
-// Parent folders with no direct images are included so the full arborescence is visible.
+// FolderTree returns the folder tree from DB image records. Each node's Count
+// includes images in the folder itself plus every descendant folder, so a
+// parent with only subfolder content still shows a non-zero figure in the
+// sidebar. Parent folders with no direct images are included so the full
+// arborescence is visible.
 func FolderTree(database *db.DB) ([]FolderNode, error) {
 	rows, err := database.Read.Query(
 		`SELECT COALESCE(folder_path, ''), COUNT(*) FROM images WHERE is_missing=0 GROUP BY folder_path ORDER BY folder_path`,
@@ -408,14 +411,12 @@ func FolderTree(database *db.DB) ([]FolderNode, error) {
 		count int
 	}
 	var flat []folderCount
-	totalCount := 0
 
 	for rows.Next() {
 		var fc folderCount
 		if err := rows.Scan(&fc.path, &fc.count); err != nil {
 			return nil, fmt.Errorf("scanning folder row: %w", err)
 		}
-		totalCount += fc.count
 		flat = append(flat, fc)
 	}
 
@@ -447,7 +448,7 @@ func FolderTree(database *db.DB) ([]FolderNode, error) {
 		children []*pnode
 	}
 
-	rootP := &pnode{FolderNode: FolderNode{Path: "", Name: "(root)", Count: totalCount, Depth: 0}}
+	rootP := &pnode{FolderNode: FolderNode{Path: "", Name: "(root)", Depth: 0}}
 	pnodeMap := map[string]*pnode{"": rootP}
 
 	// Process paths in lexicographic order so parents are always created before children.
@@ -457,6 +458,7 @@ func FolderTree(database *db.DB) ([]FolderNode, error) {
 
 	for _, fc := range flat {
 		if fc.path == "" {
+			rootP.Count = fc.count
 			continue
 		}
 		n := &pnode{FolderNode: FolderNode{
@@ -477,6 +479,17 @@ func FolderTree(database *db.DB) ([]FolderNode, error) {
 		}
 		parent.children = append(parent.children, n)
 	}
+
+	// Post-order: roll descendant counts into each ancestor so the sidebar
+	// shows "images here or in any subfolder" rather than direct-only.
+	var rollup func(p *pnode)
+	rollup = func(p *pnode) {
+		for _, c := range p.children {
+			rollup(c)
+			p.Count += c.Count
+		}
+	}
+	rollup(rootP)
 
 	// Convert pointer tree → value tree (deep copy).
 	var toValue func(p *pnode) FolderNode

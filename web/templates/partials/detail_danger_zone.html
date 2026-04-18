@@ -19,6 +19,8 @@
     <button class="btn-warning" type="button"
             onclick="document.getElementById('remove-auto-dialog').showModal()">Remove all auto-tagged tags</button>
     {{end}}
+    <button type="button"
+            onclick="document.getElementById('move-image-dialog').showModal();document.getElementById('move-image-folder').focus();">Move image</button>
     <button class="btn-danger danger-zone-delete"
             id="delete-image-btn"
             hx-delete="/images/{{.ImageID}}?back_q={{.BackQuery}}&back_sort={{.BackSort}}&back_order={{.BackOrder}}{{if .BackPage}}&back_page={{.BackPage}}{{end}}{{if .BackSeed}}&back_seed={{.BackSeed}}{{end}}"
@@ -27,6 +29,31 @@
             hx-confirm="Delete this image?"
             data-confirm-danger="Files are permanently deleted from disk. This cannot be undone.">Delete image</button>
   </div>
+
+  <dialog id="move-image-dialog">
+    <p>Move this image to folder:</p>
+    <form id="move-image-form"
+          hx-post="/images/{{.ImageID}}/move"
+          hx-swap="none"
+          hx-headers='{"X-CSRF-Token":"{{.CSRFToken}}"}'>
+      <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+      <div class="field" style="position:relative">
+        <input type="text" name="folder" id="move-image-folder" class="upload-wide-input"
+               placeholder="e.g. april/15 (blank = gallery root)" autocomplete="off"
+               hx-get="/internal/folders/suggest"
+               hx-trigger="input changed delay:200ms"
+               hx-target="#move-image-suggest"
+               hx-swap="innerHTML"
+               hx-vals='js:{prefix: document.getElementById("move-image-folder").value}'
+               onkeydown="handleSuggestKey(event, 'move-image-suggest', 'move-image-folder')">
+        <div id="move-image-suggest" class="suggest-dropdown folder-suggest-dropdown"></div>
+      </div>
+      <div class="dialog-actions">
+        <button type="submit">Move</button>
+        <button type="button" onclick="document.getElementById('move-image-dialog').close()">Cancel</button>
+      </div>
+    </form>
+  </dialog>
 
   {{if .ImageTaggers}}
   <dialog id="remove-auto-dialog">
