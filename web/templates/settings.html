@@ -3,15 +3,19 @@
 <div id="sidebar-inner">
   <nav class="settings-nav">
     <a href="#general">General</a>
-    <a href="#auth">Auth</a>
+    <a href="#galleries">Galleries</a>
     <a href="#tagger">Tagger</a>
+    <a href="#auth">Auth</a>
     <a href="#maintenance">Maintenance</a>
+    <a href="#schedule">Schedule</a>
   </nav>
 </div>
 {{template "layout_mid" .}}
 
 {{$csrf := index . "CSRFToken"}}
 {{$cfg  := index . "Config"}}
+{{$galleries := index . "Galleries"}}
+{{$active := index . "ActiveGallery"}}
 
 <div id="settings-page">
   <h2>Settings</h2>
@@ -50,18 +54,119 @@
     </div>
   </section>
 
-  <section id="auth" class="settings-section">
-    <h3>Authentication</h3>
-    <div id="flash-auth"></div>
-    {{template "partials/auth_password_section.html" (dict "AuthEnabled" $cfg.Auth.EnablePassword "CSRFToken" $csrf)}}
+  <section id="galleries" class="settings-section">
+    <h3>Galleries</h3>
+    <div id="flash-galleries"></div>
+    <table class="gallery-table">
+      <thead>
+        <tr><th>Name</th><th>Gallery path</th><th>Status</th><th>API suffix</th><th>Actions</th></tr>
+      </thead>
+      <tbody>
+        {{range $galleries}}
+        <tr>
+          <td><strong>{{.Name}}</strong></td>
+          <td><code>{{.GalleryPath}}</code></td>
+          <td>
+            {{if eq .Name $active}}<span class="status-ok">active</span>{{end}}
+            {{if eq .Name $cfg.DefaultGallery}}<span class="status-ok">default</span>{{end}}
+          </td>
+          <td><code>?gallery={{.Name}}</code></td>
+          <td>
+            <div class="tagger-actions">
+              <button class="btn-sm btn-gallery-rename"
+                      data-name="{{.Name}}">Rename</button>
+              {{if ne .Name $cfg.DefaultGallery}}
+              <form hx-post="/settings/galleries/{{.Name}}/default" hx-target="#flash-galleries" hx-swap="innerHTML" style="display:inline">
+                <input type="hidden" name="_csrf" value="{{$csrf}}">
+                <button type="submit" class="btn-sm btn-set-default">Set default</button>
+              </form>
+              {{end}}
+              {{if and (ne .Name $active) (ne .Name $cfg.DefaultGallery) (gt (len $galleries) 1)}}
+              <button class="btn-sm btn-danger btn-gallery-delete"
+                      data-name="{{.Name}}">Delete</button>
+              {{end}}
+            </div>
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
     <div class="settings-sub">
-      <h4>API Token</h4>
-      <form hx-post="/settings/auth/token" hx-target="#flash-auth" hx-swap="innerHTML">
+      <h4>Add gallery</h4>
+      <form hx-post="/settings/galleries" hx-target="#flash-galleries" hx-swap="innerHTML" class="add-gallery-form">
         <input type="hidden" name="_csrf" value="{{$csrf}}">
-        <button type="submit">Regenerate API token</button>
+        <div class="field">
+          <label>Name</label>
+          <input type="text" name="name" required pattern="[A-Za-z0-9_-]+">
+        </div>
+        <div class="field">
+          <label>Gallery path</label>
+          <input type="text" name="gallery_path" required>
+        </div>
+        <button type="submit">Add</button>
       </form>
     </div>
   </section>
+
+  <dialog id="gallery-rename-dialog">
+    <form id="gallery-rename-form" hx-post="" hx-target="#flash-galleries" hx-swap="innerHTML"
+          hx-on::after-request="if(event.detail.successful){document.getElementById('gallery-rename-dialog').close()}">
+      <input type="hidden" name="_csrf" value="{{$csrf}}">
+      <p>Rename <strong id="gallery-rename-src"></strong></p>
+      <div class="field">
+        <label>New name</label>
+        <input type="text" name="new_name" id="gallery-rename-input" required pattern="[A-Za-z0-9_-]+" autocomplete="off">
+      </div>
+      <div class="dialog-actions">
+        <button type="submit">Rename</button>
+        <button type="button" onclick="document.getElementById('gallery-rename-dialog').close()">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="gallery-delete-dialog">
+    <form id="gallery-delete-form" hx-post="" hx-target="#flash-galleries" hx-swap="innerHTML"
+          hx-on::after-request="if(event.detail.successful){document.getElementById('gallery-delete-dialog').close()}">
+      <input type="hidden" name="_csrf" value="{{$csrf}}">
+      <p>Delete gallery <strong id="gallery-delete-src"></strong>?</p>
+      <p class="confirm-dialog-danger">The database and thumbnails will be erased.</p>
+      <div class="field">
+        <label><input type="checkbox" name="remove_folder"> Also delete the gallery folder (source images)</label>
+      </div>
+      <div class="dialog-actions">
+        <button type="submit" class="btn-danger">Delete</button>
+        <button type="button" onclick="document.getElementById('gallery-delete-dialog').close()">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script>
+  document.querySelectorAll('.btn-gallery-rename').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var name = this.dataset.name;
+      var form = document.getElementById('gallery-rename-form');
+      form.setAttribute('hx-post', '/settings/galleries/' + name + '/rename');
+      if (window.htmx) window.htmx.process(form);
+      document.getElementById('gallery-rename-src').textContent = name;
+      var input = document.getElementById('gallery-rename-input');
+      input.value = name;
+      document.getElementById('gallery-rename-dialog').showModal();
+      input.focus();
+      input.select();
+    });
+  });
+  document.querySelectorAll('.btn-gallery-delete').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var name = this.dataset.name;
+      var form = document.getElementById('gallery-delete-form');
+      form.setAttribute('hx-post', '/settings/galleries/' + name + '/delete');
+      if (window.htmx) window.htmx.process(form);
+      document.getElementById('gallery-delete-src').textContent = name;
+      form.querySelector('input[name="remove_folder"]').checked = false;
+      document.getElementById('gallery-delete-dialog').showModal();
+    });
+  });
+  </script>
 
   <section id="tagger" class="settings-section">
     <h3>Auto-Tagger
@@ -102,7 +207,7 @@
               <input type="number" name="tagger_{{.Name}}_threshold" value="{{.ConfidenceThreshold}}" min="0" max="1" step="0.01" style="width:6em">
             </td>
             <td>
-              {{if .Available}}<span class="status-ok">active</span>{{else}}<span class="status-err">unavailable — {{.Reason}}</span>{{end}}
+              {{if .Available}}<span class="status-ok">active</span>{{else}}<span class="status-err">unavailable - {{.Reason}}</span>{{end}}
             </td>
             <td>
               <div class="tagger-actions">
@@ -181,13 +286,26 @@
     {{end}}
   </section>
 
+  <section id="auth" class="settings-section">
+    <h3>Authentication</h3>
+    <div id="flash-auth"></div>
+    {{template "partials/auth_password_section.html" (dict "AuthEnabled" $cfg.Auth.EnablePassword "CSRFToken" $csrf)}}
+    <div class="settings-sub">
+      <h4>API Token</h4>
+      <form hx-post="/settings/auth/token" hx-target="#flash-auth" hx-swap="innerHTML">
+        <input type="hidden" name="_csrf" value="{{$csrf}}">
+        <button type="submit">Regenerate API token</button>
+      </form>
+    </div>
+  </section>
+
   <section id="maintenance" class="settings-section">
     <h3>Maintenance</h3>
     <div id="flash-maintenance"></div>
     <table class="maintenance-table">
       <tbody>
         <tr>
-          <td><strong>Missing images</strong> <span class="field-hint">— remove DB entries whose files are gone (<a href="/?q=missing:true">view</a>)</span></td>
+          <td><strong>Missing images</strong> <span class="field-hint">- remove DB entries whose files are gone (<a href="/?q=missing:true">view</a>)</span></td>
           <td>
             <form hx-post="/settings/maintenance/prune-missing" hx-target="#flash-maintenance" hx-swap="innerHTML" style="display:inline">
               <input type="hidden" name="_csrf" value="{{$csrf}}">
@@ -196,7 +314,7 @@
           </td>
         </tr>
         <tr>
-          <td><strong>Orphaned thumbnails</strong> <span class="field-hint">— remove thumbnail files with no matching image</span></td>
+          <td><strong>Orphaned thumbnails</strong> <span class="field-hint">- remove thumbnail files with no matching image</span></td>
           <td>
             <form hx-post="/settings/maintenance/prune-orphaned-thumbnails" hx-target="#flash-maintenance" hx-swap="innerHTML" style="display:inline">
               <input type="hidden" name="_csrf" value="{{$csrf}}">
@@ -205,7 +323,7 @@
           </td>
         </tr>
         <tr>
-          <td><strong>Rebuild thumbnails</strong> <span class="field-hint">— regenerate thumbnail files for every image</span></td>
+          <td><strong>Rebuild thumbnails</strong> <span class="field-hint">- regenerate thumbnail files for every image</span></td>
           <td>
             <form hx-post="/settings/maintenance/rebuild-thumbnails" hx-target="#flash-maintenance" hx-swap="innerHTML"
                   hx-on::after-request="if(event.detail.successful){document.getElementById('job-status').setAttribute('hx-trigger','load');htmx.trigger('#job-status','load')}"
@@ -216,7 +334,7 @@
           </td>
         </tr>
         <tr>
-          <td><strong>Tag counts</strong> <span class="field-hint">— recompute usage counts and prune zero-usage tags</span></td>
+          <td><strong>Tag counts</strong> <span class="field-hint">- recompute usage counts and prune zero-usage tags</span></td>
           <td>
             <form hx-post="/settings/maintenance/recalc-tags" hx-target="#flash-maintenance" hx-swap="innerHTML" style="display:inline">
               <input type="hidden" name="_csrf" value="{{$csrf}}">
@@ -225,7 +343,7 @@
           </td>
         </tr>
         <tr>
-          <td><strong>Merge general tags</strong> <span class="field-hint">— merge each auto-tagged-only general tag into its unique categorized counterpart, e.g. <code>general:hakurei_reimu</code> into <code>character:hakurei_reimu</code>. General tags you applied yourself are preserved.</span></td>
+          <td><strong>Merge general tags</strong> <span class="field-hint">- merge each auto-tagged-only general tag into its unique categorized counterpart, e.g. <code>general:hakurei_reimu</code> into <code>character:hakurei_reimu</code>. General tags you applied yourself are preserved.</span></td>
           <td>
             <form hx-post="/settings/maintenance/merge-general-tags" hx-target="#flash-maintenance" hx-swap="innerHTML"
                   hx-confirm="Merge auto-tagged-only general tags into their unique categorized counterparts? The original general tags become aliases. User-tagged general tags are skipped."
@@ -236,7 +354,7 @@
           </td>
         </tr>
         <tr>
-          <td><strong>Re-extract metadata</strong> <span class="field-hint">— re-parse SD/ComfyUI metadata for every image</span></td>
+          <td><strong>Re-extract metadata</strong> <span class="field-hint">- re-parse SD/ComfyUI metadata for every image</span></td>
           <td>
             <form hx-post="/settings/maintenance/re-extract-metadata" hx-target="#flash-maintenance" hx-swap="innerHTML" style="display:inline">
               <input type="hidden" name="_csrf" value="{{$csrf}}">
@@ -245,7 +363,7 @@
           </td>
         </tr>
         <tr>
-          <td><strong>Vacuum database</strong> <span class="field-hint">— compact the SQLite file after mass deletions</span></td>
+          <td><strong>Vacuum database</strong> <span class="field-hint">- compact the SQLite file after mass deletions</span></td>
           <td>
             <form hx-post="/settings/maintenance/vacuum-db" hx-target="#flash-maintenance" hx-swap="innerHTML" style="display:inline">
               <input type="hidden" name="_csrf" value="{{$csrf}}">
@@ -274,6 +392,38 @@
               hx-swap="innerHTML"
               class="btn-sm" style="margin-top:4px">List duplicate paths</button>
     </div>
+  </section>
+
+  {{$sched := $cfg.Schedule}}
+  <section id="schedule" class="settings-section">
+    <h3>Schedule</h3>
+    <div id="flash-schedule"></div>
+    <p class="field-hint">Runs the selected maintenance actions once per day at the configured time, on every configured gallery in sequence. Skipped silently if another job is already running at fire time.</p>
+    <form hx-post="/settings/schedule" hx-target="#flash-schedule" hx-swap="innerHTML">
+      <input type="hidden" name="_csrf" value="{{$csrf}}">
+      <div class="field">
+        <label>Time of day <input type="time" name="time" value="{{$sched.Time}}" required></label>
+      </div>
+      <div class="field">
+        <label><input type="checkbox" name="sync_gallery"{{if $sched.SyncGallery}} checked{{end}}> Sync gallery</label>
+      </div>
+      <div class="field">
+        <label><input type="checkbox" name="remove_orphans"{{if $sched.RemoveOrphans}} checked{{end}}> Remove orphaned thumbnails</label>
+      </div>
+      <div class="field">
+        <label><input type="checkbox" name="run_auto_taggers"{{if $sched.RunAutoTaggers}} checked{{end}}> Run enabled auto-taggers</label>
+      </div>
+      <div class="field">
+        <label><input type="checkbox" name="recompute_tags"{{if $sched.RecomputeTags}} checked{{end}}> Recompute tag counts</label>
+      </div>
+      <div class="field">
+        <label><input type="checkbox" name="merge_general_tags"{{if $sched.MergeGeneralTags}} checked{{end}}> Merge general tags</label>
+      </div>
+      <div class="field">
+        <label><input type="checkbox" name="vacuum_db"{{if $sched.VacuumDB}} checked{{end}}> Vacuum database</label>
+      </div>
+      <button type="submit">Save</button>
+    </form>
   </section>
 </div>
 

@@ -43,7 +43,7 @@
       <tr class="tag-row" id="tag-row-{{.ID}}">
         <td class="tag-id">{{.ID}}</td>
         <td class="tag-name-cell">
-          <a href="/?q={{.Name}}" style="color:{{.CategoryColor}}">{{.Name}}</a>
+          <a href="/?q={{.CategoryName}}:{{.Name}}" style="color:{{.CategoryColor}}">{{.Name}}</a>
           {{if .IsAlias}}<span class="alias-badge">alias</span>{{end}}
         </td>
         <td>
@@ -54,7 +54,7 @@
                   hx-target="#tag-flash"
                   hx-swap="innerHTML"
                   hx-headers='{"X-CSRF-Token":"{{$csrf}}"}'
-                  hx-on::after-request="if(event.detail.successful){updateTagColor(this);setTimeout(function(){window.location.reload()},400)}"
+                  hx-on::after-request="if(event.detail.successful){updateTagColor(this)}"
                   onchange="updateTagColor(this)">
             {{range $cats}}
             <option value="{{.ID}}" data-color="{{.Color}}" {{if eq .ID $tag.CategoryID}}selected{{end}}>{{.Name}}</option>

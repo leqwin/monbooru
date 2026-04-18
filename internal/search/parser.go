@@ -189,15 +189,24 @@ func (p *parser) parseAll() []Expr {
 			break
 		}
 
-		// Check for OR
+		// Fold any chained OR terms into a left-leaning OrExpr so that
+		// `a OR b OR c` produces three leaves; the previous one-shot OR
+		// handler ate only the first pair and silently dropped the rest.
 		if or := p.peek(); or != nil && or.kind == tokOR {
-			p.next()
-			right := p.parseTerm()
-			if right != nil {
-				exprs = append(exprs, OrExpr{Left: left, Right: right})
-			} else {
-				exprs = append(exprs, left)
+			expr := left
+			for {
+				next := p.peek()
+				if next == nil || next.kind != tokOR {
+					break
+				}
+				p.next()
+				right := p.parseTerm()
+				if right == nil {
+					break
+				}
+				expr = OrExpr{Left: expr, Right: right}
 			}
+			exprs = append(exprs, expr)
 			continue
 		}
 

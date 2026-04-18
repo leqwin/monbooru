@@ -206,7 +206,7 @@ func TestExtract_JPEG(t *testing.T) {
 func TestExtract_JPEG_NonExistent(t *testing.T) {
 	// Should not return a fatal error for missing file
 	sd, comfy, err := Extract("/nonexistent/path/image.jpg", "jpeg")
-	// Either err is set or both are nil — no panic
+	// Either err is set or both are nil - no panic
 	_ = sd
 	_ = comfy
 	_ = err
@@ -225,7 +225,7 @@ func TestExtractComfyUI_FromPNG(t *testing.T) {
 
 func TestParseA1111_PromptOnly(t *testing.T) {
 	// Without any A1111 marker (no "Negative prompt:" and no "Steps:" line)
-	// the blob is rejected — bare text is not enough to claim A1111 origin.
+	// the blob is rejected - bare text is not enough to claim A1111 origin.
 	input := "just a prompt with no parameters"
 	if sd := parseA1111Parameters(input); sd != nil {
 		t.Errorf("expected nil, got %+v", sd)
@@ -404,11 +404,11 @@ func makePNGWithITXtChunk(key, val string) []byte {
 	// iTXt: keyword\x00 compression_flag(1) compression_method(1) lang_tag\x00 trans_keyword\x00 text
 	var data bytes.Buffer
 	data.WriteString(key)
-	data.WriteByte(0)  // null separator
-	data.WriteByte(0)  // compression flag = 0 (uncompressed)
-	data.WriteByte(0)  // compression method
-	data.WriteByte(0)  // language tag (empty)
-	data.WriteByte(0)  // translated keyword (empty)
+	data.WriteByte(0) // null separator
+	data.WriteByte(0) // compression flag = 0 (uncompressed)
+	data.WriteByte(0) // compression method
+	data.WriteByte(0) // language tag (empty)
+	data.WriteByte(0) // translated keyword (empty)
 	data.WriteString(val)
 	writeTestChunk(&buf, "iTXt", data.Bytes())
 	writeTestChunk(&buf, "IEND", nil)
@@ -455,7 +455,7 @@ func TestReadPNGTextChunks_TruncatedChunkData(t *testing.T) {
 	// type = "tEXt"
 	copy(header[4:], "tEXt")
 	buf.Write(header)
-	// Don't write the 100 bytes of data — ReadFull will fail → break
+	// Don't write the 100 bytes of data - ReadFull will fail → break
 
 	chunks, err := readPNGTextChunks(bytes.NewReader(buf.Bytes()))
 	if err != nil {
@@ -465,7 +465,7 @@ func TestReadPNGTextChunks_TruncatedChunkData(t *testing.T) {
 }
 
 func TestReadPNGTextChunks_tEXtWithoutNull(t *testing.T) {
-	// tEXt chunk with no null separator — should be silently skipped
+	// tEXt chunk with no null separator - should be silently skipped
 	var buf bytes.Buffer
 	buf.Write([]byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A})
 	ihdr := make([]byte, 13)
@@ -487,7 +487,7 @@ func TestReadPNGTextChunks_tEXtWithoutNull(t *testing.T) {
 }
 
 func TestReadPNGTextChunks_iTXtTooShort(t *testing.T) {
-	// iTXt chunk where rest is < 2 bytes after null separator — should be skipped
+	// iTXt chunk where rest is < 2 bytes after null separator - should be skipped
 	var buf bytes.Buffer
 	buf.Write([]byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A})
 	ihdr := make([]byte, 13)
@@ -508,7 +508,7 @@ func TestReadPNGTextChunks_iTXtTooShort(t *testing.T) {
 }
 
 func TestParseA1111_NegativeOnly(t *testing.T) {
-	// Negative prompt present but no Steps line — tests the "no paramIdx after negIdx" branch
+	// Negative prompt present but no Steps line - tests the "no paramIdx after negIdx" branch
 	input := "positive prompt\nNegative prompt: some bad stuff"
 	sd := parseA1111Parameters(input)
 	if sd == nil {

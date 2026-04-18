@@ -1,4 +1,4 @@
-# GPU variant — uses the CUDA-enabled ONNX Runtime build on an NVIDIA CUDA 12
+# GPU variant - uses the CUDA-enabled ONNX Runtime build on an NVIDIA CUDA 12
 # + cuDNN 9 runtime base so the tagger can load the CUDA execution provider.
 # The image is ~3-4 GB (vs ~250 MB for docker/Dockerfile); prefer the default
 # Dockerfile unless you plan to enable tagger.use_cuda. The same binary still
@@ -15,7 +15,7 @@ RUN VERSION=$(cat VERSION.md 2>/dev/null | tr -d '[:space:]') && \
     -ldflags="-s -w -X 'github.com/leqwin/monbooru/internal/web.Version=${VERSION}' -X 'github.com/leqwin/monbooru/internal/web.Variant=cuda'" \
     -o /monbooru ./cmd/monbooru
 
-# Stage 2: Runtime — NVIDIA CUDA 12 + cuDNN 9 runtime (x86_64 only; NVIDIA does
+# Stage 2: Runtime - NVIDIA CUDA 12 + cuDNN 9 runtime (x86_64 only; NVIDIA does
 # not publish a general-purpose arm64 base for this image).
 FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu22.04
 

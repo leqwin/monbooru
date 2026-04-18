@@ -6,6 +6,8 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"fmt"
+	"html"
 	"log"
 	"net/http"
 )
@@ -24,7 +26,7 @@ func mustRandBytes(n int) []byte {
 
 // csrfToken computes a token for the given session ID using HMAC-SHA256 with
 // the Server's own secret. Kept as a method so the secret travels with the
-// server instance — tests can now stand up a fresh Server without relying on
+// server instance - tests can now stand up a fresh Server without relying on
 // a package-level global set at init time.
 func (s *Server) csrfToken(sessionID string) string {
 	mac := hmac.New(sha256.New, s.csrfSecret)
@@ -36,6 +38,25 @@ func (s *Server) csrfToken(sessionID string) string {
 func (s *Server) validateCSRF(sessionID, token string) bool {
 	expected := s.csrfToken(sessionID)
 	return subtle.ConstantTimeCompare([]byte(token), []byte(expected)) == 1
+}
+
+// parseFormOK wraps r.ParseForm and surfaces a malformed body as a 400
+// instead of letting the caller silently observe blank form values.
+// Returns false when the body could not be parsed; the response has
+// already been written so the caller should just `return`. HTMX
+// requests get a flash-err so the partial swap shows the failure
+// inline, everything else gets a plain http.Error.
+func parseFormOK(w http.ResponseWriter, r *http.Request) bool {
+	if err := r.ParseForm(); err != nil {
+		if isHTMXRequest(r) {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, `<div class="flash flash-err">Bad form data: %s</div>`, html.EscapeString(err.Error()))
+			return false
+		}
+		http.Error(w, "bad form: "+err.Error(), http.StatusBadRequest)
+		return false
+	}
+	return true
 }
 
 // CSRFMiddleware validates the CSRF token on mutating requests.

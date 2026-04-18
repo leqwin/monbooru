@@ -7,8 +7,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/rwcarlsen/goexif/exif"
 	"github.com/leqwin/monbooru/internal/models"
+	"github.com/rwcarlsen/goexif/exif"
 )
 
 // extractSDFromWebP reads A1111 metadata from a WebP file's EXIF chunk.
@@ -68,7 +68,7 @@ func readWebPEXIF(r io.Reader) ([]byte, error) {
 		chunkType := string(chunk[0:4])
 		size := binary.LittleEndian.Uint32(chunk[4:8])
 		if size > maxWebPChunkBytes {
-			// Skip oversize chunks wholesale — advance over the payload and
+			// Skip oversize chunks wholesale - advance over the payload and
 			// padding so subsequent chunks still line up.
 			toSkip := int64(size)
 			if size%2 == 1 {

@@ -20,21 +20,21 @@ import (
 
 // imageResponse is the JSON representation of an image.
 type imageResponse struct {
-	ID           int64          `json:"id"`
-	SHA256       string         `json:"sha256"`
+	ID            int64          `json:"id"`
+	SHA256        string         `json:"sha256"`
 	CanonicalPath string         `json:"canonical_path"`
-	Aliases      []string       `json:"aliases"`
-	FileType     string         `json:"file_type"`
-	Width        *int           `json:"width"`
-	Height       *int           `json:"height"`
-	FileSize     int64          `json:"file_size"`
-	IsFavorited  bool           `json:"is_favorited"`
-	IsMissing    bool           `json:"is_missing"`
-	AutoTaggedAt *time.Time     `json:"auto_tagged_at"`
-	SourceType   string         `json:"source_type"`
-	IngestedAt   time.Time      `json:"ingested_at"`
-	ThumbnailURL string         `json:"thumbnail_url"`
-	Tags         []imageTagJSON `json:"tags"`
+	Aliases       []string       `json:"aliases"`
+	FileType      string         `json:"file_type"`
+	Width         *int           `json:"width"`
+	Height        *int           `json:"height"`
+	FileSize      int64          `json:"file_size"`
+	IsFavorited   bool           `json:"is_favorited"`
+	IsMissing     bool           `json:"is_missing"`
+	AutoTaggedAt  *time.Time     `json:"auto_tagged_at"`
+	SourceType    string         `json:"source_type"`
+	IngestedAt    time.Time      `json:"ingested_at"`
+	ThumbnailURL  string         `json:"thumbnail_url"`
+	Tags          []imageTagJSON `json:"tags"`
 }
 
 type imageTagJSON struct {
@@ -46,13 +46,13 @@ type imageTagJSON struct {
 }
 
 // buildImageResponse fetches an image and its tags and returns the response struct.
-func (h *Handler) buildImageResponse(imageID int64) (*imageResponse, error) {
+func (h *Handler) buildImageResponse(g Gallery, imageID int64) (*imageResponse, error) {
 	var img models.Image
 	var isMissing, isFavorited int
 	var autoTaggedAt *string
 	var ingestedAt string
 
-	err := h.db.Read.QueryRow(`
+	err := g.DB.Read.QueryRow(`
 		SELECT id, sha256, canonical_path, file_type, width, height, file_size,
 		       is_missing, is_favorited, auto_tagged_at, source_type, ingested_at
 		FROM images WHERE id = ?`, imageID,
@@ -72,7 +72,7 @@ func (h *Handler) buildImageResponse(imageID int64) (*imageResponse, error) {
 	// Fetch aliases. Close rows immediately after iterating instead of deferring,
 	// so the read connection is released before the subsequent tag query.
 	aliases := []string{}
-	aliasRows, err := h.db.Read.Query(`SELECT path FROM image_paths WHERE image_id = ? AND is_canonical = 0`, imageID)
+	aliasRows, err := g.DB.Read.Query(`SELECT path FROM image_paths WHERE image_id = ? AND is_canonical = 0`, imageID)
 	if err != nil {
 		logx.Warnf("buildImageResponse aliases: %v", err)
 	} else {
@@ -86,7 +86,7 @@ func (h *Handler) buildImageResponse(imageID int64) (*imageResponse, error) {
 	}
 
 	tags := []imageTagJSON{}
-	tagRows, err := h.db.Read.Query(`
+	tagRows, err := g.DB.Read.Query(`
 		SELECT t.name, tc.name, it.is_auto, it.confidence, it.tagger_name
 		FROM image_tags it
 		JOIN tags t ON t.id = it.tag_id
@@ -121,7 +121,7 @@ func (h *Handler) buildImageResponse(imageID int64) (*imageResponse, error) {
 		AutoTaggedAt:  img.AutoTaggedAt,
 		SourceType:    img.SourceType,
 		IngestedAt:    img.IngestedAt,
-		ThumbnailURL:  "/thumbnails/" + strconv.FormatInt(imageID, 10) + ".jpg",
+		ThumbnailURL:  "/thumbnails/" + g.Name + "/" + strconv.FormatInt(imageID, 10) + ".jpg",
 		Tags:          tags,
 	}
 	return resp, nil
@@ -129,6 +129,10 @@ func (h *Handler) buildImageResponse(imageID int64) (*imageResponse, error) {
 
 // getImage returns metadata for a single image.
 func (h *Handler) getImage(w http.ResponseWriter, r *http.Request) {
+	g, ok := h.resolveGallery(w, r)
+	if !ok {
+		return
+	}
 	idStr := r.PathValue("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
@@ -136,7 +140,7 @@ func (h *Handler) getImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := h.buildImageResponse(id)
+	resp, err := h.buildImageResponse(g, id)
 	if err != nil {
 		apiError(w, http.StatusNotFound, "not_found", "image not found")
 		return
@@ -150,16 +154,20 @@ func (h *Handler) getImage(w http.ResponseWriter, r *http.Request) {
 //   - file          (required): the uploaded file
 //   - tags          (optional): JSON-encoded array of tag names
 //   - folder        (optional): destination subfolder under gallery_path;
-//                               missing parents are created
+//     missing parents are created
 //   - autotag       (optional): "true"/"1" kicks off an auto-tag job on
-//                               the newly-ingested image
+//     the newly-ingested image
 //   - tagger_name   (optional): when set with autotag, restricts the job
-//                               to that single enabled auto-tagger
+//     to that single enabled auto-tagger
 //
 // JSON mode accepts the same folder/autotag/tagger_name fields alongside
 // the existing path/tags fields. In JSON mode the folder only takes
 // effect for relative paths (absolute paths are used verbatim).
 func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
+	g, ok := h.resolveGallery(w, r)
+	if !ok {
+		return
+	}
 	ct := r.Header.Get("Content-Type")
 
 	var (
@@ -189,7 +197,7 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 		autotag = isTrue(r.FormValue("autotag"))
 		taggerName = strings.TrimSpace(r.FormValue("tagger_name"))
 
-		destDir, destErr := gallery.ResolveSubdir(h.cfg.Paths.GalleryPath, folder)
+		destDir, destErr := gallery.ResolveSubdir(g.GalleryPath, folder)
 		if destErr != nil {
 			apiError(w, http.StatusBadRequest, "invalid_request", destErr.Error())
 			return
@@ -202,19 +210,7 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 		// Write the upload to its final destination using the original
 		// filename. A temp filename would be picked up by the watcher and
 		// then marked missing as soon as the request handler removed it.
-		// Auto-suffix on collision (mirrors the web upload flow).
-		dstPath := filepath.Join(destDir, fh.Filename)
-		if _, err := os.Stat(dstPath); err == nil {
-			base := strings.TrimSuffix(fh.Filename, filepath.Ext(fh.Filename))
-			ext := filepath.Ext(fh.Filename)
-			for i := 1; ; i++ {
-				dstPath = filepath.Join(destDir, fmt.Sprintf("%s_%d%s", base, i, ext))
-				if _, err := os.Stat(dstPath); os.IsNotExist(err) {
-					break
-				}
-			}
-		}
-
+		dstPath := gallery.UniqueDestPath(destDir, fh.Filename)
 		dst, err := os.Create(dstPath)
 		if err != nil {
 			apiError(w, http.StatusInternalServerError, "internal_error", "failed to create destination file")
@@ -258,7 +254,7 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 		// When the caller supplies a relative path plus a folder, resolve the
 		// file under <gallery>/<folder>/<path>. Absolute paths are used as-is.
 		if folder != "" && !filepath.IsAbs(imgPath) {
-			destDir, destErr := gallery.ResolveSubdir(h.cfg.Paths.GalleryPath, folder)
+			destDir, destErr := gallery.ResolveSubdir(g.GalleryPath, folder)
 			if destErr != nil {
 				apiError(w, http.StatusBadRequest, "invalid_request", destErr.Error())
 				return
@@ -293,7 +289,7 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	img, isDuplicate, err := gallery.Ingest(h.db, h.cfg, imgPath, fileType)
+	img, isDuplicate, err := gallery.Ingest(g.DB, g.GalleryPath, g.ThumbnailsPath, imgPath, fileType)
 	if err != nil {
 		if uploadedToDisk {
 			os.Remove(imgPath)
@@ -308,23 +304,26 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusConflict, "conflict", "image with this SHA-256 already exists")
 		return
 	}
+	if g.InvalidateCaches != nil {
+		g.InvalidateCaches()
+	}
 
 	// Apply initial tags, collecting any warnings. Each tag may be a plain
 	// name (added to the general category) or `category:name` which adds it
 	// to the named category, matching the web UI's parser.
 	var tagWarnings []string
 	for _, tagName := range initialTags {
-		catID, bareName, err := h.resolveCategoryTag(tagName)
+		catID, bareName, err := h.resolveCategoryTag(g, tagName)
 		if err != nil {
 			tagWarnings = append(tagWarnings, "tag "+tagName+": "+err.Error())
 			continue
 		}
-		tag, err := h.tagSvc.GetOrCreateTag(bareName, catID)
+		tag, err := g.TagSvc.GetOrCreateTag(bareName, catID)
 		if err != nil {
 			tagWarnings = append(tagWarnings, "tag "+tagName+": "+err.Error())
 			continue
 		}
-		if err := h.tagSvc.AddTagToImage(img.ID, tag.ID, false, nil); err != nil {
+		if err := g.TagSvc.AddTagToImage(img.ID, tag.ID, false, nil); err != nil {
 			tagWarnings = append(tagWarnings, "tag "+tagName+": "+err.Error())
 		}
 	}
@@ -341,8 +340,9 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 				autotagNote = "autotag skipped: a job is already running"
 			} else {
 				imgID := img.ID
+				database := g.DB
 				go func() {
-					if err := tagger.RunWithTaggers(h.jobs.Context(), h.db, h.cfg, []int64{imgID}, selected, h.jobs, h.cfg.Tagger.UseCUDA); err != nil {
+					if err := tagger.RunWithTaggers(h.jobs.Context(), database, h.cfg, []int64{imgID}, selected, h.jobs, h.cfg.Tagger.UseCUDA); err != nil {
 						h.jobs.Fail(err.Error())
 						return
 					}
@@ -353,7 +353,7 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	resp, err := h.buildImageResponse(img.ID)
+	resp, err := h.buildImageResponse(g, img.ID)
 	if err != nil {
 		apiError(w, http.StatusInternalServerError, "internal_error", "failed to build response")
 		return
@@ -399,6 +399,10 @@ func isTrue(v string) bool {
 
 // deleteImage handles DELETE /api/v1/images/:id.
 func (h *Handler) deleteImage(w http.ResponseWriter, r *http.Request) {
+	g, ok := h.resolveGallery(w, r)
+	if !ok {
+		return
+	}
 	idStr := r.PathValue("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
@@ -406,14 +410,17 @@ func (h *Handler) deleteImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := gallery.DeleteImage(h.db, h.cfg, id, h.tagSvc.RemoveAllTagsFromImage)
+	result, err := gallery.DeleteImage(g.DB, g.ThumbnailsPath, id, g.TagSvc.RemoveAllTagsFromImage)
 	if err != nil {
 		apiError(w, http.StatusNotFound, "not_found", "image not found")
 		return
 	}
+	if g.InvalidateCaches != nil {
+		g.InvalidateCaches()
+	}
 
 	if r.URL.Query().Get("delete_empty_folder") == "true" && !result.IsMissing && result.FolderPath != "" {
-		fullFolderPath := filepath.Join(h.cfg.Paths.GalleryPath, result.FolderPath)
+		fullFolderPath := filepath.Join(g.GalleryPath, result.FolderPath)
 		entries, readErr := os.ReadDir(fullFolderPath)
 		if readErr == nil && len(entries) == 0 {
 			if removeErr := os.Remove(fullFolderPath); removeErr != nil {
@@ -434,6 +441,10 @@ func (h *Handler) deleteImage(w http.ResponseWriter, r *http.Request) {
 
 // searchImages handles GET /api/v1/images/search.
 func (h *Handler) searchImages(w http.ResponseWriter, r *http.Request) {
+	g, ok := h.resolveGallery(w, r)
+	if !ok {
+		return
+	}
 	q := r.URL.Query()
 	queryStr := q.Get("q")
 	sortStr := q.Get("sort")
@@ -460,7 +471,7 @@ func (h *Handler) searchImages(w http.ResponseWriter, r *http.Request) {
 		Limit: limit,
 	}
 
-	result, err := search.Execute(h.db, sq)
+	result, err := search.Execute(g.DB, sq)
 	if err != nil {
 		apiError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
@@ -482,7 +493,7 @@ func (h *Handler) searchImages(w http.ResponseWriter, r *http.Request) {
 			AutoTaggedAt:  img.AutoTaggedAt,
 			SourceType:    img.SourceType,
 			IngestedAt:    img.IngestedAt,
-			ThumbnailURL:  "/thumbnails/" + strconv.FormatInt(img.ID, 10) + ".jpg",
+			ThumbnailURL:  "/thumbnails/" + g.Name + "/" + strconv.FormatInt(img.ID, 10) + ".jpg",
 			Tags:          []imageTagJSON{},
 		})
 	}
@@ -498,10 +509,14 @@ func (h *Handler) searchImages(w http.ResponseWriter, r *http.Request) {
 // addImageTags handles POST /api/v1/images/:id/tags.
 //
 // Each tag in the body may be a plain name (added to the general category)
-// or `category:name` which targets the named category — mirroring the web
+// or `category:name` which targets the named category - mirroring the web
 // UI's tag input so API callers can add artist/character/etc. tags without
 // pre-creating them from the UI.
 func (h *Handler) addImageTags(w http.ResponseWriter, r *http.Request) {
+	g, ok := h.resolveGallery(w, r)
+	if !ok {
+		return
+	}
 	idStr := r.PathValue("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
@@ -518,22 +533,22 @@ func (h *Handler) addImageTags(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, tagName := range body.Tags {
-		catID, bareName, err := h.resolveCategoryTag(tagName)
+		catID, bareName, err := h.resolveCategoryTag(g, tagName)
 		if err != nil {
 			logx.Warnf("api addImageTags resolve %q: %v", tagName, err)
 			continue
 		}
-		tag, err := h.tagSvc.GetOrCreateTag(bareName, catID)
+		tag, err := g.TagSvc.GetOrCreateTag(bareName, catID)
 		if err != nil {
 			logx.Warnf("api addImageTags GetOrCreate: %v", err)
 			continue
 		}
-		if err := h.tagSvc.AddTagToImage(id, tag.ID, false, nil); err != nil {
+		if err := g.TagSvc.AddTagToImage(id, tag.ID, false, nil); err != nil {
 			logx.Warnf("api addImageTags AddTag: %v", err)
 		}
 	}
 
-	resp, err := h.buildImageResponse(id)
+	resp, err := h.buildImageResponse(g, id)
 	if err != nil {
 		apiError(w, http.StatusNotFound, "not_found", "image not found")
 		return
@@ -544,7 +559,7 @@ func (h *Handler) addImageTags(w http.ResponseWriter, r *http.Request) {
 // resolveCategoryTag splits an input like "artist:foo" into (artist_id, "foo"),
 // or returns (general_id, "tagname") for a bare name. Unknown category names
 // are reported as an error so the caller can surface a tag_warnings entry.
-func (h *Handler) resolveCategoryTag(input string) (int64, string, error) {
+func (h *Handler) resolveCategoryTag(g Gallery, input string) (int64, string, error) {
 	input = strings.TrimSpace(input)
 	catName := "general"
 	tagName := input
@@ -553,7 +568,7 @@ func (h *Handler) resolveCategoryTag(input string) (int64, string, error) {
 		tagName = input[idx+1:]
 	}
 	var catID int64
-	if err := h.db.Read.QueryRow(
+	if err := g.DB.Read.QueryRow(
 		`SELECT id FROM tag_categories WHERE name = ?`, catName,
 	).Scan(&catID); err != nil {
 		return 0, "", fmt.Errorf("unknown category %q", catName)
@@ -566,8 +581,12 @@ func (h *Handler) resolveCategoryTag(input string) (int64, string, error) {
 // Each tag name may be plain (matches the general category) or `category:name`
 // (matches that specific category). A plain name that exists on the image in
 // more than one category is ambiguous and returns a 409 so the caller can
-// disambiguate — otherwise the handler would silently remove an arbitrary row.
+// disambiguate - otherwise the handler would silently remove an arbitrary row.
 func (h *Handler) removeImageTags(w http.ResponseWriter, r *http.Request) {
+	g, ok := h.resolveGallery(w, r)
+	if !ok {
+		return
+	}
 	idStr := r.PathValue("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
@@ -584,7 +603,7 @@ func (h *Handler) removeImageTags(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, tagName := range body.Tags {
-		tagID, err := h.resolveImageTagID(id, tagName)
+		tagID, err := h.resolveImageTagID(g, id, tagName)
 		if err != nil {
 			apiError(w, http.StatusConflict, "conflict", err.Error())
 			return
@@ -592,10 +611,10 @@ func (h *Handler) removeImageTags(w http.ResponseWriter, r *http.Request) {
 		if tagID == 0 {
 			continue // tag not on this image; silently ignored (matches docs)
 		}
-		h.tagSvc.RemoveTagFromImage(id, tagID)
+		g.TagSvc.RemoveTagFromImage(id, tagID)
 	}
 
-	resp, err := h.buildImageResponse(id)
+	resp, err := h.buildImageResponse(g, id)
 	if err != nil {
 		apiError(w, http.StatusNotFound, "not_found", "image not found")
 		return
@@ -607,13 +626,13 @@ func (h *Handler) removeImageTags(w http.ResponseWriter, r *http.Request) {
 // tagName. A `category:name` input targets that category exactly; a plain
 // name is only accepted when it resolves to exactly one tag on the image.
 // Returns (0, nil) when the tag is not present on the image.
-func (h *Handler) resolveImageTagID(imageID int64, tagName string) (int64, error) {
+func (h *Handler) resolveImageTagID(g Gallery, imageID int64, tagName string) (int64, error) {
 	tagName = strings.TrimSpace(tagName)
 	if idx := strings.Index(tagName, ":"); idx > 0 {
 		catName := tagName[:idx]
 		bareName := tagName[idx+1:]
 		var tagID int64
-		err := h.db.Read.QueryRow(
+		err := g.DB.Read.QueryRow(
 			`SELECT t.id FROM image_tags it
 			 JOIN tags t             ON t.id  = it.tag_id
 			 JOIN tag_categories tc  ON tc.id = t.category_id
@@ -626,7 +645,7 @@ func (h *Handler) resolveImageTagID(imageID int64, tagName string) (int64, error
 		return tagID, nil
 	}
 
-	rows, err := h.db.Read.Query(
+	rows, err := g.DB.Read.Query(
 		`SELECT t.id FROM image_tags it
 		 JOIN tags t ON t.id = it.tag_id
 		 WHERE it.image_id = ? AND t.name = ?`,

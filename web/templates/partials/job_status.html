@@ -4,6 +4,7 @@
      hx-trigger="every 2s"
      hx-swap="outerHTML"
      {{if and . .Running}}class="job-running"{{end}}
+     {{if .}}data-job-type="{{.JobType}}" data-processed="{{.Processed}}" data-watcher-notices="{{.WatcherNotices}}"{{end}}
      {{if and . .FinishedAt}}data-finished-at="{{.FinishedAt.UnixNano}}"{{end}}>
   {{if and . .Running}}
     <span class="job-type">{{.JobType}}</span>
@@ -11,8 +12,8 @@
       <span class="job-progress">{{.Processed}}/{{.Total}}</span>
     {{end}}
     <span class="job-msg">{{.Message}}</span>
-    {{if eq .JobType "autotag"}}
-    <button class="job-dismiss" onclick="cancelJobStatus()" title="Stop auto-tagging">×</button>
+    {{if or (eq .JobType "autotag") (eq .JobType "sync") (eq .JobType "delete") (eq .JobType "re-extract") (eq .JobType "rebuild-thumbs")}}
+    <button class="job-dismiss" onclick="cancelJobStatus()" title="{{cancelTitle .JobType}}">×</button>
     {{end}}
   {{else if and . .Summary}}
     <span class="job-done" id="job-done-msg">✓ {{.Summary}}</span>

@@ -66,6 +66,29 @@ var ErrUnsupportedType = errors.New("unsupported file type")
 // MIME types that Monbooru can ingest.
 const SupportedMIMETypes = "image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm"
 
+// UniqueDestPath returns a path under destDir that does not currently
+// exist, starting from filename and appending `_1`, `_2`, … to the
+// stem on collision until a free slot is found. Mirrors the
+// auto-suffix behaviour used by both the web upload form and the API
+// createImage handler so two callers don't drift on rename rules.
+// The first-collision check is racy (TOCTOU) but the gallery is a
+// single-process write target - callers that need stronger
+// guarantees should `O_CREATE|O_EXCL` themselves.
+func UniqueDestPath(destDir, filename string) string {
+	dst := filepath.Join(destDir, filename)
+	if _, err := os.Stat(dst); os.IsNotExist(err) {
+		return dst
+	}
+	stem := strings.TrimSuffix(filename, filepath.Ext(filename))
+	ext := filepath.Ext(filename)
+	for i := 1; ; i++ {
+		candidate := filepath.Join(destDir, fmt.Sprintf("%s_%d%s", stem, i, ext))
+		if _, err := os.Stat(candidate); os.IsNotExist(err) {
+			return candidate
+		}
+	}
+}
+
 // HashFile computes the SHA-256 of the file at path using streaming 32 KB chunks.
 func HashFile(path string) (string, error) {
 	f, err := os.Open(path)

@@ -18,7 +18,21 @@ import (
 	"github.com/leqwin/monbooru/internal/db"
 	"github.com/leqwin/monbooru/internal/gallery"
 	"github.com/leqwin/monbooru/internal/jobs"
+	"github.com/leqwin/monbooru/internal/tags"
 )
+
+// fixedResolver returns a ResolverFunc that always hands back the same
+// Gallery regardless of the requested name, which is how every test env is
+// wired (single gallery). The resolver mirrors the web.Server behaviour:
+// empty name falls back to the active gallery; unknown name is a miss.
+func fixedResolver(g Gallery) ResolverFunc {
+	return func(name string) (Gallery, bool) {
+		if name == "" || name == g.Name {
+			return g, true
+		}
+		return Gallery{}, false
+	}
+}
 
 // testEnv holds a fully wired test environment.
 type testEnv struct {
@@ -49,13 +63,20 @@ func newTestEnv(t *testing.T) *testEnv {
 	t.Cleanup(func() { database.Close() })
 
 	cfg := config.Default()
-	cfg.Paths.GalleryPath = galleryDir
-	cfg.Paths.ThumbnailsPath = thumbDir
+	cfg.Galleries[0].GalleryPath = galleryDir
+	cfg.Galleries[0].DBPath = filepath.Join(dir, "test.db")
+	cfg.Galleries[0].ThumbnailsPath = thumbDir
 	cfg.Gallery.MaxFileSizeMB = 100
-	// Tests use a known token; the API is disabled when no token is set.
 	cfg.Auth.APIToken = testAPIToken
 
-	h := New(cfg, database, jobs.NewManager())
+	g := Gallery{
+		Name:           cfg.DefaultGallery,
+		GalleryPath:    galleryDir,
+		ThumbnailsPath: thumbDir,
+		DB:             database,
+		TagSvc:         tags.New(database),
+	}
+	h := New(cfg, jobs.NewManager(), fixedResolver(g))
 	raw := http.NewServeMux()
 	h.Mount(raw)
 	// Wrap the mux so every request carries the bearer token by default.
@@ -85,7 +106,7 @@ func (e *testEnv) createTestImage(t *testing.T, name string, w, h int) int64 {
 	png.Encode(f, img)
 	f.Close()
 
-	record, _, err := gallery.Ingest(e.database, e.cfg, path, "png")
+	record, _, err := gallery.Ingest(e.database, e.galleryDir, e.thumbDir, path, "png")
 	if err != nil {
 		t.Fatalf("ingest: %v", err)
 	}
@@ -166,7 +187,7 @@ func TestAPIDisabledWhenNoToken(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.Auth.APIToken = ""
-	h := New(cfg, database, jobs.NewManager())
+	h := New(cfg, jobs.NewManager(), fixedResolver(Gallery{Name: cfg.DefaultGallery, DB: database, TagSvc: tags.New(database)}))
 	mux := http.NewServeMux()
 	h.Mount(mux)
 
@@ -193,7 +214,7 @@ func TestBearerAuthRejectsInvalidToken(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.Auth.APIToken = "secret-token"
-	h := New(cfg, database, jobs.NewManager())
+	h := New(cfg, jobs.NewManager(), fixedResolver(Gallery{Name: cfg.DefaultGallery, DB: database, TagSvc: tags.New(database)}))
 	mux := http.NewServeMux()
 	h.Mount(mux)
 
@@ -218,7 +239,7 @@ func TestBearerAuthAcceptsValidToken(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.Auth.APIToken = "secret-token"
-	h := New(cfg, database, jobs.NewManager())
+	h := New(cfg, jobs.NewManager(), fixedResolver(Gallery{Name: cfg.DefaultGallery, DB: database, TagSvc: tags.New(database)}))
 	mux := http.NewServeMux()
 	h.Mount(mux)
 
@@ -629,7 +650,7 @@ func TestCORSRejectsBadOrigin(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.Server.BaseURL = "https://myapp.example.com"
-	h := New(cfg, database, jobs.NewManager())
+	h := New(cfg, jobs.NewManager(), fixedResolver(Gallery{Name: cfg.DefaultGallery, DB: database, TagSvc: tags.New(database)}))
 	mux := http.NewServeMux()
 	h.Mount(mux)
 
@@ -651,7 +672,7 @@ func TestBearerAuth_MissingHeader(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.Auth.APIToken = "required-token"
-	h := New(cfg, database, jobs.NewManager())
+	h := New(cfg, jobs.NewManager(), fixedResolver(Gallery{Name: cfg.DefaultGallery, DB: database, TagSvc: tags.New(database)}))
 	mux := http.NewServeMux()
 	h.Mount(mux)
 
@@ -763,7 +784,7 @@ func TestDeleteImage_DeleteEmptyFolder(t *testing.T) {
 	png.Encode(f, img)
 	f.Close()
 
-	record, _, err := gallery.Ingest(env.database, env.cfg, imgPath, "png")
+	record, _, err := gallery.Ingest(env.database, env.galleryDir, env.thumbDir, imgPath, "png")
 	if err != nil {
 		t.Fatal(err)
 	}

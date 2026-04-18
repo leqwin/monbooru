@@ -10,11 +10,18 @@ import (
 	"testing"
 	"time"
 
-	"github.com/leqwin/monbooru/internal/config"
 	"github.com/leqwin/monbooru/internal/db"
 )
 
-func setupSyncTest(t *testing.T) (*db.DB, *config.Config, string) {
+// syncEnv is the per-test bundle of paths and limits used by the refactored
+// gallery signatures.
+type syncEnv struct {
+	galleryPath    string
+	thumbnailsPath string
+	maxFileSizeMB  int
+}
+
+func setupSyncTest(t *testing.T) (*db.DB, *syncEnv, string) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	galleryDir := filepath.Join(tmpDir, "gallery")
@@ -31,12 +38,21 @@ func setupSyncTest(t *testing.T) (*db.DB, *config.Config, string) {
 	}
 	t.Cleanup(func() { database.Close() })
 
-	cfg := &config.Config{}
-	cfg.Paths.GalleryPath = galleryDir
-	cfg.Paths.ThumbnailsPath = thumbDir
-	cfg.Gallery.MaxFileSizeMB = 100
+	env := &syncEnv{
+		galleryPath:    galleryDir,
+		thumbnailsPath: thumbDir,
+		maxFileSizeMB:  100,
+	}
+	return database, env, galleryDir
+}
 
-	return database, cfg, galleryDir
+func (e *syncEnv) sync(t *testing.T, database *db.DB) SyncResult {
+	t.Helper()
+	r, err := Sync(context.Background(), database, e.galleryPath, e.thumbnailsPath, e.maxFileSizeMB, func(int, int, string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
 }
 
 func createTestPNGFile(t *testing.T, dir, name string) string {
@@ -58,50 +74,33 @@ func createTestPNGFileSize(t *testing.T, dir, name string, w, h int) string {
 }
 
 func TestSync_NewFile(t *testing.T) {
-	database, cfg, galleryDir := setupSyncTest(t)
+	database, env, galleryDir := setupSyncTest(t)
 	createTestPNGFile(t, galleryDir, "test.png")
 
-	result, err := Sync(context.Background(), database, cfg, func(string) {})
-	if err != nil {
-		t.Fatal(err)
-	}
+	result := env.sync(t, database)
 	if result.Added != 1 {
 		t.Errorf("Added = %d, want 1", result.Added)
 	}
 }
 
 func TestSync_NoChange(t *testing.T) {
-	database, cfg, galleryDir := setupSyncTest(t)
+	database, env, galleryDir := setupSyncTest(t)
 	createTestPNGFile(t, galleryDir, "test.png")
 
-	// First sync
-	Sync(context.Background(), database, cfg, func(string) {})
-
-	// Second sync — no change
-	result, err := Sync(context.Background(), database, cfg, func(string) {})
-	if err != nil {
-		t.Fatal(err)
-	}
+	env.sync(t, database)
+	result := env.sync(t, database)
 	if result.Added != 0 || result.Removed != 0 {
 		t.Errorf("expected no changes, got Added=%d Removed=%d", result.Added, result.Removed)
 	}
 }
 
 func TestSync_FileDeleted(t *testing.T) {
-	database, cfg, galleryDir := setupSyncTest(t)
+	database, env, galleryDir := setupSyncTest(t)
 	path := createTestPNGFile(t, galleryDir, "test.png")
 
-	// First sync — adds file
-	Sync(context.Background(), database, cfg, func(string) {})
-
-	// Delete file
+	env.sync(t, database)
 	os.Remove(path)
-
-	// Second sync — marks missing
-	result, err := Sync(context.Background(), database, cfg, func(string) {})
-	if err != nil {
-		t.Fatal(err)
-	}
+	result := env.sync(t, database)
 	if result.Removed != 1 {
 		t.Errorf("Removed = %d, want 1", result.Removed)
 	}
@@ -114,21 +113,15 @@ func TestSync_FileDeleted(t *testing.T) {
 }
 
 func TestSync_Duplicate(t *testing.T) {
-	database, cfg, galleryDir := setupSyncTest(t)
+	database, env, galleryDir := setupSyncTest(t)
 	subDir := filepath.Join(galleryDir, "sub")
 	os.MkdirAll(subDir, 0755)
 
-	// Create original file
 	original := createTestPNGFile(t, galleryDir, "original.png")
-
-	// Copy it to sub dir with same content
 	content, _ := os.ReadFile(original)
 	os.WriteFile(filepath.Join(subDir, "copy.png"), content, 0644)
 
-	result, err := Sync(context.Background(), database, cfg, func(string) {})
-	if err != nil {
-		t.Fatal(err)
-	}
+	result := env.sync(t, database)
 	if result.Added != 1 {
 		t.Errorf("Added = %d, want 1", result.Added)
 	}
@@ -138,20 +131,15 @@ func TestSync_Duplicate(t *testing.T) {
 }
 
 func TestSync_SkipsLargeFile(t *testing.T) {
-	database, cfg, galleryDir := setupSyncTest(t)
-	cfg.Gallery.MaxFileSizeMB = 1 // 1 MB limit
+	database, env, galleryDir := setupSyncTest(t)
+	env.maxFileSizeMB = 1
 
-	// Create a tiny file (not large)
 	createTestPNGFile(t, galleryDir, "small.png")
 
-	// Create a "large" file — we can't actually make a multi-MB file easily,
-	// but we can test the threshold logic by setting limit to 0 bytes
-	cfg.Gallery.MaxFileSizeMB = 0 // 0 = no limit, skip this test scenario
-	// Just verify sync works normally
-	result, err := Sync(context.Background(), database, cfg, func(string) {})
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Can't cheaply produce a multi-MB fixture; flip the cap off and confirm
+	// the code path still ingests when max is unbounded.
+	env.maxFileSizeMB = 0
+	result := env.sync(t, database)
 	if result.Added < 1 {
 		t.Error("expected at least one file added")
 	}
@@ -176,26 +164,20 @@ func TestFolderPath(t *testing.T) {
 }
 
 func TestSync_FileMoved(t *testing.T) {
-	database, cfg, galleryDir := setupSyncTest(t)
+	database, env, galleryDir := setupSyncTest(t)
 	srcPath := createTestPNGFile(t, galleryDir, "original.png")
 
-	// First sync — adds file
-	r1, _ := Sync(context.Background(), database, cfg, func(string) {})
+	r1 := env.sync(t, database)
 	if r1.Added != 1 {
 		t.Fatalf("initial sync Added=%d, want 1", r1.Added)
 	}
 
-	// Move file to a subdirectory
 	subDir := filepath.Join(galleryDir, "sub")
 	os.MkdirAll(subDir, 0755)
 	dstPath := filepath.Join(subDir, "original.png")
 	os.Rename(srcPath, dstPath)
 
-	// Second sync — should detect move
-	r2, err := Sync(context.Background(), database, cfg, func(string) {})
-	if err != nil {
-		t.Fatal(err)
-	}
+	r2 := env.sync(t, database)
 	if r2.Moved != 1 {
 		t.Errorf("Moved = %d, want 1", r2.Moved)
 	}
@@ -220,7 +202,7 @@ func TestFolderTree_Empty(t *testing.T) {
 }
 
 func TestFolderTree_WithImages(t *testing.T) {
-	database, cfg, galleryDir := setupSyncTest(t)
+	database, env, galleryDir := setupSyncTest(t)
 
 	// Root image (10x10)
 	createTestPNGFileSize(t, galleryDir, "root.png", 10, 10)
@@ -230,7 +212,7 @@ func TestFolderTree_WithImages(t *testing.T) {
 	os.MkdirAll(subDir, 0755)
 	createTestPNGFileSize(t, subDir, "sub.png", 11, 10)
 
-	Sync(context.Background(), database, cfg, func(string) {})
+	env.sync(t, database)
 
 	nodes, err := FolderTree(database)
 	if err != nil {
@@ -282,21 +264,21 @@ func TestCountSlashes(t *testing.T) {
 }
 
 func TestSync_ContextCanceled(t *testing.T) {
-	database, cfg, galleryDir := setupSyncTest(t)
+	database, env, galleryDir := setupSyncTest(t)
 	createTestPNGFile(t, galleryDir, "ctx.png")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
 
-	_, err := Sync(ctx, database, cfg, func(string) {})
+	_, err := Sync(ctx, database, env.galleryPath, env.thumbnailsPath, env.maxFileSizeMB, func(int, int, string) {})
 	// Should return context error or succeed before cancellation
 	_ = err // either is acceptable
 }
 
 func TestWatcher_IngestsFile(t *testing.T) {
-	database, cfg, galleryDir := setupSyncTest(t)
+	database, env, galleryDir := setupSyncTest(t)
 
-	w, err := NewWatcher(cfg, database, nil)
+	w, err := NewWatcher(env.galleryPath, env.thumbnailsPath, env.maxFileSizeMB, database, nil)
 	if err != nil {
 		if strings.Contains(err.Error(), "too many open files") {
 			t.Skip("skipping: system file descriptor limit reached")

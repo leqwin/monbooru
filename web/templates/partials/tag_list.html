@@ -9,8 +9,8 @@
       <ul class="tag-list" data-source="{{.Source}}">
         {{range .Tags}}
         <li class="tag-item" data-tag-id="{{.TagID}}" data-source="{{if .IsAuto}}auto{{else}}user{{end}}">
-          <a href="/?q={{.TagName}}" class="tag-chip-name" style="color:{{.Color}}">{{.TagName}}</a>
-          {{if .IsAuto}}<span class="auto-badge" title="auto-tagged">auto</span>{{end}}
+          <a href="/?q={{.Category}}:{{.TagName}}" class="tag-chip-name" style="color:{{.Color}}">{{.TagName}}</a>
+          {{if .IsAuto}}<span class="auto-badge" title="auto-tagged">auto</span>{{with autoConfPct .Confidence}}<span class="auto-conf">{{.}}%</span>{{end}}{{end}}
           <button class="tag-remove-btn"
                   hx-delete="/images/{{$.ImageID}}/tags/{{.TagID}}"
                   hx-target="#image-tags"

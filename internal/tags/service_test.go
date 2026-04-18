@@ -204,14 +204,14 @@ func TestMergeGeneralIntoCategorized(t *testing.T) {
 	imgID := insertTestImage(t, database, "merge_gen_a")
 	imgUnique := insertTestImage(t, database, "merge_gen_b")
 
-	// Pair with a unique categorized counterpart, only auto-tagged usage —
+	// Pair with a unique categorized counterpart, only auto-tagged usage -
 	// should merge.
 	gen, _ := svc.GetOrCreateTag("hakurei_reimu", generalID)
 	chr, _ := svc.GetOrCreateTag("hakurei_reimu", characterID)
 	conf := 0.9
 	svc.AddTagToImage(imgID, gen.ID, true, &conf)
 
-	// General tag with no categorized counterpart — left alone.
+	// General tag with no categorized counterpart - left alone.
 	lonely, _ := svc.GetOrCreateTag("solo", generalID)
 	svc.AddTagToImage(imgUnique, lonely.ID, true, &conf)
 
@@ -262,7 +262,7 @@ func TestMergeGeneralIntoCategorized_PreservesUserTagged(t *testing.T) {
 
 	imgID := insertTestImage(t, database, "merge_gen_user")
 
-	// User added the general tag manually — it must not be swallowed even
+	// User added the general tag manually - it must not be swallowed even
 	// when a unique categorized counterpart exists.
 	gen, _ := svc.GetOrCreateTag("hakurei_reimu", generalID)
 	svc.GetOrCreateTag("hakurei_reimu", characterID)
@@ -316,7 +316,7 @@ func TestSuggestTags_PrefixFirst(t *testing.T) {
 	svc.GetOrCreateTag("abc_456", catID)
 
 	// Increment usage for xyz_abc so it would rank higher if not for prefix rule
-	// (we won't actually add to images — just note that prefix should come first)
+	// (we won't actually add to images - just note that prefix should come first)
 	results, err := svc.SuggestTags("abc", 10)
 	if err != nil {
 		t.Fatal(err)
@@ -658,9 +658,9 @@ func TestRemoveTagFromImage_NotOnImage(t *testing.T) {
 	imgID := insertTestImage(t, database, "rem_not_on")
 
 	tag, _ := svc.GetOrCreateTag("not_on_image", catID)
-	// Remove a tag that was never added — should not error
+	// Remove a tag that was never added - should not error
 	err := svc.RemoveTagFromImage(imgID, tag.ID)
-	// Returns error or not — behavior depends on implementation
+	// Returns error or not - behavior depends on implementation
 	_ = err
 }
 
@@ -846,8 +846,6 @@ func TestCreateCategory_Duplicate(t *testing.T) {
 		t.Error("expected error for duplicate category name")
 	}
 }
-
-func ptrFloat(f float64) *float64 { return &f }
 
 func TestChangeTagCategory_RejectsDuplicateInTarget(t *testing.T) {
 	_, svc := setupTestDB(t)

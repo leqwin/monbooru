@@ -14,7 +14,6 @@ import (
 
 	_ "golang.org/x/image/webp"
 
-	"github.com/leqwin/monbooru/internal/config"
 	"github.com/leqwin/monbooru/internal/db"
 	"github.com/leqwin/monbooru/internal/logx"
 	"github.com/leqwin/monbooru/internal/metadata"
@@ -39,7 +38,9 @@ func FolderPath(galleryPath, filePath string) string {
 
 // Ingest processes a single file: hashes it, inserts into DB, extracts metadata, generates thumbnail.
 // Returns (image, isDuplicate, error).
-func Ingest(database *db.DB, cfg *config.Config, path, fileType string) (*models.Image, bool, error) {
+// galleryPath is the root used to compute folder_path; thumbnailsPath is the
+// target for the generated thumbnail.
+func Ingest(database *db.DB, galleryPath, thumbnailsPath, path, fileType string) (*models.Image, bool, error) {
 	hash, err := HashFile(path)
 	if err != nil {
 		return nil, false, fmt.Errorf("hashing file: %w", err)
@@ -49,8 +50,15 @@ func Ingest(database *db.DB, cfg *config.Config, path, fileType string) (*models
 	// EACCES when the file was originally written by another user.
 	ClaimOwnership(path)
 
+	return ingestWithHash(database, galleryPath, thumbnailsPath, path, fileType, hash)
+}
+
+// ingestWithHash is the body of Ingest minus the HashFile + ClaimOwnership
+// preamble. Sync uses it directly so files don't get hashed twice (once during
+// the walk, once again inside Ingest) on large libraries.
+func ingestWithHash(database *db.DB, galleryPath, thumbnailsPath, path, fileType, hash string) (*models.Image, bool, error) {
 	var existingID int64
-	err = database.Read.QueryRow(
+	err := database.Read.QueryRow(
 		`SELECT id FROM images WHERE sha256 = ?`, hash,
 	).Scan(&existingID)
 
@@ -67,8 +75,8 @@ func Ingest(database *db.DB, cfg *config.Config, path, fileType string) (*models
 		img.IsMissing = isMissingInt == 1
 
 		if img.IsMissing {
-			// File was previously marked missing and has now reappeared — re-activate it.
-			newFolder := FolderPath(cfg.Paths.GalleryPath, path)
+			// File was previously marked missing and has now reappeared - re-activate it.
+			newFolder := FolderPath(galleryPath, path)
 			tx, txErr := database.Write.Begin()
 			if txErr != nil {
 				return nil, false, fmt.Errorf("begin reactivation tx: %w", txErr)
@@ -95,7 +103,7 @@ func Ingest(database *db.DB, cfg *config.Config, path, fileType string) (*models
 			if err := tx.Commit(); err != nil {
 				return nil, false, fmt.Errorf("commit reactivation: %w", err)
 			}
-			Generate(path, cfg.Paths.ThumbnailsPath, existingID, img.FileType)
+			Generate(path, thumbnailsPath, existingID, img.FileType)
 			img.IsMissing = false
 			img.CanonicalPath = path
 			img.FolderPath = newFolder
@@ -103,7 +111,7 @@ func Ingest(database *db.DB, cfg *config.Config, path, fileType string) (*models
 			return &img, false, nil
 		}
 
-		// Normal duplicate — insert alias path row
+		// Normal duplicate - insert alias path row
 		_, aliasErr := database.Write.Exec(
 			`INSERT OR IGNORE INTO image_paths (image_id, path, is_canonical) VALUES (?, ?, 0)`,
 			existingID, path,
@@ -117,13 +125,13 @@ func Ingest(database *db.DB, cfg *config.Config, path, fileType string) (*models
 		return nil, false, fmt.Errorf("checking sha256: %w", err)
 	}
 
-	// New file — gather info
+	// New file - gather info
 	fi, err := os.Stat(path)
 	if err != nil {
 		return nil, false, fmt.Errorf("stat file: %w", err)
 	}
 
-	folderPath := FolderPath(cfg.Paths.GalleryPath, path)
+	folderPath := FolderPath(galleryPath, path)
 
 	var imgWidth, imgHeight *int
 	if !IsVideoType(fileType) {
@@ -222,7 +230,7 @@ func Ingest(database *db.DB, cfg *config.Config, path, fileType string) (*models
 		return nil, false, fmt.Errorf("committing ingest: %w", err)
 	}
 
-	if err := Generate(path, cfg.Paths.ThumbnailsPath, imgID, fileType); err != nil {
+	if err := Generate(path, thumbnailsPath, imgID, fileType); err != nil {
 		logx.Warnf("thumbnail generation failed for %q: %v", path, err)
 	}
 

@@ -687,7 +687,7 @@ dialog .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
 }
 .source-badge-sub { color: var(--fg-dim); border-color: var(--border); }
 
-/* Detail page — two-column layout */
+/* Detail page - two-column layout */
 #detail-page {
   padding: 16px;
 }
@@ -898,6 +898,7 @@ dialog .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
 .tag-chip-name { text-decoration: none; }
 .tag-chip-name:hover { text-decoration: underline; }
 .auto-badge { font-size: 10px; color: var(--fg-dim); border: 1px solid var(--border); padding: 0 2px; margin-left: 2px; }
+.auto-conf { font-size: 10px; color: var(--fg-dim); margin-left: 2px; }
 .tag-remove-btn {
   background: none;
   border: none;
@@ -910,7 +911,7 @@ dialog .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
 .tag-remove-btn:hover { color: var(--warning); }
 .no-tags { color: var(--fg-dim); font-size: 12px; font-style: italic; }
 
-/* Tag editor — add form and suggestions */
+/* Tag editor - add form and suggestions */
 .add-tag-form {
   display: flex;
   gap: 6px;
@@ -931,7 +932,7 @@ dialog .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
   max-height: 200px;
   overflow-y: auto;
 }
-/* Tag input suggest in detail page — anchored below the input row */
+/* Tag input suggest in detail page - anchored below the input row */
 .tag-suggest-dropdown {
   position: absolute;
   top: 100%;
@@ -1012,6 +1013,22 @@ dialog .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
 .tagger-table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
 .tagger-table th { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); font-weight: normal; color: var(--fg-dim); }
 .tagger-table td { padding: 4px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+
+.gallery-table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
+.gallery-table th { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); font-weight: normal; color: var(--fg-dim); }
+.gallery-table td { padding: 4px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.gallery-table code { color: var(--fg-dim); font-size: 12px; }
+.gallery-switch-list { list-style: none; padding: 0; margin: 0 0 12px 0; }
+.gallery-switch-list li { padding: 4px 0; }
+.gallery-switch-current { color: var(--fg-dim); }
+
+.add-gallery-form { display: grid; grid-template-columns: 8em minmax(18em, 30em); gap: 4px 8px; align-items: center; max-width: 40em; }
+.add-gallery-form .field { display: contents; }
+.add-gallery-form .field label { color: var(--fg-dim); font-size: 13px; }
+.add-gallery-form button[type=submit] { grid-column: 2; justify-self: start; margin-top: 4px; }
+
+.btn-set-default { color: #aa66cc; border-color: #aa66cc; }
+.btn-set-default:hover { color: #c99bdd; border-color: #c99bdd; }
 .status-ok { color: var(--fg-dim); }
 .status-err { color: var(--warning); }
 .status-badge {
@@ -1059,7 +1076,7 @@ dialog .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
 .related-mini-card img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .related-mini-card:hover { border-color: var(--accent); }
 
-/* Missing banner (yellow — file absent from disk) */
+/* Missing banner (yellow - file absent from disk) */
 .missing-banner {
   background: var(--bg-input);
   border: 1px solid var(--warning);
@@ -1133,7 +1150,7 @@ dialog .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
 .cat-table-small { width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 6px; }
 .cat-table-small td { padding: 2px 4px; }
 
-/* Tags page — action column hugs its buttons; Name takes the remaining space */
+/* Tags page - action column hugs its buttons; Name takes the remaining space */
 .tag-actions { display: flex; gap: 4px; align-items: center; white-space: nowrap; }
 .tag-table th:last-child, .tag-table td:last-child { width: 1%; white-space: nowrap; }
 .cat-select {

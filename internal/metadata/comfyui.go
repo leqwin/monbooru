@@ -12,11 +12,9 @@ import (
 
 // sanitizeComfyJSON replaces Python-specific non-standard JSON values (NaN,
 // Infinity, -Infinity) with null so Go's JSON parser can handle ComfyUI's
-// output. The previous implementation used strings.ReplaceAll and would
-// mangle these substrings inside quoted string values (e.g. a prompt like
-// "foo:Infinity bar" would become "foo:null bar"); we now walk the input
-// token by token, tracking whether we are inside a string, and only touch
-// unquoted regions.
+// output. The walk tracks string state so that prompts like
+// "foo:Infinity bar" keep their literal content untouched; only unquoted
+// regions are rewritten.
 func sanitizeComfyJSON(s string) string {
 	// Quick check to avoid allocation when not needed.
 	if !strings.Contains(s, "NaN") && !strings.Contains(s, "Infinity") {
@@ -299,7 +297,7 @@ func parseComfyNodesDict(workflow map[string]json.RawMessage, meta *models.Comfy
 }
 
 // ParseComfyWorkflowNodes parses the raw_workflow JSON and returns a structured
-// list of nodes suitable for display — one entry per node, with scalar inputs shown
+// list of nodes suitable for display - one entry per node, with scalar inputs shown
 // as values and array (reference) inputs shown as "→ nodeKey". Nodes are sorted
 // by their string key (alphabetical). Nodes with no displayable inputs are included
 // to give a complete picture of the workflow graph.
@@ -317,7 +315,7 @@ func ParseComfyWorkflowNodes(raw string) []models.ComfyNode {
 
 	type rawNode struct {
 		ClassType string                     `json:"class_type"`
-		Meta      struct{ Title string }    `json:"_meta"`
+		Meta      struct{ Title string }     `json:"_meta"`
 		Inputs    map[string]json.RawMessage `json:"inputs"`
 	}
 
@@ -399,7 +397,7 @@ func comfyParamToDisplay(name string, raw json.RawMessage) *models.ComfyNodePara
 		}
 		return &models.ComfyNodeParam{Name: name, Value: val}
 	}
-	// Try as an array — likely a reference [nodeKey, slotIndex]
+	// Try as an array - likely a reference [nodeKey, slotIndex]
 	var arr []json.RawMessage
 	if err := json.Unmarshal(raw, &arr); err == nil && len(arr) >= 1 {
 		var ref string
@@ -515,7 +513,7 @@ func applyComfyNodeInputs(nodeType string, inputs map[string]json.RawMessage, me
 			}
 		}
 	case "Lora Loader Stack (rgthree)":
-		// Multi-lora loader — collect non-None loras
+		// Multi-lora loader - collect non-None loras
 		for i := 1; i <= 10; i++ {
 			key := fmt.Sprintf("lora_%02d", i)
 			if loraRaw, ok := inputs[key]; ok {

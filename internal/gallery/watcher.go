@@ -11,7 +11,6 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
-	"github.com/leqwin/monbooru/internal/config"
 	"github.com/leqwin/monbooru/internal/db"
 	"github.com/leqwin/monbooru/internal/jobs"
 	"github.com/leqwin/monbooru/internal/logx"
@@ -19,42 +18,47 @@ import (
 
 // Watcher watches the gallery directory for new files and ingests them.
 type Watcher struct {
-	fsw     *fsnotify.Watcher
-	cfg     *config.Config
-	db      *db.DB
-	jobs    *jobs.Manager
-	OnEvent func(msg string) // callback for status notifications (may be nil)
+	fsw            *fsnotify.Watcher
+	galleryPath    string
+	thumbnailsPath string
+	maxFileSizeMB  int
+	db             *db.DB
+	jobs           *jobs.Manager
+	OnEvent        func(msg string) // callback for status notifications (may be nil)
+	OnChange       func()           // callback fired after any image add/remove (may be nil)
 
 	mu     sync.Mutex
 	timers map[string]*time.Timer
 }
 
-// NewWatcher creates and initializes a filesystem watcher.
-func NewWatcher(cfg *config.Config, database *db.DB, jobManager *jobs.Manager) (*Watcher, error) {
+// NewWatcher creates and initializes a filesystem watcher for one gallery.
+func NewWatcher(galleryPath, thumbnailsPath string, maxFileSizeMB int, database *db.DB, jobManager *jobs.Manager) (*Watcher, error) {
 	fsw, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
 	}
 
 	w := &Watcher{
-		fsw:    fsw,
-		cfg:    cfg,
-		db:     database,
-		jobs:   jobManager,
-		timers: map[string]*time.Timer{},
+		fsw:            fsw,
+		galleryPath:    galleryPath,
+		thumbnailsPath: thumbnailsPath,
+		maxFileSizeMB:  maxFileSizeMB,
+		db:             database,
+		jobs:           jobManager,
+		timers:         map[string]*time.Timer{},
 	}
 
-	if addErr := fsw.Add(cfg.Paths.GalleryPath); addErr != nil {
+	if addErr := fsw.Add(galleryPath); addErr != nil {
 		fsw.Close()
 		return nil, fmt.Errorf("fsnotify watch gallery root: %w", addErr)
 	}
-	logx.Infof("watcher: watching %s", cfg.Paths.GalleryPath)
+	logx.Infof("watcher: watching %s", galleryPath)
 
 	// Walk and watch all existing subdirectories, stopping gracefully on inotify limits.
 	watchCount := 1
 	limitHit := false
-	filepath.WalkDir(cfg.Paths.GalleryPath, func(path string, d os.DirEntry, err error) error {
-		if err != nil || !d.IsDir() || path == cfg.Paths.GalleryPath {
+	filepath.WalkDir(galleryPath, func(path string, d os.DirEntry, err error) error {
+		if err != nil || !d.IsDir() || path == galleryPath {
 			return nil
 		}
 		if limitHit {
@@ -168,9 +172,9 @@ func (w *Watcher) ingestFile(path string) {
 
 	// Mirror the size filter Sync applies in Phase 1. Without it the
 	// watcher silently ingests any file the user drops into the gallery,
-	// however large — including multi-GB videos that would fail to
+	// however large - including multi-GB videos that would fail to
 	// thumbnail and hold a write transaction for minutes.
-	if maxMB := w.cfg.Gallery.MaxFileSizeMB; maxMB > 0 {
+	if maxMB := w.maxFileSizeMB; maxMB > 0 {
 		if info, statErr := os.Stat(path); statErr == nil {
 			if info.Size() > int64(maxMB)*1024*1024 {
 				logx.Warnf("watcher: skipping %q (size %d exceeds %d MB)",
@@ -180,7 +184,7 @@ func (w *Watcher) ingestFile(path string) {
 		}
 	}
 
-	_, isDup, err := Ingest(w.db, w.cfg, path, ft)
+	_, isDup, err := Ingest(w.db, w.galleryPath, w.thumbnailsPath, path, ft)
 	if err != nil {
 		logx.Warnf("watcher ingest %q: %v", path, err)
 	} else if isDup {
@@ -190,12 +194,15 @@ func (w *Watcher) ingestFile(path string) {
 		if w.OnEvent != nil {
 			w.OnEvent("watcher: added " + filepath.Base(path))
 		}
+		if w.OnChange != nil {
+			w.OnChange()
+		}
 	}
 }
 
 // markFileMissing marks a file as is_missing=true in the DB if it exists.
 func (w *Watcher) markFileMissing(path string) {
-	if !strings.HasPrefix(path, w.cfg.Paths.GalleryPath) {
+	if !strings.HasPrefix(path, w.galleryPath) {
 		return
 	}
 
@@ -221,5 +228,8 @@ func (w *Watcher) markFileMissing(path string) {
 	logx.Infof("watcher: marked missing %q (id=%d)", path, imgID)
 	if w.OnEvent != nil {
 		w.OnEvent("watcher: removed " + filepath.Base(path))
+	}
+	if w.OnChange != nil {
+		w.OnChange()
 	}
 }

@@ -17,6 +17,10 @@ type tagResponse struct {
 
 // listTags handles GET /api/v1/tags.
 func (h *Handler) listTags(w http.ResponseWriter, r *http.Request) {
+	g, ok := h.resolveGallery(w, r)
+	if !ok {
+		return
+	}
 	q := r.URL.Query()
 	prefix := q.Get("q")
 	catName := q.Get("category")
@@ -36,14 +40,14 @@ func (h *Handler) listTags(w http.ResponseWriter, r *http.Request) {
 
 	if catName != "" {
 		var catID int64
-		if err := h.db.Read.QueryRow(
+		if err := g.DB.Read.QueryRow(
 			`SELECT id FROM tag_categories WHERE name = ?`, catName,
 		).Scan(&catID); err == nil {
 			filter.CategoryID = &catID
 		}
 	}
 
-	tagList, total, err := h.tagSvc.ListTags(filter)
+	tagList, total, err := g.TagSvc.ListTags(filter)
 	if err != nil {
 		apiError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return

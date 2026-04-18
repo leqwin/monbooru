@@ -137,6 +137,11 @@ type JobState struct {
 	FinishedAt *time.Time
 	Summary    string
 	Error      string
+	// WatcherNotices is a monotonic counter the watcher bumps on every
+	// ingest/remove event that happens while a job is running. The client
+	// observes it as a refresh signal (the main Summary/Message fields keep
+	// showing the running job's progress).
+	WatcherNotices int
 }
 
 type SearchResult struct {

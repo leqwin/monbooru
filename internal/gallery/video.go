@@ -92,8 +92,8 @@ func generateVideoHover(srcPath, dstPath string) error {
 		"-t", "4",
 		"-i", srcPath,
 		"-vf", fmt.Sprintf("scale=%d:-1", thumbMaxDim),
-		"-an",          // no audio
-		"-loop", "0",   // infinite loop
+		"-an",        // no audio
+		"-loop", "0", // infinite loop
 		tmpName,
 	}
 	cmd := exec.Command("ffmpeg", args...)
@@ -106,7 +106,7 @@ func generateVideoHover(srcPath, dstPath string) error {
 
 // generateGIFHover converts an animated GIF into a scaled animated WebP
 // preview reused by the gallery hover swap. Silently skipped when ffmpeg
-// is missing — the static first-frame thumbnail remains in place.
+// is missing - the static first-frame thumbnail remains in place.
 func generateGIFHover(srcPath, dstPath string) error {
 	if !ffmpegAvailable() {
 		return fmt.Errorf("ffmpeg not available")

@@ -218,6 +218,9 @@ function updateBatchBar() {
   if (grid) grid.classList.toggle('batch-active', checked.length > 0);
   const countEl = document.getElementById('batch-count');
   if (countEl) countEl.textContent = checked.length + ' selected';
+  // Hide the header's Delete-all so users aiming for Delete-selected can't misclick.
+  const delAll = document.getElementById('delete-search-btn');
+  if (delAll) delAll.hidden = checked.length > 0;
 }
 
 function clearSelection() {
@@ -258,8 +261,8 @@ function refreshJobStatus() {
 // ---------------------------------------------------------------------------
 // Shared confirmation dialog. Replaces native confirm() and hx-confirm with
 // the same <dialog> modal style used by rename/save-search/etc.
-//   showConfirm(message, onOk, danger?)  — explicit callers (fetch handlers)
-//   htmx:confirm event listener          — intercepts hx-confirm attributes
+//   showConfirm(message, onOk, danger?)  - explicit callers (fetch handlers)
+//   htmx:confirm event listener          - intercepts hx-confirm attributes
 // An hx-confirm element may set data-confirm-danger="..." for a second,
 // red-tinted line of warning text (same pattern as the bulk-delete dialog).
 // ---------------------------------------------------------------------------
@@ -399,7 +402,7 @@ function initFolderTree() {
   var treeToggle = document.getElementById('folder-tree-toggle');
   var treeList = document.getElementById('folder-tree-list');
 
-  // Subfolder toggles — use onclick to avoid duplicate listeners
+  // Subfolder toggles - use onclick to avoid duplicate listeners
   document.querySelectorAll('.folder-toggle-btn[data-path]').forEach(function(btn) {
     var path = btn.dataset.path;
     var targetId = btn.dataset.target || ('fc-' + path);
@@ -408,7 +411,7 @@ function initFolderTree() {
 
     // urlDriven: this expansion comes from navigation context (current folder
     // or active source filter). Gated by firstInit so a user collapse isn't
-    // undone on the next htmx settle — once the button has been seen, its
+    // undone on the next htmx settle - once the button has been seen, its
     // open/close state is the cookie's to decide.
     var firstInit = !btn.dataset.folderInit;
     btn.dataset.folderInit = '1';
@@ -505,13 +508,26 @@ function applySearchSuggest(tagName) {
 // Auto-reload gallery/tags after job completes; auto-clear status after 30s
 // ---------------------------------------------------------------------------
 var _jobAutoClearTimer = null;
-var _jobAutoClearStarted = false; // only start the 30s timer once per job completion
+// FinishedAt the current auto-clear timer was armed against; re-armed on newer
+// surface events so rolling watcher activity doesn't trip the dismiss mid-batch
+// (which would strip hx-trigger and silence the widget until page reload).
+var _jobAutoClearFinishedAt = '';
 // Track the FinishedAt timestamp of the last reloaded event so each new
 // watcher/job completion triggers exactly one reload.
 var _lastReloadedFinishedAt = '';
+// Processed cursor for the currently-running job. The gallery grid is
+// refreshed whenever the worker bumps this so changes show up without a
+// manual reload, mirroring the watcher's per-event surface path. Applies
+// to progress-emitting job types listed in the handler below.
+var _lastJobProcessed = -1;
+// Watcher-event counter. Bumped by the server whenever the filesystem
+// watcher surfaces an ingest/remove while a job is running; gives the grid
+// a refresh signal for job types that don't themselves change the image
+// list (autotag) or whose progress cursor is scoped to existing rows.
+var _lastWatcherNotices = -1;
 // One-shot latch set by user-initiated deletes. When the delete job finishes,
 // the htmx.ajax reload path intermittently fails to settle the gallery-grid
-// swap, leaving the view stale. Force a full reload instead — only for the
+// swap, leaving the view stale. Force a full reload instead - only for the
 // delete case; other job completions still use the incremental swap.
 var _pendingGalleryReload = false;
 
@@ -532,21 +548,65 @@ document.body.addEventListener('htmx:afterSettle', function(e) {
 
   var isDone = !!el.querySelector('.job-done');
   var isErr  = !!el.querySelector('.job-error');
-  var isIdle = !isDone && !isErr && !el.querySelector('.job-running');
+  // `job-running` lives on #job-status itself, not a descendant, so use
+  // classList instead of querySelector (which would always miss it).
+  var isRunning = el.classList.contains('job-running');
   var finishedAt = el.dataset.finishedAt || '';
+
+  // Running progress-emitting jobs: refresh the gallery grid whenever the
+  // worker's Processed cursor advances so new ingests, deletions, and
+  // re-extractions show up without a manual reload. The listed types call
+  // jobs.Update(processed,…) inside their worker loops; others either
+  // finish quickly (watcher events surface via FinishedAt) or don't
+  // visibly alter the gallery during the run. Sits above the isIdle bail
+  // so the running state reaches this branch.
+  //
+  // WatcherNotices covers the other half: the filesystem watcher may ingest
+  // or remove files while any job runs, and autotag's own cursor doesn't
+  // reflect those. A bump triggers the same grid refresh regardless of job
+  // type (sync drops watcher events upstream, so its counter stays at 0).
+  var jobType = el.dataset.jobType || '';
+  var processed = parseInt(el.dataset.processed || '0', 10);
+  var watcherNotices = parseInt(el.dataset.watcherNotices || '0', 10);
+  var refreshDuringRun = jobType === 'sync' || jobType === 'delete' || jobType === 're-extract';
+  if (!isRunning) {
+    _lastJobProcessed = -1;
+    _lastWatcherNotices = -1;
+  } else {
+    var needRefresh = false;
+    if (refreshDuringRun && processed > 0 && processed !== _lastJobProcessed) {
+      _lastJobProcessed = processed;
+      needRefresh = true;
+    }
+    if (watcherNotices > 0 && watcherNotices !== _lastWatcherNotices) {
+      _lastWatcherNotices = watcherNotices;
+      needRefresh = true;
+    }
+    if (needRefresh) {
+      var runningGrid = document.getElementById('gallery-grid');
+      if (runningGrid && window.htmx) {
+        var runURL = new URL(window.location.href);
+        window.htmx.ajax('GET', runURL.pathname + runURL.search, {target: '#gallery-grid', swap: 'innerHTML'});
+      }
+    }
+  }
+
+  var isIdle = !isDone && !isErr && !isRunning;
 
   // Reset auto-clear flag when job-status goes idle (dismissed)
   if (isIdle) {
-    _jobAutoClearStarted = false;
+    _jobAutoClearFinishedAt = '';
     if (_jobAutoClearTimer) { clearTimeout(_jobAutoClearTimer); _jobAutoClearTimer = null; }
     return;
   }
 
-  // Auto-clear after 30s when done/error — start the timer only once
-  if ((isDone || isErr) && !_jobAutoClearStarted) {
-    _jobAutoClearStarted = true;
+  // Auto-clear 30s after the last surface event. Re-arm whenever FinishedAt
+  // advances so rolling watcher events during a batch keep the widget alive.
+  if ((isDone || isErr) && finishedAt && finishedAt !== _jobAutoClearFinishedAt) {
+    _jobAutoClearFinishedAt = finishedAt;
+    if (_jobAutoClearTimer) clearTimeout(_jobAutoClearTimer);
     _jobAutoClearTimer = setTimeout(function() {
-      _jobAutoClearStarted = false;
+      _jobAutoClearFinishedAt = '';
       dismissJobStatus();
     }, 30000);
   }
@@ -614,6 +674,10 @@ function getCSRFToken() {
 
 function dismissJobStatus() {
   _lastReloadedFinishedAt = '';
+  _lastJobProcessed = -1;
+  _lastWatcherNotices = -1;
+  _jobAutoClearFinishedAt = '';
+  if (_jobAutoClearTimer) { clearTimeout(_jobAutoClearTimer); _jobAutoClearTimer = null; }
   // Call backend to clear job state, then clear the UI
   var csrf = getCSRFToken();
   fetch('/internal/job/dismiss', {

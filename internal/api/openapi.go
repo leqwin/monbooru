@@ -135,6 +135,7 @@ func buildSpec(baseURL string) map[string]any {
 				"post": map[string]any{
 					"summary":     "Add an image",
 					"operationId": "createImage",
+					"parameters":  []map[string]any{galleryParam()},
 					"requestBody": map[string]any{
 						"required": true,
 						"content": map[string]any{
@@ -156,7 +157,7 @@ func buildSpec(baseURL string) map[string]any {
 									"type":     "object",
 									"required": []string{"path"},
 									"properties": map[string]any{
-										"path":        map[string]any{"type": "string", "description": "Path to a file already on disk. Absolute paths are used verbatim; relative paths are resolved under gallery/<folder> when folder is set, otherwise under the gallery root."},
+										"path":        map[string]any{"type": "string", "description": "Path to a file already on disk. Absolute paths are used verbatim; relative paths are resolved under gallery/<folder> when folder is set, otherwise under the gallery root. WARNING: absolute paths give a token holder read access to anything the monbooru process can stat."},
 										"tags":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 										"folder":      map[string]any{"type": "string", "description": "Destination subfolder for relative paths"},
 										"autotag":     map[string]any{"type": "boolean", "description": "Kick off an auto-tag job on the new image"},
@@ -180,6 +181,7 @@ func buildSpec(baseURL string) map[string]any {
 					"summary":     "Search images",
 					"operationId": "searchImages",
 					"parameters": []map[string]any{
+						galleryParam(),
 						queryParam("q", "Search query (tag list, filters, wildcards)"),
 						queryParam("sort", "Sort field: newest, filesize, random"),
 						queryParam("order", "Sort order: asc, desc"),
@@ -195,7 +197,7 @@ func buildSpec(baseURL string) map[string]any {
 				"get": map[string]any{
 					"summary":     "Get image metadata",
 					"operationId": "getImage",
-					"parameters":  []map[string]any{pathParam("id", "Image ID")},
+					"parameters":  []map[string]any{pathParam("id", "Image ID"), galleryParam()},
 					"responses": map[string]any{
 						"200": map[string]any{"description": "Image metadata", "content": jsonContent("#/components/schemas/Image")},
 						"404": map[string]any{"description": "Not found", "content": jsonContent("#/components/schemas/Error")},
@@ -206,6 +208,7 @@ func buildSpec(baseURL string) map[string]any {
 					"operationId": "deleteImage",
 					"parameters": []map[string]any{
 						pathParam("id", "Image ID"),
+						galleryParam(),
 						queryParam("delete_empty_folder", "Remove containing folder if empty after deletion"),
 					},
 					"responses": map[string]any{
@@ -219,13 +222,13 @@ func buildSpec(baseURL string) map[string]any {
 				"post": map[string]any{
 					"summary":     "Add tags to image",
 					"operationId": "addImageTags",
-					"parameters":  []map[string]any{pathParam("id", "Image ID")},
+					"parameters":  []map[string]any{pathParam("id", "Image ID"), galleryParam()},
 					"requestBody": map[string]any{
 						"required": true,
 						"content": map[string]any{
 							"application/json": map[string]any{
 								"schema": map[string]any{
-									"type": "object",
+									"type":     "object",
 									"required": []string{"tags"},
 									"properties": map[string]any{
 										"tags": map[string]any{
@@ -245,13 +248,13 @@ func buildSpec(baseURL string) map[string]any {
 				"delete": map[string]any{
 					"summary":     "Remove tags from image",
 					"operationId": "removeImageTags",
-					"parameters":  []map[string]any{pathParam("id", "Image ID")},
+					"parameters":  []map[string]any{pathParam("id", "Image ID"), galleryParam()},
 					"requestBody": map[string]any{
 						"required": true,
 						"content": map[string]any{
 							"application/json": map[string]any{
 								"schema": map[string]any{
-									"type": "object",
+									"type":     "object",
 									"required": []string{"tags"},
 									"properties": map[string]any{
 										"tags": map[string]any{
@@ -274,6 +277,7 @@ func buildSpec(baseURL string) map[string]any {
 					"summary":     "List tags",
 					"operationId": "listTags",
 					"parameters": []map[string]any{
+						galleryParam(),
 						queryParam("q", "Prefix filter"),
 						queryParam("category", "Filter by category name"),
 						queryParam("sort", "Sort field (usage, alpha)"),
@@ -313,6 +317,12 @@ func queryParam(name, desc string) map[string]any {
 	}
 }
 
+// galleryParam is the shared ?gallery=<name> selector. Omitted means the
+// request targets the active gallery.
+func galleryParam() map[string]any {
+	return queryParam("gallery", "Target gallery name; omit for the active gallery (also accepted as X-Monbooru-Gallery header)")
+}
+
 // openAPIJSON serves the raw OpenAPI JSON spec.
 func (h *Handler) openAPIJSON(w http.ResponseWriter, r *http.Request) {
 	spec := buildSpec(h.cfg.Server.BaseURL)
@@ -322,7 +332,7 @@ func (h *Handler) openAPIJSON(w http.ResponseWriter, r *http.Request) {
 
 // openAPIDocs serves a self-contained HTML documentation page rendered
 // from the same OpenAPI spec served at /api/v1/openapi.json. No external
-// assets are loaded at runtime — the page stays usable offline and the
+// assets are loaded at runtime - the page stays usable offline and the
 // content updates automatically whenever buildSpec changes.
 func (h *Handler) openAPIDocs(w http.ResponseWriter, r *http.Request) {
 	view := extractDocsView(buildSpec(h.cfg.Server.BaseURL))
@@ -552,7 +562,7 @@ var docsTemplate = template.Must(template.New("api-docs").Parse(`<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{.Title}} — Docs</title>
+<title>{{.Title}} - Docs</title>
 <style>
  body { background:#0d0d0d; color:#c8c8c8; font-family:"JetBrains Mono","Fira Mono","Courier New",monospace; font-size:14px; line-height:1.5; padding:24px; max-width:1000px; margin:0 auto; }
  h1 { font-size:20px; font-weight:bold; margin-bottom:4px; }
@@ -583,12 +593,13 @@ var docsTemplate = template.Must(template.New("api-docs").Parse(`<!DOCTYPE html>
  <h1>{{.Title}}</h1>
  <p class="muted">Version {{.Version}} · base URL <code>{{.BaseURL}}</code></p>
  <p>Every endpoint except <code>/docs</code> and <code>/openapi.json</code> requires <code>Authorization: Bearer &lt;token&gt;</code>. Generate a token from Settings → Authentication; while no token is set every authenticated endpoint returns <code>503 api_disabled</code>.</p>
+ <p>Endpoints take an optional <code>?gallery=&lt;name&gt;</code> (or <code>X-Monbooru-Gallery</code> header) to target a specific gallery; omit both for the active one.</p>
  <p class="muted">Raw spec: <a href="/api/v1/openapi.json">openapi.json</a></p>
 
  <h2>Endpoints</h2>
  <ul class="toc">
  {{range .Endpoints}}
-  <li><a href="#{{.Anchor}}"><span class="method method-{{.MethodLower}}">{{.Method}}</span><span class="path">{{.Path}}</span></a>{{if .Summary}} <span class="muted">— {{.Summary}}</span>{{end}}</li>
+  <li><a href="#{{.Anchor}}"><span class="method method-{{.MethodLower}}">{{.Method}}</span><span class="path">{{.Path}}</span></a>{{if .Summary}} <span class="muted">- {{.Summary}}</span>{{end}}</li>
  {{end}}
  </ul>
 
@@ -612,7 +623,7 @@ var docsTemplate = template.Must(template.New("api-docs").Parse(`<!DOCTYPE html>
   {{if .Request}}
   <h3>Request body</h3>
   {{range .Request.MediaTypes}}
-   <p class="muted">Content-Type: <code>{{.ContentType}}</code>{{if .Ref}} — schema <a href="#schema-{{.RefAnchor}}"><code>{{.Ref}}</code></a>{{end}}</p>
+   <p class="muted">Content-Type: <code>{{.ContentType}}</code>{{if .Ref}} - schema <a href="#schema-{{.RefAnchor}}"><code>{{.Ref}}</code></a>{{end}}</p>
    {{if .Required}}<p class="muted">Required: {{range .Required}}<code>{{.}}</code> {{end}}</p>{{end}}
    {{if .Properties}}
    <table>

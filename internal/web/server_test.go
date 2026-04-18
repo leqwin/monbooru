@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -14,23 +16,34 @@ import (
 
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
+	return newTestServerWithDegraded(t, false)
+}
+
+// newTestServerWithDegraded builds a Server over a single in-memory gallery.
+// When degraded=true the gallery_path points at a non-existent directory so
+// the startup probe flips the context's Degraded flag.
+func newTestServerWithDegraded(t *testing.T, degraded bool) *Server {
+	t.Helper()
 	dir := t.TempDir()
-	database, err := db.Open(dir + "/test.db")
-	if err != nil {
-		t.Fatalf("open db: %v", err)
+	galleryDir := filepath.Join(dir, "gallery")
+	if degraded {
+		galleryDir = filepath.Join(dir, "nonexistent_gallery")
+	} else {
+		os.MkdirAll(galleryDir, 0o755)
 	}
-	if err := db.Bootstrap(database); err != nil {
-		t.Fatalf("bootstrap db: %v", err)
-	}
-	t.Cleanup(func() { database.Close() })
 
 	cfg := config.Default()
-	mgr := jobs.NewManager()
+	cfg.Paths.DataPath = filepath.Join(dir, "data")
+	cfg.Galleries[0].GalleryPath = galleryDir
+	cfg.Galleries[0].DBPath = filepath.Join(cfg.Paths.DataPath, "default", "monbooru.db")
+	cfg.Galleries[0].ThumbnailsPath = filepath.Join(cfg.Paths.DataPath, "default", "thumbnails")
+	cfg.Gallery.WatchEnabled = false
 
-	srv, err := NewServer(cfg, "./monbooru.toml", database, mgr, false)
+	srv, err := NewServer(cfg, filepath.Join(dir, "monbooru.toml"), jobs.NewManager())
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
+	t.Cleanup(srv.Close)
 	return srv
 }
 
@@ -235,7 +248,7 @@ func insertTestImage(t *testing.T, database *db.DB) int64 {
 
 func TestDetailPageReturns200(t *testing.T) {
 	srv := newTestServer(t)
-	id := insertTestImage(t, srv.db)
+	id := insertTestImage(t, srv.db())
 	h := srv.Handler()
 
 	req := httptest.NewRequest("GET", fmt.Sprintf("/images/%d", id), nil)
@@ -249,7 +262,7 @@ func TestDetailPageReturns200(t *testing.T) {
 
 func TestDetailPageContainsMetadata(t *testing.T) {
 	srv := newTestServer(t)
-	id := insertTestImage(t, srv.db)
+	id := insertTestImage(t, srv.db())
 	h := srv.Handler()
 
 	req := httptest.NewRequest("GET", fmt.Sprintf("/images/%d", id), nil)
@@ -279,22 +292,7 @@ func TestDetailPageReturns404ForMissingImage(t *testing.T) {
 }
 
 func TestDegradedModeBannerShown(t *testing.T) {
-	dir := t.TempDir()
-	database, err := db.Open(dir + "/test.db")
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	if err := db.Bootstrap(database); err != nil {
-		t.Fatalf("bootstrap db: %v", err)
-	}
-	t.Cleanup(func() { database.Close() })
-
-	cfg := config.Default()
-	mgr := jobs.NewManager()
-	srv, err := NewServer(cfg, "./monbooru.toml", database, mgr, true) // degraded=true
-	if err != nil {
-		t.Fatalf("NewServer: %v", err)
-	}
+	srv := newTestServerWithDegraded(t, true)
 	h := srv.Handler()
 
 	req := httptest.NewRequest("GET", "/", nil)
@@ -311,22 +309,7 @@ func TestDegradedModeBannerShown(t *testing.T) {
 }
 
 func TestDegradedModeSyncBlocked(t *testing.T) {
-	dir := t.TempDir()
-	database, err := db.Open(dir + "/test.db")
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	if err := db.Bootstrap(database); err != nil {
-		t.Fatalf("bootstrap db: %v", err)
-	}
-	t.Cleanup(func() { database.Close() })
-
-	cfg := config.Default()
-	mgr := jobs.NewManager()
-	srv, err := NewServer(cfg, "./monbooru.toml", database, mgr, true) // degraded=true
-	if err != nil {
-		t.Fatalf("NewServer: %v", err)
-	}
+	srv := newTestServerWithDegraded(t, true)
 	h := srv.Handler()
 
 	req := httptest.NewRequest("POST", "/internal/sync", nil)
@@ -342,7 +325,7 @@ func TestDegradedModeSyncBlocked(t *testing.T) {
 func TestMissingImageBannerShown(t *testing.T) {
 	srv := newTestServer(t)
 	// Insert a missing image
-	res, err := srv.db.Write.Exec(`
+	res, err := srv.db().Write.Exec(`
 		INSERT INTO images (canonical_path, file_type, file_size, sha256, is_missing, ingested_at)
 		VALUES ('/nonexistent/file.jpg', 'jpg', 1024, 'deadbeef', 1, datetime('now'))`)
 	if err != nil {
@@ -369,7 +352,7 @@ func TestMissingImageBannerShown(t *testing.T) {
 
 func TestToggleFavoriteReturnsButton(t *testing.T) {
 	srv := newTestServer(t)
-	id := insertTestImage(t, srv.db)
+	id := insertTestImage(t, srv.db())
 	h := srv.Handler()
 
 	// Auth is disabled in test server so session ID is always "anon".
@@ -390,7 +373,7 @@ func TestToggleFavoriteReturnsButton(t *testing.T) {
 
 func TestDeleteImage(t *testing.T) {
 	srv := newTestServer(t)
-	id := insertTestImage(t, srv.db)
+	id := insertTestImage(t, srv.db())
 	h := srv.Handler()
 
 	req := httptest.NewRequest("DELETE", fmt.Sprintf("/images/%d", id), nil)
@@ -404,7 +387,7 @@ func TestDeleteImage(t *testing.T) {
 	}
 	// Verify image is gone
 	var count int
-	srv.db.Read.QueryRow(`SELECT COUNT(*) FROM images WHERE id = ?`, id).Scan(&count)
+	srv.db().Read.QueryRow(`SELECT COUNT(*) FROM images WHERE id = ?`, id).Scan(&count)
 	if count != 0 {
 		t.Error("image should be deleted from DB")
 	}
@@ -517,7 +500,7 @@ func TestPruneMissingImages(t *testing.T) {
 	h := srv.Handler()
 
 	// Insert a missing image
-	srv.db.Write.Exec(`
+	srv.db().Write.Exec(`
 		INSERT INTO images (canonical_path, file_type, file_size, sha256, is_missing, ingested_at)
 		VALUES ('/nonexistent/file.jpg', 'jpg', 1024, 'prune_test_hash', 1, datetime('now'))`)
 
@@ -537,8 +520,97 @@ func TestPruneMissingImages(t *testing.T) {
 
 	// Verify pruned
 	var count int
-	srv.db.Read.QueryRow(`SELECT COUNT(*) FROM images WHERE sha256 = 'prune_test_hash'`).Scan(&count)
+	srv.db().Read.QueryRow(`SELECT COUNT(*) FROM images WHERE sha256 = 'prune_test_hash'`).Scan(&count)
 	if count != 0 {
 		t.Error("missing image should have been pruned")
+	}
+}
+
+// newMultiGalleryServer builds a Server with two galleries so the switch,
+// add, and topbar-dialog paths are exercised. Watchers stay off for tests.
+func newMultiGalleryServer(t *testing.T) *Server {
+	t.Helper()
+	dir := t.TempDir()
+	g1 := filepath.Join(dir, "g1")
+	g2 := filepath.Join(dir, "g2")
+	os.MkdirAll(g1, 0o755)
+	os.MkdirAll(g2, 0o755)
+
+	cfg := config.Default()
+	cfg.Paths.DataPath = filepath.Join(dir, "data")
+	cfg.Gallery.WatchEnabled = false
+	cfg.Galleries = []config.Gallery{
+		{
+			Name: "default", GalleryPath: g1,
+			DBPath:         filepath.Join(cfg.Paths.DataPath, "default", "monbooru.db"),
+			ThumbnailsPath: filepath.Join(cfg.Paths.DataPath, "default", "thumbnails"),
+		},
+		{
+			Name: "stock", GalleryPath: g2,
+			DBPath:         filepath.Join(cfg.Paths.DataPath, "stock", "monbooru.db"),
+			ThumbnailsPath: filepath.Join(cfg.Paths.DataPath, "stock", "thumbnails"),
+		},
+	}
+	cfg.DefaultGallery = "default"
+
+	srv, err := NewServer(cfg, filepath.Join(dir, "monbooru.toml"), jobs.NewManager())
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestGallerySwitcherButtonShownWithMultipleGalleries(t *testing.T) {
+	srv := newMultiGalleryServer(t)
+	h := srv.Handler()
+
+	for _, path := range []string{"/", "/upload", "/categories"} {
+		req := httptest.NewRequest("GET", path, nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+
+		body := w.Body.String()
+		if !strings.Contains(body, `id="gallery-switch-btn"`) {
+			t.Errorf("%s: topbar should show the gallery switcher button with 2+ galleries", path)
+		}
+		if !strings.Contains(body, `id="gallery-switch-dialog"`) {
+			t.Errorf("%s: layout should render the gallery switch dialog with 2+ galleries", path)
+		}
+	}
+}
+
+func TestGallerySwitchChangesActive(t *testing.T) {
+	srv := newMultiGalleryServer(t)
+	h := srv.Handler()
+
+	body := "_csrf=" + srv.csrfToken("anon") + "&name=stock"
+	req := httptest.NewRequest("POST", "/internal/gallery/switch", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-CSRF-Token", srv.csrfToken("anon"))
+	req.Header.Set("HX-Request", "true")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("switch expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if w.Header().Get("HX-Refresh") != "true" {
+		t.Error("switch should respond with HX-Refresh: true")
+	}
+	if srv.activeName != "stock" {
+		t.Errorf("activeName = %q, want stock", srv.activeName)
+	}
+}
+
+func TestGallerySwitcherHiddenWithSingleGallery(t *testing.T) {
+	srv := newTestServer(t)
+	h := srv.Handler()
+
+	req := httptest.NewRequest("GET", "/", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if strings.Contains(w.Body.String(), `id="gallery-switch-btn"`) {
+		t.Error("topbar switcher button should be hidden when only one gallery is configured")
 	}
 }

@@ -121,7 +121,7 @@ func (s *Server) SessionMiddleware(next http.Handler) http.Handler {
 		}
 
 		if !s.cfg.Auth.EnablePassword {
-			// No auth — inject synthetic session so CSRF validation still works.
+			// No auth - inject synthetic session so CSRF validation still works.
 			ctx := context.WithValue(r.Context(), sessionContextKey, "anon")
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
@@ -154,7 +154,7 @@ func isHTMXRequest(r *http.Request) bool {
 
 // clientIP returns the best-effort remote IP for rate-limiting and audit
 // logging. When monbooru runs behind a reverse proxy (Caddy, Traefik, nginx
-// — the README shows Caddy) every request's RemoteAddr is the proxy itself,
+// - the README shows Caddy) every request's RemoteAddr is the proxy itself,
 // which would collapse every LAN client into a single rate-limit bucket.
 // Prefer the first entry of X-Forwarded-For when the immediate peer is a
 // loopback address (the typical reverse-proxy setup); otherwise fall back

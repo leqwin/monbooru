@@ -42,6 +42,10 @@
       </form>
       <span id="sync-flash"></span>
       {{end}}
+      {{with .Galleries}}{{if gt (len .) 1}}
+      <button id="gallery-switch-btn" type="button" title="Switch gallery"
+              onclick="document.getElementById('gallery-switch-dialog').showModal()">[{{$.ActiveGallery}}]</button>
+      {{end}}{{end}}
       {{if .AuthEnabled}}
         <form method="POST" action="/logout" style="display:inline">
           <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
@@ -52,7 +56,7 @@
   </div>
   {{if .Degraded}}
   <div id="degraded-banner" class="degraded-banner">
-    ⚠ Gallery path is unreadable — sync and watch are disabled. Check your configuration.
+    ⚠ Gallery path is unreadable - sync and watch are disabled. Check your configuration.
   </div>
   {{end}}
   <div id="main-layout">
@@ -90,6 +94,32 @@
       </div>
     </form>
   </dialog>
+  {{with .Galleries}}{{if gt (len .) 1}}
+  <dialog id="gallery-switch-dialog">
+    <p>Switch gallery</p>
+    <ul class="gallery-switch-list">
+      {{range .}}
+      <li>
+        {{if eq .Name $.ActiveGallery}}
+          <span class="gallery-switch-current">[current] {{.Name}}</span>
+        {{else}}
+          <form hx-post="/internal/gallery/switch"
+                hx-target="#gallery-switch-flash" hx-swap="innerHTML"
+                style="display:inline">
+            <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+            <input type="hidden" name="name" value="{{.Name}}">
+            <button type="submit">{{.Name}}</button>
+          </form>
+        {{end}}
+      </li>
+      {{end}}
+    </ul>
+    <div id="gallery-switch-flash"></div>
+    <div class="dialog-actions">
+      <button type="button" onclick="document.getElementById('gallery-switch-dialog').close()">Cancel</button>
+    </div>
+  </dialog>
+  {{end}}{{end}}
 </body>
 </html>
 {{end}}

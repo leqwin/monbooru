@@ -2,6 +2,7 @@ package search
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +18,11 @@ type Query struct {
 	RandomSeed int64  // used when Sort=="random" for stable ordering
 	Page       int    // 1-based
 	Limit      int
+	// PresetTotal skips the COUNT(*) query when set to a non-negative
+	// value. Callers that already know the match count (e.g. an unfiltered
+	// gallery page using a cached visible-image count) should set this to
+	// avoid scanning the whole index on large libraries.
+	PresetTotal *int
 }
 
 // Execute runs the query against the DB and returns paginated results.
@@ -43,10 +49,14 @@ func Execute(database *db.DB, q Query) (*models.SearchResult, error) {
 	}
 	offset := (page - 1) * limit
 
-	countSQL := "SELECT COUNT(*) FROM images i WHERE " + where
 	var total int
-	if err := database.Read.QueryRow(countSQL, args...).Scan(&total); err != nil {
-		return nil, fmt.Errorf("count query: %w", err)
+	if q.PresetTotal != nil {
+		total = *q.PresetTotal
+	} else {
+		countSQL := "SELECT COUNT(*) FROM images i WHERE " + where
+		if err := database.Read.QueryRow(countSQL, args...).Scan(&total); err != nil {
+			return nil, fmt.Errorf("count query: %w", err)
+		}
 	}
 
 	dataSQL := fmt.Sprintf(
@@ -141,7 +151,7 @@ func ExecuteAdjacent(database *db.DB, q Query, currentID int64) (*int64, *int64,
 		// SAFETY: q.RandomSeed is generated server-side via crypto/rand
 		// (see galleryHandler) and never sourced from user input. %d only
 		// produces digits regardless of value, so this is safe from SQL
-		// injection — same pattern as buildOrder uses for the data query.
+		// injection - same pattern as buildOrder uses for the data query.
 		keyCol = fmt.Sprintf("((i.id * %d) & 2147483647)", q.RandomSeed)
 		keyVal = (currentID * q.RandomSeed) & 2147483647
 	case "filesize":
@@ -192,7 +202,7 @@ type DeleteTarget struct {
 }
 
 // ExecuteForDelete returns all images matching expr with their paths, for
-// bulk deletion. No pagination is applied — all matching images are
+// bulk deletion. No pagination is applied - all matching images are
 // returned in a single query.
 //
 // Prefer ExecuteForDeleteStream when caller-side memory is a concern on
@@ -416,7 +426,7 @@ func SuggestTagsWithFilter(database *db.DB, expr Expr, prefix, categoryName stri
 // suggestByUsage is the fast path of SuggestTagsWithFilter when no preceding
 // search expression is present. Same prefix-then-substring two-pass shape,
 // but the per-tag image count is read from tags.usage_count instead of being
-// recomputed by joining image_tags and images — the dominant cost on large
+// recomputed by joining image_tags and images - the dominant cost on large
 // libraries where every candidate tag otherwise drags an image_tags scan.
 func suggestByUsage(database *db.DB, prefix, categoryName string, limit int) ([]models.Tag, error) {
 	baseSQL := `SELECT t.id, t.name, tc.name, tc.color, t.usage_count
@@ -494,11 +504,11 @@ func buildOrder(sort, order string, randomSeed int64) string {
 		if randomSeed != 0 {
 			// Deterministic pseudo-random order using seed: stable across page loads.
 			// The masked product is not injective (two rows can share the same 31-bit
-			// key), so we append i.id as a tiebreaker to guarantee a total order —
+			// key), so we append i.id as a tiebreaker to guarantee a total order -
 			// otherwise pagination can repeat or skip images.
 			// SAFETY: randomSeed is an int64 generated server-side in galleryHandler
 			// (via crypto/rand) and never sourced from user input. Interpolating it as
-			// an integer literal is safe from SQL injection — fmt.Sprintf with %d only
+			// an integer literal is safe from SQL injection - fmt.Sprintf with %d only
 			// produces digit characters regardless of the value.
 			return fmt.Sprintf("ORDER BY ((i.id * %d) & 2147483647), i.id", randomSeed)
 		}
@@ -513,9 +523,9 @@ func buildOrder(sort, order string, randomSeed int64) string {
 }
 
 type whereBuilder struct {
-	parts          []string
-	args           []any
-	hasMissingTrue bool
+	parts            []string
+	args             []any
+	hasMissingFilter bool
 }
 
 func buildWhere(expr Expr) (string, []any, bool) {
@@ -530,7 +540,7 @@ func buildWhere(expr Expr) (string, []any, bool) {
 	if where == "" {
 		where = "1=1"
 	}
-	return where, b.args, b.hasMissingTrue
+	return where, b.args, b.hasMissingFilter
 }
 
 func (b *whereBuilder) buildExpr(expr Expr) string {
@@ -604,21 +614,33 @@ func (b *whereBuilder) buildFilterExpr(e FilterExpr) string {
 		return `EXISTS (SELECT 1 FROM image_tags it JOIN tags t ON it.tag_id = t.id JOIN tag_categories tc ON tc.id = t.category_id WHERE it.image_id = i.id AND tc.name = ?)`
 
 	case "width":
-		op, val := parseCompOp(e.Val)
-		b.args = append(b.args, val)
+		op, n, ok := parseIntComp(e.Val)
+		if !ok {
+			return "1=0"
+		}
+		b.args = append(b.args, n)
 		return fmt.Sprintf("i.width %s ?", op)
 
 	case "height":
-		op, val := parseCompOp(e.Val)
-		b.args = append(b.args, val)
+		op, n, ok := parseIntComp(e.Val)
+		if !ok {
+			return "1=0"
+		}
+		b.args = append(b.args, n)
 		return fmt.Sprintf("i.height %s ?", op)
 
 	case "date":
 		return b.buildDateFilter(e.Val)
 
 	case "missing":
+		// Any explicit `missing:` filter - true or false - opts out of
+		// the auto-injected `AND is_missing = 0`. Without this flag the
+		// negated form `-missing:false` collapses to
+		// `NOT (is_missing = 0) AND is_missing = 0`, which matches
+		// nothing; the user typed it expecting "show me missing" and
+		// got an empty grid instead.
+		b.hasMissingFilter = true
 		if e.Val == "true" {
-			b.hasMissingTrue = true
 			return "i.is_missing = 1"
 		}
 		return "i.is_missing = 0"
@@ -628,6 +650,18 @@ func (b *whereBuilder) buildFilterExpr(e FilterExpr) string {
 			return "i.file_type IN ('gif', 'mp4', 'webm')"
 		}
 		return "i.file_type NOT IN ('gif', 'mp4', 'webm')"
+
+	case "tagged":
+		if e.Val == "true" {
+			return "EXISTS (SELECT 1 FROM image_tags it WHERE it.image_id = i.id)"
+		}
+		return "NOT EXISTS (SELECT 1 FROM image_tags it WHERE it.image_id = i.id)"
+
+	case "autotagged":
+		if e.Val == "true" {
+			return "EXISTS (SELECT 1 FROM image_tags it WHERE it.image_id = i.id AND it.is_auto = 1)"
+		}
+		return "NOT EXISTS (SELECT 1 FROM image_tags it WHERE it.image_id = i.id AND it.is_auto = 1)"
 
 	case "folder":
 		if e.Val == "" {
@@ -685,4 +719,18 @@ func parseCompOp(val string) (string, string) {
 		}
 	}
 	return "=", val
+}
+
+// parseIntComp wraps parseCompOp with strict int parsing so non-numeric
+// values like `width:>=abc` no longer collapse to `width >= 0` (SQLite
+// silently coerces a string operand to 0). Returns ok=false when the
+// value isn't a base-10 integer; callers should emit `1=0` so the user
+// sees an explicit empty result instead of a silently overwide match.
+func parseIntComp(val string) (string, int64, bool) {
+	op, raw := parseCompOp(val)
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return op, 0, false
+	}
+	return op, n, true
 }

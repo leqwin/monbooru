@@ -1,6 +1,6 @@
 # Monbooru
 
-A self-hosted, booru-style gallery for a personal image collection. Tag-based browsing inspired by Danbooru, running entirely on your own hardware.
+A self-hosted, lightweight, booru-style gallery for a personal image collection. Tag-based browsing inspired by Danbooru, running entirely on your own hardware.
 
 <table>
   <tr>
@@ -26,6 +26,8 @@ A self-hosted, booru-style gallery for a personal image collection. Tag-based br
 - Search with wildcards, OR, exclusions, plus filters on folder, date, size, dimensions, category, generation recipe...
 - Browser upload, multi-file, with tags and a destination folder
 - Batch operations: bulk delete, bulk auto-tag, delete-all-search-results
+- Daily maintenance schedule: scheduled sync, auto-tag, recompute counts, merge general tags, and vacuum databases...
+- Create multiple galleries with their own filesystem and switch between them
 - REST API for third-party integrations (e.g. adding images to the gallery from an external app)
 - Fully offline, no telemetry
 
@@ -57,6 +59,8 @@ Tags separated by spaces means AND. Everything else stacks on top:
 | `character:cat` | tag "cat" in the character category |
 | `missing:true` | files gone from disk |
 | `animated:true` / `animated:false` | gif/mp4/webm |
+| `tagged:true` / `tagged:false` | images with or without tags |
+| `autotagged:true` / `autotagged:false` | images with or without auto-tags |
 | `generated:abcd1234abcd` | same generation recipe (hash shown on the image page) |
 
 Autocomplete is combination-aware: the count next to each suggestion is for the full query, and suggestions that would return zero results are hidden.
@@ -122,9 +126,7 @@ All of these override the TOML config. Pattern: `MONBOORU_{SECTION}_{KEY}`.
 |---|---|---|
 | `MONBOORU_SERVER_BIND_ADDRESS` | `server.bind_address` | string |
 | `MONBOORU_SERVER_BASE_URL` | `server.base_url` | string |
-| `MONBOORU_PATHS_GALLERY_PATH` | `paths.gallery_path` | string |
-| `MONBOORU_PATHS_DB_PATH` | `paths.db_path` | string |
-| `MONBOORU_PATHS_THUMBNAILS_PATH` | `paths.thumbnails_path` | string |
+| `MONBOORU_PATHS_DATA_PATH` | `paths.data_path` | string |
 | `MONBOORU_PATHS_MODEL_PATH` | `paths.model_path` | string |
 | `MONBOORU_GALLERY_WATCH_ENABLED` | `gallery.watch_enabled` | bool |
 | `MONBOORU_GALLERY_MAX_FILE_SIZE_MB` | `gallery.max_file_size_mb` | int |
@@ -160,7 +162,7 @@ Per-tagger settings (enable flags, confidence thresholds, worker count) live in 
 
 Disabled by default. Generate a token in **Settings → Authentication** to enable it.
 
-- Swagger UI: `/api/v1/docs` (also linked in the footer)
+- HTML reference: `/api/v1/docs` (also linked in the footer)
 - OpenAPI spec: `/api/v1/openapi.json`
 
 Covers search, tag add/remove, upload, delete.

@@ -1,11 +1,11 @@
 {{define "partials/related_images.html"}}
-{{if .}}
+{{if .Images}}
 <div class="related-images">
   <h3>Similar images</h3>
   <div class="related-mini-grid">
-    {{range .}}
+    {{range .Images}}
     <a href="/images/{{.ID}}" class="related-mini-card" title="Image {{.ID}}">
-      <img src="/thumbnails/{{.ID}}.jpg" alt="image {{.ID}}" loading="lazy"
+      <img src="/thumbnails/{{$.ActiveGallery}}/{{.ID}}.jpg" alt="image {{.ID}}" loading="lazy"
            onerror="this.parentElement.innerHTML='?'">
     </a>
     {{end}}

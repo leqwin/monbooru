@@ -33,7 +33,7 @@
       <li>Type one or more tags separated by spaces and press Add. Each whitespace-separated token becomes its own tag. Wrap a multi-word tag in double quotes to collapse internal spaces to underscores: <code>"red hair"</code> → <code>red_hair</code>. You can also use <code>_</code> directly.</li>
       <li>Use <code>category:tagname</code> to add a tag to a specific category.</li>
       <li>Example: <code>artist:"john doe" blue_eyes 1girl</code> adds "john_doe" as an artist tag and "blue_eyes" and "1girl" as general tags.</li>
-      <li>Autocomplete suggestions appear as you type — use ↑/↓ arrows to navigate, Enter to select.</li>
+      <li>Autocomplete suggestions appear as you type - use ↑/↓ arrows to navigate, Enter to select.</li>
     </ul>
     <h4>Tag names</h4>
     <ul>
@@ -71,6 +71,8 @@
         <tr><td><code>date:2024-03-15</code></td><td>Images ingested on an exact date</td></tr>
         <tr><td><code>missing:true</code></td><td>Show images whose files are missing from disk</td></tr>
         <tr><td><code>animated:true</code></td><td>Only animated files (GIF, MP4, WebM). <code>animated:false</code> excludes them.</td></tr>
+        <tr><td><code>tagged:true</code></td><td>Only images with at least one tag. <code>tagged:false</code> restricts to images with no tags.</td></tr>
+        <tr><td><code>autotagged:true</code></td><td>Only images with at least one auto-tag. <code>autotagged:false</code> restricts to images with no auto-tags.</td></tr>
       </tbody>
     </table>
     <p class="field-hint">All searches are case-insensitive. Missing images are hidden by default.</p>
@@ -112,10 +114,12 @@
     <h3>Settings &amp; Maintenance</h3>
     <p>The <a href="/settings">Settings</a> page provides:</p>
     <ul>
-      <li><strong>General</strong> — toggle the gallery file watcher, set the max file size, and change the number of images per page.</li>
-      <li><strong>Authentication</strong> — set or remove a password, regenerate the API token.</li>
-      <li><strong>Auto-Tagger</strong> — enable one or more taggers (each subfolder of the models directory), set per-tagger confidence thresholds, and run bulk tagging on untagged or all images.</li>
-      <li><strong>Maintenance</strong> — prune missing images, clean up orphaned thumbnails, rebuild thumbnails, recalculate tag counts, re-extract metadata, vacuum the database, and list or remove duplicate file paths.</li>
+      <li><strong>General</strong> - toggle the gallery file watcher, set the max file size, and change the number of images per page.</li>
+      <li><strong>Galleries</strong> - add, rename, switch between, set default, or delete configured galleries.</li>
+      <li><strong>Authentication</strong> - set or remove a password, regenerate the API token.</li>
+      <li><strong>Auto-Tagger</strong> - enable one or more taggers (each subfolder of the models directory), set per-tagger confidence thresholds, toggle GPU (CUDA), pick a worker count, and run bulk tagging on untagged or all images. Each row also exposes Run untagged / Run all / Remove auto-tagged scoped to that single tagger.</li>
+      <li><strong>Maintenance</strong> - prune missing images, clean up orphaned thumbnails, rebuild thumbnails, recalculate tag counts, merge auto-tagged-only general tags into their unique categorized counterparts, re-extract metadata, vacuum the database (runs <code>VACUUM</code> then <code>PRAGMA wal_checkpoint(TRUNCATE)</code> so the WAL-held pages are actually released), and list or remove duplicate file paths.</li>
+      <li><strong>Schedule</strong> - opt-in daily automation. Pick a time-of-day (default 01:00) and tick any of: Sync gallery, Remove orphaned thumbnails, Run enabled auto-taggers, Recompute tag counts, Merge general tags, Vacuum database. The scheduler iterates every configured gallery in turn at the chosen time and skips silently when another job is already running.</li>
     </ul>
   </section>
 </div>

@@ -150,7 +150,7 @@ func extractFromPNG(path string) (*models.SDMetadata, *models.ComfyUIMetadata, e
 		sd = parseA1111Parameters(text)
 	}
 
-	// Try "prompt" chunk first (ComfyUI API format — primary format when saving images)
+	// Try "prompt" chunk first (ComfyUI API format - primary format when saving images)
 	if raw, ok := chunks["prompt"]; ok {
 		comfy = parseComfyPromptChunk(raw)
 	}

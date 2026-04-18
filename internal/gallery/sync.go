@@ -10,7 +10,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/leqwin/monbooru/internal/config"
 	"github.com/leqwin/monbooru/internal/db"
 	"github.com/leqwin/monbooru/internal/logx"
 	"github.com/leqwin/monbooru/internal/tags"
@@ -34,15 +33,19 @@ type FolderNode struct {
 }
 
 // Sync performs a full 3-phase gallery sync.
-// progress is called with human-readable status messages.
-func Sync(ctx context.Context, database *db.DB, cfg *config.Config, progress func(string)) (SyncResult, error) {
+// progress is called with (processed, total, message) tuples, matching
+// jobs.Manager.Update so the handler can forward the call verbatim.
+// Processed advances during Phase 2 so clients polling /internal/job/status
+// can surface reconcile progress and refresh the gallery mid-run.
+// galleryPath and thumbnailsPath target one gallery; maxFileSizeMB is the
+// shared per-install cap (<= 0 disables the cap).
+func Sync(ctx context.Context, database *db.DB, galleryPath, thumbnailsPath string, maxFileSizeMB int, progress func(processed, total int, message string)) (SyncResult, error) {
 	var result SyncResult
 
-	galleryPath := cfg.Paths.GalleryPath
-	maxBytes := int64(cfg.Gallery.MaxFileSizeMB) * 1024 * 1024
+	maxBytes := int64(maxFileSizeMB) * 1024 * 1024
 
 	// Phase 1: Walk filesystem, build map of path → sha256
-	progress("Phase 1: scanning filesystem…")
+	progress(0, 0, "Phase 1: scanning filesystem…")
 	type fileInfo struct {
 		path     string
 		sha256   string
@@ -50,7 +53,6 @@ func Sync(ctx context.Context, database *db.DB, cfg *config.Config, progress fun
 		size     int64
 	}
 	var found []fileInfo
-	seenSHA := map[string]string{} // sha256 → first path
 
 	// Preload known (path, size, sha256) so the walk can skip hashing files
 	// whose size hasn't changed since the last sync. Hashing every file on a
@@ -99,7 +101,7 @@ func Sync(ctx context.Context, database *db.DB, cfg *config.Config, progress fun
 
 		var hash string
 		if k, ok := known[path]; ok && k.size == info.Size() {
-			// Same path and size — assume unchanged content. A same-size
+			// Same path and size - assume unchanged content. A same-size
 			// in-place replacement will be missed here; run manually with a
 			// DB reset to force re-hashing if you suspect one.
 			hash = k.sha256
@@ -110,16 +112,14 @@ func Sync(ctx context.Context, database *db.DB, cfg *config.Config, progress fun
 				return nil
 			}
 			hash = h
+			// Only claim ownership when we just hashed (new file or its size
+			// changed). Files reused from `known` were already chowned by a
+			// previous sync, so skipping the syscall here saves N chowns per
+			// idle re-sync - the dominant Phase-1 cost on large libraries.
+			ClaimOwnership(path)
 		}
-
-		// Backfill ownership on existing libraries — Ingest only chowns new
-		// files, so rows that predate this fix would otherwise stay foreign.
-		ClaimOwnership(path)
 
 		found = append(found, fileInfo{path: path, sha256: hash, fileType: ft, size: info.Size()})
-		if _, exists := seenSHA[hash]; !exists {
-			seenSHA[hash] = path
-		}
 		return nil
 	})
 	if err != nil {
@@ -130,7 +130,8 @@ func Sync(ctx context.Context, database *db.DB, cfg *config.Config, progress fun
 	}
 
 	// Phase 2: Reconcile
-	progress(fmt.Sprintf("Phase 2: reconciling %d files…", len(found)))
+	total := len(found)
+	progress(0, total, "Phase 2: reconciling…")
 
 	// Build set of all found paths and SHAs
 	foundPaths := map[string]struct{}{}
@@ -138,24 +139,52 @@ func Sync(ctx context.Context, database *db.DB, cfg *config.Config, progress fun
 		foundPaths[fi.path] = struct{}{}
 	}
 
+	// Pre-load every (sha256 → id, canonical_path, is_missing) row so the
+	// per-file lookup below is a map hit instead of N indexed SELECTs through
+	// the read pool. One full scan beats 25k single-row queries.
+	type bySHARow struct {
+		id            int64
+		canonicalPath string
+		isMissing     int
+	}
+	bySHA := map[string]bySHARow{}
+	if srows, sErr := database.Read.Query(
+		`SELECT id, sha256, canonical_path, is_missing FROM images`,
+	); sErr == nil {
+		for srows.Next() {
+			var r bySHARow
+			var sha string
+			if err := srows.Scan(&r.id, &sha, &r.canonicalPath, &r.isMissing); err == nil {
+				bySHA[sha] = r
+			}
+		}
+		srows.Close()
+	}
+
 	// reactivated counts silent is_missing=0 updates that don't bump any
 	// SyncResult counter. Needed to decide whether tag counts must be
 	// recalculated at the end of the sync.
 	reactivated := 0
 
-	for _, fi := range found {
+	for i, fi := range found {
 		if ctx.Err() != nil {
 			return result, ctx.Err()
 		}
 
-		var imgID int64
-		var canonPath string
-		var isMissing int
-		err := database.Read.QueryRow(
-			`SELECT id, canonical_path, is_missing FROM images WHERE sha256 = ?`, fi.sha256,
-		).Scan(&imgID, &canonPath, &isMissing)
+		// Throttle progress emissions so Update's lock traffic stays bounded
+		// on large libraries while still letting the client poll see a live
+		// X/Y counter advance once per tick. The message keeps no count -
+		// the status bar's progress span already renders Processed/Total.
+		if i%50 == 0 || i == total-1 {
+			progress(i, total, "Phase 2: reconciling…")
+		}
 
-		if err == nil {
+		row, ok := bySHA[fi.sha256]
+		if ok {
+			imgID := row.id
+			canonPath := row.canonicalPath
+			isMissing := row.isMissing
+
 			if canonPath == fi.path {
 				if isMissing == 1 {
 					if _, wErr := database.Write.Exec(`UPDATE images SET is_missing = 0 WHERE id = ?`, imgID); wErr != nil {
@@ -166,15 +195,15 @@ func Sync(ctx context.Context, database *db.DB, cfg *config.Config, progress fun
 				continue
 			}
 
-			var n int
-			database.Read.QueryRow(
-				`SELECT COUNT(*) FROM image_paths WHERE image_id = ? AND path = ?`, imgID, fi.path,
-			).Scan(&n)
-			if n > 0 {
-				// Known alias path — check if canonical is still present
+			// image_paths.path is UNIQUE, so a path belongs to at most one
+			// image; `known` was preloaded from image_paths JOIN images at
+			// the top of Phase 1, so a matching sha here is equivalent to
+			// the per-file SELECT COUNT this replaces.
+			if k, knownAlias := known[fi.path]; knownAlias && k.sha256 == fi.sha256 {
+				// Known alias path - check if canonical is still present
 				_, canonErr := os.Stat(canonPath)
 				if canonErr != nil {
-					// Canonical is gone — promote this alias to canonical
+					// Canonical is gone - promote this alias to canonical
 					newFolder := FolderPath(galleryPath, fi.path)
 					if _, wErr := database.Write.Exec(
 						`UPDATE images SET canonical_path = ?, folder_path = ?, is_missing = 0 WHERE id = ?`,
@@ -208,7 +237,7 @@ func Sync(ctx context.Context, database *db.DB, cfg *config.Config, progress fun
 			// otherwise it's another copy/alias.
 			_, canonErr := os.Stat(canonPath)
 			if canonErr != nil {
-				// Canonical missing — this is a move
+				// Canonical missing - this is a move
 				newFolder := FolderPath(galleryPath, fi.path)
 				if _, wErr := database.Write.Exec(
 					`UPDATE images SET canonical_path = ?, folder_path = ?, is_missing = 0 WHERE id = ?`,
@@ -230,7 +259,7 @@ func Sync(ctx context.Context, database *db.DB, cfg *config.Config, progress fun
 				}
 				result.Moved++
 			} else {
-				// Canonical still exists — this is a duplicate/alias
+				// Canonical still exists - this is a duplicate/alias
 				if _, wErr := database.Write.Exec(
 					`INSERT OR IGNORE INTO image_paths (image_id, path, is_canonical) VALUES (?, ?, 0)`,
 					imgID, fi.path,
@@ -240,14 +269,29 @@ func Sync(ctx context.Context, database *db.DB, cfg *config.Config, progress fun
 				result.Duplicates++
 			}
 		} else {
-			// Not found — new file
-			_, _, ingestErr := Ingest(database, cfg, fi.path, fi.fileType)
+			// Not found - new file. Reuse the SHA computed in Phase 1 so the
+			// file isn't hashed a second time inside Ingest; on a fresh dump of
+			// 25k images that double-hash was the dominant cost of Phase 2.
+			img, _, ingestErr := ingestWithHash(database, galleryPath, thumbnailsPath, fi.path, fi.fileType, fi.sha256)
 			if ingestErr != nil {
 				logx.Warnf("ingest failed for %q: %v", fi.path, ingestErr)
 				continue
 			}
 			result.Added++
+			// Surface the new row in bySHA so a later file in the same walk
+			// that shares this SHA falls into the existing-SHA branch and is
+			// counted as a Duplicate, matching the original per-file SELECT.
+			if img != nil {
+				bySHA[fi.sha256] = bySHARow{id: img.ID, canonicalPath: fi.path, isMissing: 0}
+			}
 		}
+	}
+
+	// Honour cancellation between phases so the watcher's "sync running"
+	// pause (see internal/gallery/watcher.go) releases promptly on cancel
+	// instead of waiting for Phase 3 to finish on large libraries.
+	if ctx.Err() != nil {
+		return result, ctx.Err()
 	}
 
 	// Mark missing: DB entries whose canonical path was not found
@@ -271,25 +315,49 @@ func Sync(ctx context.Context, database *db.DB, cfg *config.Config, progress fun
 		return result, fmt.Errorf("iterating existing images: %w", err)
 	}
 
-	for _, id := range toMark {
-		if _, wErr := database.Write.Exec(`UPDATE images SET is_missing = 1 WHERE id = ?`, id); wErr != nil {
-			logx.Warnf("sync: mark missing %d: %v", id, wErr)
+	// Chunked IN-list UPDATE: per-id UPDATEs through the single-writer pool
+	// dominated Phase 3 on large libraries where many files had gone away.
+	const chunkSize = 500
+	for start := 0; start < len(toMark); start += chunkSize {
+		if ctx.Err() != nil {
+			result.Removed = start
+			return result, ctx.Err()
 		}
-		result.Removed++
+		end := start + chunkSize
+		if end > len(toMark) {
+			end = len(toMark)
+		}
+		chunk := toMark[start:end]
+		placeholders := strings.Repeat("?,", len(chunk))
+		placeholders = placeholders[:len(placeholders)-1]
+		args := make([]any, len(chunk))
+		for i, id := range chunk {
+			args[i] = id
+		}
+		if _, wErr := database.Write.Exec(
+			`UPDATE images SET is_missing = 1 WHERE id IN (`+placeholders+`)`, args...,
+		); wErr != nil {
+			logx.Warnf("sync: mark missing chunk: %v", wErr)
+		}
+	}
+	result.Removed = len(toMark)
+
+	if ctx.Err() != nil {
+		return result, ctx.Err()
 	}
 
 	// Recalculate tag usage counts only when the reconcile touched something
-	// that could have changed them (Duplicates alone never do — adding an
+	// that could have changed them (Duplicates alone never do - adding an
 	// alias doesn't change image membership). Idle syncs on large libraries
 	// spent the bulk of their time in this step even though nothing had
 	// changed.
 	if result.Added > 0 || result.Removed > 0 || result.Moved > 0 || reactivated > 0 {
-		progress("Recalculating tag counts…")
+		progress(0, 0, "Recalculating tag counts…")
 		tags.RecalcAndPruneDB(database)
 	}
 
 	// Phase 3: Report
-	progress(fmt.Sprintf("Done: %d added, %d removed, %d moved, %d duplicates",
+	progress(0, 0, fmt.Sprintf("Done: %d added, %d removed, %d moved, %d duplicates",
 		result.Added, result.Removed, result.Moved, result.Duplicates))
 
 	return result, nil
@@ -298,11 +366,11 @@ func Sync(ctx context.Context, database *db.DB, cfg *config.Config, progress fun
 // DeleteEmptyFolderIfEmpty deletes the folder at folderPath (relative to gallery root)
 // if it is empty, then walks up the parent chain removing any ancestors that become
 // empty as a result. Stops at the gallery root.
-func DeleteEmptyFolderIfEmpty(cfg *config.Config, folderPath string) {
+func DeleteEmptyFolderIfEmpty(galleryPath, folderPath string) {
 	if folderPath == "" {
 		return // never delete gallery root
 	}
-	root := cfg.Paths.GalleryPath
+	root := galleryPath
 	cur := folderPath
 	for cur != "" && cur != "." {
 		absPath := filepath.Join(root, cur)

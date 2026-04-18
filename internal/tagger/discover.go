@@ -38,6 +38,8 @@ func DiscoverTaggers(cfg *config.Config) []TaggerStatus {
 	order := []string{}
 
 	// Start from disk so untouched subfolders appear even without config.
+	// Discovered subfolders are enabled by default; explicit TOML entries
+	// below override (Disable actions persist Enabled=false).
 	if entries, err := os.ReadDir(cfg.Paths.ModelPath); err == nil {
 		for _, e := range entries {
 			if !e.IsDir() {
@@ -46,6 +48,7 @@ func DiscoverTaggers(cfg *config.Config) []TaggerStatus {
 			name := e.Name()
 			byName[name] = config.TaggerInstance{
 				Name:                name,
+				Enabled:             true,
 				ConfidenceThreshold: DefaultConfidenceThreshold,
 			}
 			order = append(order, name)

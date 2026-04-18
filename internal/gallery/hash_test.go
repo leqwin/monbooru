@@ -151,7 +151,7 @@ func TestHashFile_NonExistent(t *testing.T) {
 }
 
 func TestDetectFileType_MagicFallback(t *testing.T) {
-	// File with no extension — should try magic bytes
+	// File with no extension - should try magic bytes
 	dir := t.TempDir()
 	path := dir + "/noext"
 	// Write JPEG magic bytes
@@ -174,5 +174,38 @@ func TestIsVideoType(t *testing.T) {
 	}
 	if IsVideoType("png") {
 		t.Error("png should not be video")
+	}
+}
+
+func TestUniqueDestPath_NoCollision(t *testing.T) {
+	dir := t.TempDir()
+	got := UniqueDestPath(dir, "fresh.png")
+	want := filepath.Join(dir, "fresh.png")
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestUniqueDestPath_SuffixesOnCollision(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"image.png", "image_1.png", "image_2.png"} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := UniqueDestPath(dir, "image.png")
+	want := filepath.Join(dir, "image_3.png")
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestUniqueDestPath_PreservesExtension(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "shot.tar.gz"), nil, 0o644)
+	got := UniqueDestPath(dir, "shot.tar.gz")
+	want := filepath.Join(dir, "shot.tar_1.gz")
+	if got != want {
+		t.Errorf("got %q, want %q (only the last extension is preserved)", got, want)
 	}
 }

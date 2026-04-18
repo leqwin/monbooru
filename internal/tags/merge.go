@@ -15,7 +15,7 @@ func (s *Service) MergeTags(aliasID, canonicalID int64) error {
 	defer tx.Rollback()
 
 	// a. Move image_tags from aliasID to canonicalID (handle conflicts).
-	//    Find images that have aliasID but not canonicalID — insert canonical.
+	//    Find images that have aliasID but not canonicalID - insert canonical.
 	rows, err := tx.Query(
 		`SELECT image_id, is_auto, confidence, tagger_name FROM image_tags WHERE tag_id = ?`, aliasID,
 	)
@@ -48,7 +48,7 @@ func (s *Service) MergeTags(aliasID, canonicalID int64) error {
 		).Scan(&existingIsAuto)
 
 		if err == sql.ErrNoRows {
-			// Not there yet — insert canonical tag, carrying auto-tagger attribution over.
+			// Not there yet - insert canonical tag, carrying auto-tagger attribution over.
 			if _, err := tx.Exec(
 				`INSERT INTO image_tags (image_id, tag_id, is_auto, confidence, tagger_name)
 				 VALUES (?, ?, ?, ?, ?)`,
@@ -78,10 +78,15 @@ func (s *Service) MergeTags(aliasID, canonicalID int64) error {
 		return err
 	}
 
-	// c. Recompute usage_count for canonicalID
+	// c. Recompute usage_count for canonicalID. Match the convention
+	// RecalcAndPruneDB enforces (count only non-missing images) so a
+	// merge doesn't temporarily inflate the count above what the next
+	// recalc will report.
 	if _, err := tx.Exec(
 		`UPDATE tags SET usage_count = (
-			SELECT COUNT(*) FROM image_tags WHERE tag_id = ?
+			SELECT COUNT(*) FROM image_tags it
+			JOIN images i ON i.id = it.image_id
+			WHERE it.tag_id = ? AND i.is_missing = 0
 		) WHERE id = ?`,
 		canonicalID, canonicalID,
 	); err != nil {

@@ -18,6 +18,9 @@ services:
     volumes:
       - /path/to/your/models:/models:ro
       - /path/to/your/gallery:/gallery
+      # Additional galleries (need to be mounted in settings)
+      # - /path/to/your/gallery2:/gallery2
+      # - /path/to/your/gallery3:/gallery3
       - /path/to/monbooru/config:/config
       - /path/to/monbooru/data:/data
     environment:

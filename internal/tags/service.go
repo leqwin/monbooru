@@ -14,10 +14,10 @@ import (
 )
 
 var (
-	ErrInvalidTagName = errors.New("invalid tag name")
-	ErrTagNotFound    = errors.New("tag not found")
-	ErrCategoryNotFound = errors.New("category not found")
-	ErrBuiltinCategory  = errors.New("cannot delete built-in category")
+	ErrInvalidTagName       = errors.New("invalid tag name")
+	ErrTagNotFound          = errors.New("tag not found")
+	ErrCategoryNotFound     = errors.New("category not found")
+	ErrBuiltinCategory      = errors.New("cannot delete built-in category")
 	ErrReservedCategoryName = errors.New("this name is used by a search filter (e.g. fav:, source:, cat:, width:, height:, date:, missing:, folder:, generated:, animated:)")
 
 	// Allowed tag name characters: [a-z0-9_()!@#$.~+-]
@@ -56,7 +56,7 @@ type TagFilter struct {
 	CategoryID *int64
 	Prefix     string
 	Sort       string // "name" | "usage"
-	// PageIndex is 0-based — callers supply the requested page number minus
+	// PageIndex is 0-based - callers supply the requested page number minus
 	// one. ListTags multiplies by Limit to derive the SQL OFFSET.
 	PageIndex int
 	Limit     int
@@ -87,7 +87,7 @@ func RecalcAndPruneDB(database *db.DB) {
 // A naïve correlated-subquery UPDATE reruns the count twice per tag, which
 // dominates sync time on libraries with many tags. This implementation
 // zeros out tags whose only remaining associations point to missing images,
-// then fills in the rest from a single GROUP BY aggregation — one scan of
+// then fills in the rest from a single GROUP BY aggregation - one scan of
 // image_tags instead of one per tag.
 func RecalcAndPruneDBCount(database *db.DB) (updated int64, pruned int64) {
 	if res, err := database.Write.Exec(`
@@ -317,8 +317,11 @@ func (s *Service) DeleteCategoryMoveOrDelete(id int64, action string, targetID i
 
 // --- Tag methods ---
 
-// validateTagName normalizes and validates a tag name. Returns the normalized name or error.
-func validateTagName(name string) (string, error) {
+// ValidateTagName normalises (lowercases + trims) and validates a tag name
+// against the documented allowlist. Returns the normalised name or an error
+// wrapping ErrInvalidTagName. Exposed so non-UI sources of tag names (e.g.
+// the auto-tagger label loader) can apply the same rules.
+func ValidateTagName(name string) (string, error) {
 	name = strings.TrimSpace(name)
 	name = strings.ToLower(name)
 
@@ -346,7 +349,7 @@ func validateTagName(name string) (string, error) {
 }
 
 func (s *Service) GetOrCreateTag(name string, categoryID int64) (*models.Tag, error) {
-	normalized, err := validateTagName(name)
+	normalized, err := ValidateTagName(name)
 	if err != nil {
 		return nil, err
 	}
@@ -367,7 +370,7 @@ func (s *Service) GetOrCreateTag(name string, categoryID int64) (*models.Tag, er
 func getOrCreateTagTx(tx *sql.Tx, name string, categoryID int64) (*models.Tag, error) {
 	var tag models.Tag
 	var createdAt string
-	// Look up by (name, category_id) — allows same name in different categories.
+	// Look up by (name, category_id) - allows same name in different categories.
 	err := tx.QueryRow(
 		`SELECT id, name, category_id, usage_count, is_alias, created_at FROM tags WHERE name = ? AND category_id = ?`,
 		name, categoryID,
@@ -582,26 +585,43 @@ func (s *Service) GetImageTags(imageID int64) ([]models.ImageTag, error) {
 }
 
 func (s *Service) AddTagToImage(imageID, tagID int64, isAuto bool, confidence *float64) error {
-	return s.AddTagToImageFromTagger(imageID, tagID, isAuto, confidence, "")
+	_, err := s.AddTagToImageReportingDup(imageID, tagID, isAuto, confidence, "")
+	return err
 }
 
 // AddTagToImageFromTagger is like AddTagToImage but records the source
 // auto-tagger name for later attribution. taggerName is ignored for manual
 // tags (isAuto=false).
 func (s *Service) AddTagToImageFromTagger(imageID, tagID int64, isAuto bool, confidence *float64, taggerName string) error {
+	_, err := s.AddTagToImageReportingDup(imageID, tagID, isAuto, confidence, taggerName)
+	return err
+}
+
+// AddTagToImageReportingDup performs the INSERT OR IGNORE in a single
+// write-pool transaction and reports whether a new row was actually
+// inserted (added=true) or the (image_id, tag_id) pair already existed
+// (added=false). Use this when the caller wants to surface a "tag
+// already on image" message atomically: a read-then-write across the
+// two pools is racy under concurrent adds, so both POSTs can otherwise
+// believe they were the first writer.
+func (s *Service) AddTagToImageReportingDup(imageID, tagID int64, isAuto bool, confidence *float64, taggerName string) (bool, error) {
 	tx, err := s.db.Write.Begin()
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer tx.Rollback()
 
-	if err := addTagToImageTx(tx, imageID, tagID, isAuto, confidence, taggerName); err != nil {
-		return err
+	added, err := addTagToImageTxReportingDup(tx, imageID, tagID, isAuto, confidence, taggerName)
+	if err != nil {
+		return false, err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return added, nil
 }
 
-func addTagToImageTx(tx *sql.Tx, imageID, tagID int64, isAuto bool, confidence *float64, taggerName string) error {
+func addTagToImageTxReportingDup(tx *sql.Tx, imageID, tagID int64, isAuto bool, confidence *float64, taggerName string) (bool, error) {
 	isAutoInt := 0
 	if isAuto {
 		isAutoInt = 1
@@ -616,18 +636,20 @@ func addTagToImageTx(tx *sql.Tx, imageID, tagID int64, isAuto bool, confidence *
 		imageID, tagID, isAutoInt, confidence, tname,
 	)
 	if err != nil {
-		return fmt.Errorf("inserting image_tag: %w", err)
+		return false, fmt.Errorf("inserting image_tag: %w", err)
 	}
 	rows, _ := res.RowsAffected()
 	if rows == 0 {
-		// Already exists — no-op
-		return nil
+		// Already exists - no-op
+		return false, nil
 	}
 
-	_, err = tx.Exec(
+	if _, err := tx.Exec(
 		`UPDATE tags SET usage_count = usage_count + 1 WHERE id = ?`, tagID,
-	)
-	return err
+	); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *Service) RemoveTagFromImage(imageID, tagID int64) error {
@@ -661,8 +683,13 @@ func removeTagFromImageTx(tx *sql.Tx, imageID, tagID int64) error {
 		return err
 	}
 
-	// Delete the tag itself if it has no more usages.
-	tx.Exec(`DELETE FROM tags WHERE id = ? AND usage_count <= 0`, tagID)
+	// Delete the tag itself if it has no more usages. The error here was
+	// previously discarded, so a stuck row could quietly persist at zero
+	// usage and leak into the sidebar; surface it so the surrounding
+	// transaction can roll back instead of committing inconsistent state.
+	if _, err := tx.Exec(`DELETE FROM tags WHERE id = ? AND usage_count <= 0`, tagID); err != nil {
+		return fmt.Errorf("prune zero-usage tag %d: %w", tagID, err)
+	}
 	return nil
 }
 
@@ -1030,7 +1057,7 @@ func (s *Service) DeleteTag(id int64) error {
 // RenameTag changes the name of a tag. The new name must pass validation.
 // Returns an error if the new name already exists in the same category.
 func (s *Service) RenameTag(id int64, newName string) error {
-	normalized, err := validateTagName(newName)
+	normalized, err := ValidateTagName(newName)
 	if err != nil {
 		return err
 	}
@@ -1053,7 +1080,7 @@ func (s *Service) RenameTag(id int64, newName string) error {
 // Useful after a label-only auto-tagger has filed names under general that
 // a categorized .csv tagger or another autotagger later produced proper
 // category-qualified versions for. General tags with any manual image_tags
-// row are skipped — those reflect explicit user intent and should not be
+// row are skipped - those reflect explicit user intent and should not be
 // swallowed into a categorized version. Returns the number of tags merged.
 func (s *Service) MergeGeneralIntoCategorized() (int, error) {
 	rows, err := s.db.Read.Query(`
@@ -1136,4 +1163,3 @@ func (s *Service) ChangeTagCategory(tagID, newCategoryID int64) error {
 	_, err := s.db.Write.Exec(`UPDATE tags SET category_id = ? WHERE id = ?`, newCategoryID, tagID)
 	return err
 }
-

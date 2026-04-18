@@ -14,22 +14,48 @@ import (
 	"github.com/leqwin/monbooru/internal/tags"
 )
 
+// Gallery is what API handlers need to act on a single gallery.
+type Gallery struct {
+	Name              string
+	GalleryPath       string
+	ThumbnailsPath    string
+	DB                *db.DB
+	TagSvc            *tags.Service
+	InvalidateCaches  func() // called after any image add/delete (may be nil)
+}
+
+// ResolverFunc resolves a gallery by name. Empty name = active gallery.
+type ResolverFunc func(name string) (Gallery, bool)
+
 // Handler is the root handler for all /api/v1/ routes.
 type Handler struct {
-	cfg    *config.Config
-	db     *db.DB
-	tagSvc *tags.Service
-	jobs   *jobs.Manager
+	cfg      *config.Config
+	jobs     *jobs.Manager
+	resolver ResolverFunc
 }
 
 // New creates a new API handler.
-func New(cfg *config.Config, database *db.DB, jobManager *jobs.Manager) *Handler {
-	return &Handler{
-		cfg:    cfg,
-		db:     database,
-		tagSvc: tags.New(database),
-		jobs:   jobManager,
+func New(cfg *config.Config, jobManager *jobs.Manager, resolver ResolverFunc) *Handler {
+	return &Handler{cfg: cfg, jobs: jobManager, resolver: resolver}
+}
+
+// resolveGallery picks the target gallery from ?gallery=... or the
+// X-Monbooru-Gallery header; empty falls back to the active gallery.
+func (h *Handler) resolveGallery(w http.ResponseWriter, r *http.Request) (Gallery, bool) {
+	name := strings.TrimSpace(r.URL.Query().Get("gallery"))
+	if name == "" {
+		name = strings.TrimSpace(r.Header.Get("X-Monbooru-Gallery"))
 	}
+	g, ok := h.resolver(name)
+	if !ok {
+		if name == "" {
+			apiError(w, http.StatusServiceUnavailable, "api_disabled", "no active gallery")
+		} else {
+			apiError(w, http.StatusBadRequest, "invalid_gallery", "unknown gallery: "+name)
+		}
+		return Gallery{}, false
+	}
+	return g, true
 }
 
 // Mount registers all API routes on mux under /api/v1/.

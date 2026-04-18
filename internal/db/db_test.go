@@ -60,7 +60,7 @@ func TestForeignKeyEnforcement(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Insert image_tags row with non-existent image_id — must fail
+	// Insert image_tags row with non-existent image_id - must fail
 	_, err := db.Write.Exec(
 		`INSERT INTO image_tags (image_id, tag_id) VALUES (9999, 9999)`,
 	)

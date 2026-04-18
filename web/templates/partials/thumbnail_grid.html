@@ -2,10 +2,10 @@
 <div class="thumb-grid">
   {{range .Result.Results}}
   <div class="thumb-card" data-id="{{.ID}}"
-       {{if or (eq .FileType "mp4") (eq .FileType "webm") (eq .FileType "gif")}}data-hover="/thumbnails/{{.ID}}_hover.webp"{{end}}>
+       {{if or (eq .FileType "mp4") (eq .FileType "webm") (eq .FileType "gif")}}data-hover="/thumbnails/{{$.ActiveGallery}}/{{.ID}}_hover.webp"{{end}}>
     <input type="checkbox" class="thumb-checkbox" name="ids" value="{{.ID}}">
     <a href="/images/{{.ID}}?back_q={{$.Query}}&back_sort={{$.Sort}}&back_order={{$.Order}}&back_page={{$.Page}}{{if $.RandomSeed}}&back_seed={{$.RandomSeed}}{{end}}" class="thumb-link">
-      <img src="/thumbnails/{{.ID}}.jpg" alt="image {{.ID}}" loading="lazy"
+      <img src="/thumbnails/{{$.ActiveGallery}}/{{.ID}}.jpg" alt="image {{.ID}}" loading="lazy"
            class="thumb-img"
            onerror="this.parentElement.innerHTML='<div class=thumb-placeholder>?</div>'">
       <div class="thumb-overlay">

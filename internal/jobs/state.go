@@ -20,6 +20,10 @@ type Manager struct {
 	timer  *time.Timer // auto-dismiss timer
 	ctx    context.Context
 	cancel context.CancelFunc
+	// scheduleHeld blocks user-Start while a scheduler run is active so
+	// the scheduler's per-phase Start/Complete pairs can't race against
+	// a user job that slips into a phase boundary.
+	scheduleHeld bool
 }
 
 // NewManager returns a new Manager with no active job.
@@ -27,21 +31,38 @@ func NewManager() *Manager {
 	return &Manager{}
 }
 
-// Start begins a new job. Returns ErrJobRunning if a job is already active.
+// Start begins a new job. Returns ErrJobRunning if a job is already active
+// or a scheduler run is in progress.
 func (m *Manager) Start(jobType string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.scheduleHeld {
+		return ErrJobRunning
+	}
+	return m.startLocked(jobType)
+}
 
+// StartScheduled is the scheduler's entry point. It bypasses the
+// scheduleHeld guard (which would otherwise block the scheduler's own
+// per-phase Start calls) but still refuses if another job is already
+// running. Pair with the usual Complete/Fail; the schedule reservation
+// is owned separately by BeginSchedule/EndSchedule.
+func (m *Manager) StartScheduled(jobType string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.startLocked(jobType)
+}
+
+// startLocked registers a new job; caller must hold m.mu.
+func (m *Manager) startLocked(jobType string) error {
 	if m.state != nil && m.state.Running {
 		return ErrJobRunning
 	}
-
 	// Cancel any pending auto-dismiss timer from a previous completed job.
 	if m.timer != nil {
 		m.timer.Stop()
 		m.timer = nil
 	}
-
 	m.ctx, m.cancel = context.WithCancel(context.Background())
 	m.state = &models.JobState{
 		Running:   true,
@@ -50,6 +71,31 @@ func (m *Manager) Start(jobType string) error {
 		Message:   "Starting…",
 	}
 	return nil
+}
+
+// BeginSchedule reserves the manager for an in-progress scheduler run.
+// While the reservation is held, user-facing Start() calls return
+// ErrJobRunning so external triggers can't slip into a phase gap. Returns
+// ErrJobRunning if a job is currently running or another scheduler run is
+// already in progress. Pair with EndSchedule via defer.
+func (m *Manager) BeginSchedule() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.scheduleHeld {
+		return ErrJobRunning
+	}
+	if m.state != nil && m.state.Running {
+		return ErrJobRunning
+	}
+	m.scheduleHeld = true
+	return nil
+}
+
+// EndSchedule releases the schedule reservation set by BeginSchedule.
+func (m *Manager) EndSchedule() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.scheduleHeld = false
 }
 
 // Context returns the cancellation context for the running job. Callers pass
@@ -130,10 +176,16 @@ func (m *Manager) Get() *models.JobState {
 	return &copy
 }
 
-// IsRunning returns true if a job is currently running.
+// IsRunning returns true if a job is currently running or a scheduler run
+// holds the manager. Callers that gate user-triggered work on the absence
+// of a running job (gallery switch, settings tagger toggle, ...) get the
+// same protection during scheduled maintenance.
 func (m *Manager) IsRunning() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.scheduleHeld {
+		return true
+	}
 	return m.state != nil && m.state.Running
 }
 
@@ -152,13 +204,16 @@ func (m *Manager) Dismiss() {
 	m.state = nil
 }
 
-// SetWatcherMessage sets a transient watcher notification as the current summary,
-// only when no job is running. Used by the filesystem watcher to surface events.
+// SetWatcherMessage surfaces a transient watcher notification. When idle it
+// becomes the status bar summary; when a job is running it only bumps the
+// WatcherNotices counter so the client refreshes the gallery grid without
+// overwriting the running job's progress line.
 func (m *Manager) SetWatcherMessage(msg string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.state != nil && m.state.Running {
-		return // don't interrupt a running job
+		m.state.WatcherNotices++
+		return
 	}
 	now := time.Now().UTC()
 	m.state = &models.JobState{

@@ -11,9 +11,10 @@
       </div>
       <ul class="tag-list-sidebar">
         {{range .Tags}}
+        {{$q := printf "%s:%s" .CategoryName .Name}}
         <li class="tag-entry" data-name="{{.Name}}">
-          <a href="/?q={{.Name}}" class="tag-link" data-tag="{{.Name}}" style="color:{{.CategoryColor}}">{{.Name}}</a>
-          <button class="tag-add-btn btn-tag-add" data-tag="{{.Name}}" title="Add to current search">+</button>
+          <a href="/?q={{$q}}" class="tag-link" data-tag="{{$q}}" style="color:{{.CategoryColor}}">{{.Name}}</a>
+          <button class="tag-add-btn btn-tag-add" data-tag="{{$q}}" title="Add to current search">+</button>
           <span class="tag-count">{{.UsageCount}}</span>
         </li>
         {{end}}

@@ -142,3 +142,67 @@ func TestSetWatcherMessage_NopWhenRunning(t *testing.T) {
 		t.Error("watcher message should not override running job")
 	}
 }
+
+func TestSetWatcherMessage_BumpsCounterWhileRunning(t *testing.T) {
+	m := NewManager()
+	m.Start("autotag")
+	m.SetWatcherMessage("added a.png")
+	m.SetWatcherMessage("added b.png")
+
+	state := m.Get()
+	if !state.Running {
+		t.Fatal("job should still be running")
+	}
+	if state.WatcherNotices != 2 {
+		t.Errorf("WatcherNotices = %d, want 2", state.WatcherNotices)
+	}
+}
+
+func TestBeginSchedule_BlocksUserStart(t *testing.T) {
+	m := NewManager()
+	if err := m.BeginSchedule(); err != nil {
+		t.Fatalf("BeginSchedule failed: %v", err)
+	}
+	defer m.EndSchedule()
+
+	if err := m.Start("sync"); err != ErrJobRunning {
+		t.Errorf("user Start during schedule = %v, want ErrJobRunning", err)
+	}
+	if !m.IsRunning() {
+		t.Error("IsRunning should be true while a schedule reservation is held")
+	}
+	// The scheduler's own per-phase entry point bypasses the reservation.
+	if err := m.StartScheduled("sync"); err != nil {
+		t.Errorf("StartScheduled during schedule = %v, want nil", err)
+	}
+	m.Complete("done")
+}
+
+func TestBeginSchedule_RefusesWhileJobRunning(t *testing.T) {
+	m := NewManager()
+	m.Start("sync")
+	if err := m.BeginSchedule(); err != ErrJobRunning {
+		t.Errorf("BeginSchedule with active job = %v, want ErrJobRunning", err)
+	}
+	m.Complete("done")
+}
+
+func TestBeginSchedule_DoubleAcquireRefuses(t *testing.T) {
+	m := NewManager()
+	if err := m.BeginSchedule(); err != nil {
+		t.Fatalf("first BeginSchedule failed: %v", err)
+	}
+	defer m.EndSchedule()
+	if err := m.BeginSchedule(); err != ErrJobRunning {
+		t.Errorf("second BeginSchedule = %v, want ErrJobRunning", err)
+	}
+}
+
+func TestEndSchedule_ReleasesUserStart(t *testing.T) {
+	m := NewManager()
+	m.BeginSchedule()
+	m.EndSchedule()
+	if err := m.Start("sync"); err != nil {
+		t.Errorf("Start after EndSchedule = %v, want nil", err)
+	}
+}

@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/leqwin/monbooru/internal/config"
 	"github.com/leqwin/monbooru/internal/db"
 	"github.com/leqwin/monbooru/internal/gallery"
 )
@@ -34,7 +33,14 @@ func TestParse_ImplicitAND(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected AndExpr, got %T", e)
 	}
-	_ = and
+	left, ok := and.Left.(TagExpr)
+	if !ok || left.Tag != "a" {
+		t.Errorf("Left = %+v, want TagExpr{a}", and.Left)
+	}
+	right, ok := and.Right.(TagExpr)
+	if !ok || right.Tag != "b" {
+		t.Errorf("Right = %+v, want TagExpr{b}", and.Right)
+	}
 }
 
 func TestParse_OR(t *testing.T) {
@@ -44,6 +50,29 @@ func TestParse_OR(t *testing.T) {
 		t.Fatalf("expected OrExpr, got %T", e)
 	}
 	_ = or
+}
+
+func TestParse_ORChain(t *testing.T) {
+	// Chained OR used to silently drop everything past the first pair;
+	// `a OR b OR c` should produce three leaves, not two.
+	e, _ := Parse("a OR b OR c")
+	or, ok := e.(OrExpr)
+	if !ok {
+		t.Fatalf("expected OrExpr at root, got %T", e)
+	}
+	leftOr, ok := or.Left.(OrExpr)
+	if !ok {
+		t.Fatalf("expected nested OrExpr on left, got %T", or.Left)
+	}
+	if got := leftOr.Left.(TagExpr).Tag; got != "a" {
+		t.Errorf("leftOr.Left = %q, want a", got)
+	}
+	if got := leftOr.Right.(TagExpr).Tag; got != "b" {
+		t.Errorf("leftOr.Right = %q, want b", got)
+	}
+	if got := or.Right.(TagExpr).Tag; got != "c" {
+		t.Errorf("or.Right = %q, want c", got)
+	}
 }
 
 func TestParse_NOT(t *testing.T) {
@@ -150,7 +179,7 @@ func TestBuildWhere_MissingTrue(t *testing.T) {
 	expr := FilterExpr{Key: "missing", Val: "true"}
 	_, _, hasMissing := buildWhere(expr)
 	if !hasMissing {
-		t.Error("expected hasMissingTrue = true")
+		t.Error("expected hasMissingFilter = true")
 	}
 }
 
@@ -173,8 +202,62 @@ func TestBuildWhere_AnimatedFalse(t *testing.T) {
 	}
 }
 
+func TestBuildWhere_TaggedTrue(t *testing.T) {
+	expr := FilterExpr{Key: "tagged", Val: "true"}
+	where, args, _ := buildWhere(expr)
+	if len(args) != 0 {
+		t.Fatalf("expected 0 args, got %d", len(args))
+	}
+	if !strings.Contains(where, "EXISTS (SELECT 1 FROM image_tags") {
+		t.Errorf("where clause missing tagged subselect: %s", where)
+	}
+	if strings.Contains(where, "NOT EXISTS") {
+		t.Errorf("tagged:true should match tagged images, got: %s", where)
+	}
+}
+
+func TestBuildWhere_TaggedFalse(t *testing.T) {
+	expr := FilterExpr{Key: "tagged", Val: "false"}
+	where, _, _ := buildWhere(expr)
+	if !strings.Contains(where, "NOT EXISTS (SELECT 1 FROM image_tags") {
+		t.Errorf("where clause missing untagged subselect: %s", where)
+	}
+}
+
+func TestBuildWhere_AutotaggedTrue(t *testing.T) {
+	expr := FilterExpr{Key: "autotagged", Val: "true"}
+	where, args, _ := buildWhere(expr)
+	if len(args) != 0 {
+		t.Fatalf("expected 0 args, got %d", len(args))
+	}
+	if !strings.Contains(where, "it.is_auto = 1") {
+		t.Errorf("where clause missing is_auto filter: %s", where)
+	}
+	if strings.Contains(where, "NOT EXISTS") {
+		t.Errorf("autotagged:true should match auto-tagged images, got: %s", where)
+	}
+}
+
+func TestBuildWhere_AutotaggedFalse(t *testing.T) {
+	expr := FilterExpr{Key: "autotagged", Val: "false"}
+	where, _, _ := buildWhere(expr)
+	if !strings.Contains(where, "NOT EXISTS (SELECT 1 FROM image_tags") {
+		t.Errorf("where clause missing NOT EXISTS: %s", where)
+	}
+	if !strings.Contains(where, "it.is_auto = 1") {
+		t.Errorf("where clause missing is_auto filter: %s", where)
+	}
+}
+
 // Integration test with real DB
-func setupSearchDB(t *testing.T) (*db.DB, *config.Config) {
+type searchEnv struct {
+	db            *db.DB
+	galleryDir    string
+	thumbnailsDir string
+	maxFileSizeMB int
+}
+
+func setupSearchDB(t *testing.T) (*db.DB, *searchEnv) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	galleryDir := filepath.Join(tmpDir, "gallery")
@@ -189,31 +272,30 @@ func setupSearchDB(t *testing.T) (*db.DB, *config.Config) {
 	}
 	t.Cleanup(func() { database.Close() })
 
-	cfg := &config.Config{}
-	cfg.Paths.GalleryPath = galleryDir
-	cfg.Paths.ThumbnailsPath = filepath.Join(tmpDir, "thumbs")
-	cfg.Gallery.MaxFileSizeMB = 100
-
-	return database, cfg
+	return database, &searchEnv{
+		db:            database,
+		galleryDir:    galleryDir,
+		thumbnailsDir: filepath.Join(tmpDir, "thumbs"),
+		maxFileSizeMB: 100,
+	}
 }
 
 var ingestCounter int
 
-func ingestTestImage(t *testing.T, database *db.DB, cfg *config.Config, name string) {
+func ingestTestImage(t *testing.T, database *db.DB, env *searchEnv, name string) {
 	t.Helper()
 	ingestCounter++
-	// Use different sizes to ensure different SHA-256 hashes
 	img := image.NewRGBA(image.Rect(0, 0, 10+ingestCounter, 10))
-	path := filepath.Join(cfg.Paths.GalleryPath, name)
+	path := filepath.Join(env.galleryDir, name)
 	f, _ := os.Create(path)
 	png.Encode(f, img)
 	f.Close()
-	gallery.Ingest(database, cfg, path, "png")
+	gallery.Ingest(database, env.galleryDir, env.thumbnailsDir, path, "png")
 }
 
 func TestExecute_BasicSearch(t *testing.T) {
-	database, cfg := setupSearchDB(t)
-	ingestTestImage(t, database, cfg, "test.png")
+	database, env := setupSearchDB(t)
+	ingestTestImage(t, database, env, "test.png")
 
 	q := Query{Sort: "newest", Page: 1, Limit: 40}
 	result, err := Execute(database, q)
@@ -226,19 +308,18 @@ func TestExecute_BasicSearch(t *testing.T) {
 }
 
 func TestExecute_FolderFilter(t *testing.T) {
-	database, cfg := setupSearchDB(t)
+	database, env := setupSearchDB(t)
 
-	subDir := filepath.Join(cfg.Paths.GalleryPath, "2024")
+	subDir := filepath.Join(env.galleryDir, "2024")
 	os.MkdirAll(subDir, 0755)
-	ingestTestImage(t, database, cfg, "root.png")
+	ingestTestImage(t, database, env, "root.png")
 
-	// Ingest in sub dir
 	img := image.NewRGBA(image.Rect(0, 0, 10, 10))
 	path := filepath.Join(subDir, "sub.png")
 	f, _ := os.Create(path)
 	png.Encode(f, img)
 	f.Close()
-	gallery.Ingest(database, cfg, path, "png")
+	gallery.Ingest(database, env.galleryDir, env.thumbnailsDir, path, "png")
 
 	// Search for gallery root only
 	_, err := Execute(database, Query{
@@ -252,11 +333,11 @@ func TestExecute_FolderFilter(t *testing.T) {
 }
 
 func TestExecute_FullSync(t *testing.T) {
-	database, cfg := setupSearchDB(t)
-	ingestTestImage(t, database, cfg, "a.png")
-	ingestTestImage(t, database, cfg, "b.png")
+	database, env := setupSearchDB(t)
+	ingestTestImage(t, database, env, "a.png")
+	ingestTestImage(t, database, env, "b.png")
 
-	gallery.Sync(context.Background(), database, cfg, func(string) {})
+	gallery.Sync(context.Background(), database, env.galleryDir, env.thumbnailsDir, env.maxFileSizeMB, func(int, int, string) {})
 
 	result, err := Execute(database, Query{Page: 1, Limit: 40})
 	if err != nil {
@@ -401,8 +482,8 @@ func TestBuildWhere_Cat(t *testing.T) {
 func TestBuildWhere_Width(t *testing.T) {
 	expr := FilterExpr{Key: "width", Val: ">=1920"}
 	where, args, _ := buildWhere(expr)
-	if len(args) != 1 || args[0] != "1920" {
-		t.Errorf("args = %v, want 1920", args)
+	if len(args) != 1 || args[0] != int64(1920) {
+		t.Errorf("args = %v, want int64(1920)", args)
 	}
 	if !strings.Contains(where, "i.width") {
 		t.Errorf("where = %q", where)
@@ -412,7 +493,7 @@ func TestBuildWhere_Width(t *testing.T) {
 func TestBuildWhere_Height(t *testing.T) {
 	expr := FilterExpr{Key: "height", Val: "<768"}
 	where, args, _ := buildWhere(expr)
-	if len(args) != 1 || args[0] != "768" {
+	if len(args) != 1 || args[0] != int64(768) {
 		t.Errorf("args = %v", args)
 	}
 	if !strings.Contains(where, "i.height") {
@@ -420,14 +501,50 @@ func TestBuildWhere_Height(t *testing.T) {
 	}
 }
 
+func TestBuildWhere_WidthNonNumericRejected(t *testing.T) {
+	// `width:>=abc` used to bind the string "abc" into the SQL and let
+	// SQLite silently coerce it to 0, matching every row with width >= 0.
+	// Now it produces an explicit `1=0` so the user sees an empty result
+	// instead of a too-wide one.
+	expr := FilterExpr{Key: "width", Val: ">=abc"}
+	where, args, _ := buildWhere(expr)
+	if len(args) != 0 {
+		t.Errorf("args = %v, want none", args)
+	}
+	if !strings.Contains(where, "1=0") {
+		t.Errorf("where = %q, expected 1=0", where)
+	}
+}
+
 func TestBuildWhere_MissingFalse(t *testing.T) {
+	// `missing:false` (and `missing:true`) opt out of the auto-injected
+	// `AND is_missing = 0`; the explicit clause speaks for itself, and
+	// without the opt-out a negation like `-missing:false` would
+	// collapse to a contradiction and match nothing.
 	expr := FilterExpr{Key: "missing", Val: "false"}
 	where, _, hasMissing := buildWhere(expr)
-	if hasMissing {
-		t.Error("should not set hasMissingTrue for missing:false")
+	if !hasMissing {
+		t.Error("expected hasMissingFilter = true for missing:false")
 	}
 	if !strings.Contains(where, "is_missing = 0") {
 		t.Errorf("where = %q", where)
+	}
+}
+
+func TestBuildWhere_NegatedMissingFalse(t *testing.T) {
+	// `-missing:false` should mean "show me missing images" - equivalent
+	// to `missing:true`. Previously the auto-injected
+	// `AND is_missing = 0` clause was still appended on top of the
+	// negation and the query collapsed to zero results.
+	expr := NotExpr{Expr: FilterExpr{Key: "missing", Val: "false"}}
+	where, _, _ := buildWhere(expr)
+	if !strings.Contains(where, "NOT") {
+		t.Errorf("where missing NOT: %q", where)
+	}
+	// The auto-injection must NOT have been appended; otherwise the
+	// caller (Execute) would build a contradictory clause.
+	if strings.Contains(where, "AND i.is_missing = 0") {
+		t.Errorf("where should not include the auto-clause: %q", where)
 	}
 }
 
@@ -570,7 +687,7 @@ func TestBuildWhere_AND(t *testing.T) {
 }
 
 func TestBuildWhere_AND_LeftUnknown(t *testing.T) {
-	// Unknown filter produces "1=1" — AND should still work
+	// Unknown filter produces "1=1" - AND should still work
 	expr := AndExpr{
 		Left:  FilterExpr{Key: "bogus", Val: ""},
 		Right: TagExpr{Tag: "cute"},
@@ -892,10 +1009,9 @@ func TestSuggestTagsWithFilter(t *testing.T) {
 
 func TestExprNodeMarkers(t *testing.T) {
 	// exprNode() is a marker method used to implement the Expr interface.
-	// Call each one to satisfy coverage — they are intentionally empty.
+	// Call each one to satisfy coverage - they are intentionally empty.
 	exprs := []Expr{AndExpr{}, OrExpr{}, NotExpr{}, TagExpr{}, FilterExpr{}}
 	for _, e := range exprs {
 		e.exprNode()
 	}
 }
-

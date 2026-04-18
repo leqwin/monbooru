@@ -25,6 +25,7 @@ import (
 	"github.com/leqwin/monbooru/internal/db"
 	"github.com/leqwin/monbooru/internal/gallery"
 	"github.com/leqwin/monbooru/internal/jobs"
+	"github.com/leqwin/monbooru/internal/logx"
 	ort "github.com/yalue/onnxruntime_go"
 	"golang.org/x/image/draw"
 )
@@ -221,7 +222,7 @@ func RunWithTaggers(ctx context.Context, database *db.DB, cfg *config.Config, id
 	}
 	if hasTxt && generalCatID != 0 {
 		// Exclude names where the user has manually used the general
-		// counterpart — that's an explicit signal the user wants the
+		// counterpart - that's an explicit signal the user wants the
 		// general version, not the inferred categorized one.
 		infRows, err := database.Read.QueryContext(ctx, `
 			SELECT t.name, t.category_id
@@ -326,7 +327,9 @@ func RunWithTaggers(ctx context.Context, database *db.DB, cfg *config.Config, id
 			}
 		}
 
-		storeResults(ctx, database, imageID, merged, taggerNames)
+		if err := storeResults(ctx, database, imageID, merged, taggerNames); err != nil {
+			logx.Warnf("tagger: store results for image %d: %v", imageID, err)
+		}
 	}
 
 	parallel := cfg.Tagger.Parallel
@@ -438,9 +441,9 @@ func inferImage(lt loadedTagger, path string) ([]float32, error) {
 
 // buildTensor fills the ORT input buffer from the resized RGBA image. The two
 // branches diverge on layout, channel order, and value range; padAndResize
-// always returns *image.RGBA, so we read Pix directly — the per-pixel
-// image.Image interface dispatch + RGBA() alpha math used to dominate this
-// loop and keep the GPU waiting between inferences.
+// always returns *image.RGBA, so we read Pix directly to skip the per-pixel
+// image.Image interface dispatch and RGBA() alpha math that would otherwise
+// dominate this loop and keep the GPU waiting between inferences.
 func buildTensor(img *image.RGBA, joytag bool) ([]float32, ort.Shape) {
 	pix := img.Pix
 	stride := img.Stride
@@ -534,13 +537,15 @@ func storeResults(
 		err := tx.QueryRowContext(ctx,
 			`SELECT id FROM tags WHERE name = ? AND category_id = ?`, k.name, k.catID,
 		).Scan(&tagID)
-		if err != nil {
+		if err == sql.ErrNoRows {
 			res, err2 := tx.ExecContext(ctx,
 				`INSERT INTO tags (name, category_id, usage_count) VALUES (?, ?, 0)`, k.name, k.catID)
 			if err2 != nil {
-				continue
+				return fmt.Errorf("insert tag %q (cat=%d): %w", k.name, k.catID, err2)
 			}
 			tagID, _ = res.LastInsertId()
+		} else if err != nil {
+			return fmt.Errorf("lookup tag %q (cat=%d): %w", k.name, k.catID, err)
 		}
 		targets[tagID] = target{score: s.score, taggerName: s.taggerName}
 	}
@@ -595,12 +600,18 @@ func storeResults(
 		}
 	}
 
-	// Apply removals.
+	// Apply removals. Failing here would leave an old auto-tag attached
+	// to the image with the wrong attribution; roll back instead of
+	// committing a partial state.
 	for tid := range toRemove {
-		tx.ExecContext(ctx,
-			`DELETE FROM image_tags WHERE image_id = ? AND tag_id = ? AND is_auto = 1`, imageID, tid)
-		tx.ExecContext(ctx,
-			`UPDATE tags SET usage_count = MAX(0, usage_count - 1) WHERE id = ?`, tid)
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM image_tags WHERE image_id = ? AND tag_id = ? AND is_auto = 1`, imageID, tid); err != nil {
+			return fmt.Errorf("remove auto tag %d: %w", tid, err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE tags SET usage_count = MAX(0, usage_count - 1) WHERE id = ?`, tid); err != nil {
+			return fmt.Errorf("decrement usage for tag %d: %w", tid, err)
+		}
 	}
 
 	// Refresh confidence and tagger attribution for tags that stay.
@@ -613,9 +624,11 @@ func storeResults(
 		if t.taggerName != "" {
 			tname = t.taggerName
 		}
-		tx.ExecContext(ctx,
+		if _, err := tx.ExecContext(ctx,
 			`UPDATE image_tags SET confidence = ?, tagger_name = ? WHERE image_id = ? AND tag_id = ? AND is_auto = 1`,
-			t.score, tname, imageID, tid)
+			t.score, tname, imageID, tid); err != nil {
+			return fmt.Errorf("refresh attribution for tag %d: %w", tid, err)
+		}
 	}
 
 	// Insert new tags.
@@ -628,16 +641,20 @@ func storeResults(
 			`INSERT OR IGNORE INTO image_tags (image_id, tag_id, is_auto, confidence, tagger_name) VALUES (?, ?, 1, ?, ?)`,
 			imageID, tid, t.score, tname)
 		if err != nil {
-			continue
+			return fmt.Errorf("insert auto tag %d: %w", tid, err)
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
 			continue
 		}
-		tx.ExecContext(ctx, `UPDATE tags SET usage_count = usage_count + 1 WHERE id = ?`, tid)
+		if _, err := tx.ExecContext(ctx, `UPDATE tags SET usage_count = usage_count + 1 WHERE id = ?`, tid); err != nil {
+			return fmt.Errorf("increment usage for tag %d: %w", tid, err)
+		}
 	}
 
-	tx.ExecContext(ctx, `UPDATE images SET auto_tagged_at = ? WHERE id = ?`,
-		time.Now().UTC().Format(time.RFC3339), imageID)
+	if _, err := tx.ExecContext(ctx, `UPDATE images SET auto_tagged_at = ? WHERE id = ?`,
+		time.Now().UTC().Format(time.RFC3339), imageID); err != nil {
+		return fmt.Errorf("stamp auto_tagged_at on image %d: %w", imageID, err)
+	}
 
 	return tx.Commit()
 }
@@ -645,7 +662,10 @@ func storeResults(
 // loadLabels parses the tagger's label file. `.csv` files follow the WD14
 // schema (id, name, category_id). Any other extension (joytag ships a plain
 // `tags.txt` / `top_tags.txt` with one label per line) is read line-by-line
-// with every label mapped to WD14 category 0 (→ monbooru `general`).
+// with every label mapped to WD14 category 0 (→ monbooru `general`). Label
+// names are normalised to fit the documented tag allowlist before they
+// become tag rows; the slice index still maps 1:1 to the model's output
+// channels even when individual labels are placeholders.
 func loadLabels(path string) ([]tagLabel, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -678,7 +698,7 @@ func loadLabelsCSV(f io.Reader) ([]tagLabel, error) {
 		}
 		catID, _ := strconv.Atoi(strings.TrimSpace(rec[2]))
 		labels = append(labels, tagLabel{
-			name:       strings.TrimSpace(rec[1]),
+			name:       sanitizeLabel(rec[1], len(labels)),
 			categoryID: catID,
 		})
 	}
@@ -690,16 +710,60 @@ func loadLabelsText(f io.Reader) ([]tagLabel, error) {
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
-		name := strings.TrimSpace(scanner.Text())
-		if name == "" {
+		raw := scanner.Text()
+		if strings.TrimSpace(raw) == "" {
 			continue
 		}
-		labels = append(labels, tagLabel{name: name, categoryID: 0})
+		labels = append(labels, tagLabel{
+			name:       sanitizeLabel(raw, len(labels)),
+			categoryID: 0,
+		})
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
 	return labels, nil
+}
+
+// sanitizeLabel coerces a label-file name into the documented tag
+// allowlist (`[a-z0-9_()!@#$.~+-]`, length 1-200, must contain a
+// letter or digit). Spaces collapse to underscores; out-of-set runes
+// drop. A label that empties out (or stays all-punctuation) is
+// replaced by an `_unsupported_<idx>` placeholder so the slice
+// position still aligns with the model's output channel - dropping
+// the entry would shift every later label by one and corrupt every
+// downstream tag attribution.
+func sanitizeLabel(raw string, idx int) string {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= '0' && r <= '9',
+			r == '_' || r == '(' || r == ')' || r == '!' ||
+				r == '@' || r == '#' || r == '$' || r == '.' ||
+				r == '~' || r == '+' || r == '-':
+			b.WriteRune(r)
+		case r == ' ' || r == '\t':
+			b.WriteByte('_')
+		}
+	}
+	out := b.String()
+	if len(out) > 200 {
+		out = out[:200]
+	}
+	hasAlphanum := false
+	for _, r := range out {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			hasAlphanum = true
+			break
+		}
+	}
+	if !hasAlphanum {
+		return fmt.Sprintf("_unsupported_%d", idx)
+	}
+	return out
 }
 
 // sharedLibPath returns the path to the ONNX Runtime shared library.

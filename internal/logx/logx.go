@@ -3,7 +3,7 @@
 // Three levels: "warn" (the default; warn+error only), "info" (one line per
 // user request plus startup banners), and "debug" (everything including
 // static-asset hits). Warnings, errors and fatals always fire regardless of
-// level — only Infof and Debugf respect the gate.
+// level - only Infof and Debugf respect the gate.
 package logx
 
 import (

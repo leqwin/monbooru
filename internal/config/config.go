@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -12,13 +13,16 @@ import (
 
 // Config holds all application configuration.
 type Config struct {
-	Server  ServerConfig  `toml:"server"`
-	Paths   PathsConfig   `toml:"paths"`
-	Gallery GalleryConfig `toml:"gallery"`
-	Tagger  TaggerConfig  `toml:"tagger"`
-	Auth    AuthConfig    `toml:"auth"`
-	UI      UIConfig      `toml:"ui"`
-	Log     LogConfig     `toml:"log"`
+	DefaultGallery string         `toml:"default_gallery"`
+	Galleries      []Gallery      `toml:"galleries"`
+	Server         ServerConfig   `toml:"server"`
+	Paths          PathsConfig    `toml:"paths"`
+	Gallery        GalleryConfig  `toml:"gallery"`
+	Tagger         TaggerConfig   `toml:"tagger"`
+	Auth           AuthConfig     `toml:"auth"`
+	UI             UIConfig       `toml:"ui"`
+	Log            LogConfig      `toml:"log"`
+	Schedule       ScheduleConfig `toml:"schedule"`
 }
 
 type ServerConfig struct {
@@ -26,11 +30,20 @@ type ServerConfig struct {
 	BaseURL     string `toml:"base_url"`
 }
 
+// PathsConfig holds process-wide paths. Per-gallery DB and thumbnails paths
+// are derived from DataPath + the gallery name.
 type PathsConfig struct {
+	DataPath  string `toml:"data_path"`
+	ModelPath string `toml:"model_path"`
+}
+
+// Gallery is one named gallery. Only Name and GalleryPath are persisted; the
+// rest are derived at Load time.
+type Gallery struct {
+	Name           string `toml:"name"`
 	GalleryPath    string `toml:"gallery_path"`
-	DBPath         string `toml:"db_path"`
-	ThumbnailsPath string `toml:"thumbnails_path"`
-	ModelPath      string `toml:"model_path"`
+	DBPath         string `toml:"-"`
+	ThumbnailsPath string `toml:"-"`
 }
 
 type GalleryConfig struct {
@@ -40,19 +53,16 @@ type GalleryConfig struct {
 
 type TaggerConfig struct {
 	UseCUDA  bool             `toml:"use_cuda"`
-	Parallel int              `toml:"parallel"` // number of concurrent auto-tagging workers
+	Parallel int              `toml:"parallel"`
 	Taggers  []TaggerInstance `toml:"taggers"`
 }
 
-// TaggerInstance describes one auto-tagger living under a subfolder of
-// paths.model_path. Multiple instances can be enabled; enabled taggers are
-// applied in order at auto-tag time and their outputs are deduplicated.
 type TaggerInstance struct {
-	Name                string  `toml:"name"`                 // subfolder name under model_path
+	Name                string  `toml:"name"`
 	Enabled             bool    `toml:"enabled"`
-	ConfidenceThreshold float64 `toml:"confidence_threshold"` // per-tagger threshold
-	ModelFile           string  `toml:"model_file"`           // optional override; default "model.onnx"
-	TagsFile            string  `toml:"tags_file"`            // optional override; default "tags.csv"
+	ConfidenceThreshold float64 `toml:"confidence_threshold"`
+	ModelFile           string  `toml:"model_file"`
+	TagsFile            string  `toml:"tags_file"`
 }
 
 type AuthConfig struct {
@@ -66,26 +76,38 @@ type UIConfig struct {
 	PageSize int `toml:"page_size"`
 }
 
-// LogConfig controls log verbosity. Accepted levels:
-//   - "warn":  only warnings, errors and explicit mutations (auth, settings).
-//   - "info":  the above plus one line per user request and startup banners.
-//   - "debug": info plus noisy traffic (static assets, thumbnails, health).
+// LogConfig controls log verbosity: "warn" (default), "info", "debug".
 type LogConfig struct {
 	Level string `toml:"level"`
+}
+
+// ScheduleConfig runs selected maintenance actions once per day at the
+// configured HH:MM on every configured gallery.
+type ScheduleConfig struct {
+	Time             string `toml:"time"` // "HH:MM" 24h, default "01:00"
+	SyncGallery      bool   `toml:"sync_gallery"`
+	RemoveOrphans    bool   `toml:"remove_orphans"`
+	RunAutoTaggers   bool   `toml:"run_auto_taggers"`
+	RecomputeTags    bool   `toml:"recompute_tags"`
+	MergeGeneralTags bool   `toml:"merge_general_tags"`
+	VacuumDB         bool   `toml:"vacuum_db"`
 }
 
 // Default returns a fully populated config with all spec defaults.
 func Default() *Config {
 	return &Config{
+		DefaultGallery: "default",
+		Galleries: []Gallery{{
+			Name:        "default",
+			GalleryPath: "/gallery",
+		}},
 		Server: ServerConfig{
 			BindAddress: "127.0.0.1:8080",
 			BaseURL:     "http://localhost:8080",
 		},
 		Paths: PathsConfig{
-			GalleryPath:    "/gallery",
-			DBPath:         "/data/monbooru.db",
-			ThumbnailsPath: "/data/thumbnails",
-			ModelPath:      "/models",
+			DataPath:  "/data",
+			ModelPath: "/models",
 		},
 		Gallery: GalleryConfig{
 			WatchEnabled:  true,
@@ -93,10 +115,7 @@ func Default() *Config {
 		},
 		Tagger: TaggerConfig{Parallel: 16},
 		Auth: AuthConfig{
-			EnablePassword:      false,
-			PasswordHash:        "",
 			SessionLifetimeDays: 7,
-			APIToken:            "",
 		},
 		UI: UIConfig{
 			PageSize: 40,
@@ -104,11 +123,29 @@ func Default() *Config {
 		Log: LogConfig{
 			Level: "warn",
 		},
+		Schedule: ScheduleConfig{
+			Time:             "01:00",
+			SyncGallery:      true,
+			RemoveOrphans:    true,
+			RunAutoTaggers:   true,
+			RecomputeTags:    true,
+			MergeGeneralTags: true,
+			VacuumDB:         true,
+		},
 	}
 }
 
+var scheduleTimeRe = regexp.MustCompile(`^([01]\d|2[0-3]):[0-5]\d$`)
+
+// ValidateScheduleTime accepts "HH:MM" in 24-hour form.
+func ValidateScheduleTime(v string) error {
+	if !scheduleTimeRe.MatchString(v) {
+		return fmt.Errorf("schedule.time %q must be HH:MM (00:00–23:59)", v)
+	}
+	return nil
+}
+
 // Load reads and decodes a TOML config file. If absent, creates it with defaults.
-// Env var overrides are applied after file parsing.
 func Load(path string) (*Config, error) {
 	cfg := Default()
 
@@ -120,17 +157,18 @@ func Load(path string) (*Config, error) {
 	} else if err != nil {
 		return nil, fmt.Errorf("checking config file: %w", err)
 	} else {
+		cfg.Galleries = nil
+		cfg.DefaultGallery = ""
 		if _, err := toml.DecodeFile(path, cfg); err != nil {
 			return nil, fmt.Errorf("parsing config file %q: %w", path, err)
 		}
 	}
 
-	applyEnvOverrides(cfg)
-
 	if err := validate(cfg); err != nil {
 		return nil, err
 	}
-
+	fillDerivedPaths(cfg)
+	applyEnvOverrides(cfg)
 	return cfg, nil
 }
 
@@ -140,31 +178,64 @@ func Save(cfg *Config, path string) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("creating config directory: %w", err)
 	}
-
 	tmpFile, err := os.CreateTemp(dir, ".monbooru.toml.*")
 	if err != nil {
 		return fmt.Errorf("creating temp file: %w", err)
 	}
 	tmpName := tmpFile.Name()
-
-	enc := toml.NewEncoder(tmpFile)
-	if err := enc.Encode(cfg); err != nil {
+	if err := toml.NewEncoder(tmpFile).Encode(cfg); err != nil {
 		tmpFile.Close()
 		os.Remove(tmpName)
 		return fmt.Errorf("encoding config: %w", err)
 	}
-
 	if err := tmpFile.Close(); err != nil {
 		os.Remove(tmpName)
 		return fmt.Errorf("closing temp file: %w", err)
 	}
-
 	if err := os.Rename(tmpName, path); err != nil {
 		os.Remove(tmpName)
 		return fmt.Errorf("renaming temp file: %w", err)
 	}
-
 	return nil
+}
+
+// FindGallery returns the gallery with the given name, or nil.
+func (cfg *Config) FindGallery(name string) *Gallery {
+	for i := range cfg.Galleries {
+		if cfg.Galleries[i].Name == name {
+			return &cfg.Galleries[i]
+		}
+	}
+	return nil
+}
+
+// DerivePaths returns the canonical DB and thumbnails paths for a gallery.
+// Each gallery lives under <data_path>/<name>/.
+func (cfg *Config) DerivePaths(name string) (dbPath, thumbnailsPath string) {
+	dir := filepath.Join(cfg.Paths.DataPath, name)
+	return filepath.Join(dir, "monbooru.db"), filepath.Join(dir, "thumbnails")
+}
+
+var galleryNameRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// ValidateGalleryName rejects empty names or characters unsafe in a filename.
+func ValidateGalleryName(name string) error {
+	if name == "" {
+		return fmt.Errorf("gallery name must not be empty")
+	}
+	if !galleryNameRe.MatchString(name) {
+		return fmt.Errorf("gallery name %q must match [A-Za-z0-9_-]+", name)
+	}
+	return nil
+}
+
+// fillDerivedPaths populates DBPath and ThumbnailsPath for every gallery.
+func fillDerivedPaths(cfg *Config) {
+	for i := range cfg.Galleries {
+		db, th := cfg.DerivePaths(cfg.Galleries[i].Name)
+		cfg.Galleries[i].DBPath = db
+		cfg.Galleries[i].ThumbnailsPath = th
+	}
 }
 
 func applyEnvOverrides(cfg *Config) {
@@ -174,14 +245,9 @@ func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("MONBOORU_SERVER_BASE_URL"); v != "" {
 		cfg.Server.BaseURL = v
 	}
-	if v := os.Getenv("MONBOORU_PATHS_GALLERY_PATH"); v != "" {
-		cfg.Paths.GalleryPath = v
-	}
-	if v := os.Getenv("MONBOORU_PATHS_DB_PATH"); v != "" {
-		cfg.Paths.DBPath = v
-	}
-	if v := os.Getenv("MONBOORU_PATHS_THUMBNAILS_PATH"); v != "" {
-		cfg.Paths.ThumbnailsPath = v
+	if v := os.Getenv("MONBOORU_PATHS_DATA_PATH"); v != "" {
+		cfg.Paths.DataPath = v
+		fillDerivedPaths(cfg)
 	}
 	if v := os.Getenv("MONBOORU_PATHS_MODEL_PATH"); v != "" {
 		cfg.Paths.ModelPath = v
@@ -196,8 +262,6 @@ func applyEnvOverrides(cfg *Config) {
 			cfg.Gallery.MaxFileSizeMB = n
 		}
 	}
-	// Per-tagger settings live in the Settings page, not env vars. The GPU toggle
-	// is env-overridable so containerised GPU deployments can flip it declaratively.
 	if v := os.Getenv("MONBOORU_TAGGER_USE_CUDA"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.Tagger.UseCUDA = b
@@ -238,10 +302,38 @@ func validate(cfg *Config) error {
 	}
 	// enable_password=true with an empty hash would let the password-update handler
 	// bypass the current-password check (that guard only runs when PasswordHash != "").
-	// Refuse to start rather than silently open the door.
 	if cfg.Auth.EnablePassword && strings.TrimSpace(cfg.Auth.PasswordHash) == "" {
-		return fmt.Errorf("auth.enable_password is true but auth.password_hash is empty — " +
+		return fmt.Errorf("auth.enable_password is true but auth.password_hash is empty - " +
 			"run `monbooru -hash-password 'your-password'` and paste the result into monbooru.toml")
+	}
+	if len(cfg.Galleries) == 0 {
+		return fmt.Errorf("at least one gallery must be configured")
+	}
+	if cfg.Paths.DataPath == "" {
+		return fmt.Errorf("paths.data_path must not be empty")
+	}
+	seen := map[string]bool{}
+	for _, g := range cfg.Galleries {
+		if err := ValidateGalleryName(g.Name); err != nil {
+			return fmt.Errorf("invalid gallery: %w", err)
+		}
+		if seen[g.Name] {
+			return fmt.Errorf("duplicate gallery name %q", g.Name)
+		}
+		seen[g.Name] = true
+		if g.GalleryPath == "" {
+			return fmt.Errorf("gallery %q has an empty gallery_path", g.Name)
+		}
+	}
+	if cfg.DefaultGallery == "" {
+		cfg.DefaultGallery = cfg.Galleries[0].Name
+	} else if cfg.FindGallery(cfg.DefaultGallery) == nil {
+		cfg.DefaultGallery = cfg.Galleries[0].Name
+	}
+	if cfg.Schedule.Time == "" {
+		cfg.Schedule.Time = "01:00"
+	} else if err := ValidateScheduleTime(cfg.Schedule.Time); err != nil {
+		return err
 	}
 	return nil
 }

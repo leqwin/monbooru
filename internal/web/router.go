@@ -9,18 +9,18 @@ import (
 	"net/http"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/leqwin/monbooru/internal/api"
 	"github.com/leqwin/monbooru/internal/config"
-	"github.com/leqwin/monbooru/internal/db"
 	"github.com/leqwin/monbooru/internal/gallery"
 	"github.com/leqwin/monbooru/internal/jobs"
 	"github.com/leqwin/monbooru/internal/logx"
 	"github.com/leqwin/monbooru/internal/models"
-	"github.com/leqwin/monbooru/internal/tags"
 	webFS "github.com/leqwin/monbooru/web"
 )
 
@@ -52,22 +52,25 @@ type Server struct {
 	cfg        *config.Config
 	configPath string
 	cfgMu      sync.Mutex // protects cfg writes and config.Save calls
-	db         *db.DB
 	jobs       *jobs.Manager
-	tagSvc     *tags.Service
 	sessions   *SessionStore
 	loginRL    *loginRateLimiter
 	csrfSecret []byte // per-instance HMAC key for CSRF tokens
 	tmpl       *template.Template
 	staticFS   fs.FS
-	degraded   bool // true when gallery_path is unreadable
 	done       chan struct{} // closed on Close() to stop background goroutines
+
+	// ctxMu guards contexts and activeName. Read handlers take RLock via
+	// ContextMiddleware; mutation handlers take the write lock.
+	ctxMu      sync.RWMutex
+	contexts   map[string]*galleryCtx
+	activeName string
 }
 
-// NewServer creates the HTTP server with all routes wired.
-func NewServer(cfg *config.Config, configPath string, database *db.DB, jobManager *jobs.Manager, degraded bool) (*Server, error) {
+// NewServer creates the HTTP server with all routes wired. One *db.DB is
+// opened per configured gallery.
+func NewServer(cfg *config.Config, configPath string, jobManager *jobs.Manager) (*Server, error) {
 	sessions := NewSessionStore()
-	tagSvc := tags.New(database)
 
 	// Parse all templates
 	tmpl, err := template.New("").Funcs(template.FuncMap{
@@ -113,9 +116,24 @@ func NewServer(cfg *config.Config, configPath string, database *db.DB, jobManage
 			}
 			return total
 		},
-		"deref":    func(p *int) int { if p == nil { return 0 }; return *p },
-		"deref64":  func(p *int64) int64 { if p == nil { return 0 }; return *p },
-		"deref64f": func(p *float64) float64 { if p == nil { return 0 }; return *p },
+		"deref": func(p *int) int {
+			if p == nil {
+				return 0
+			}
+			return *p
+		},
+		"deref64": func(p *int64) int64 {
+			if p == nil {
+				return 0
+			}
+			return *p
+		},
+		"deref64f": func(p *float64) float64 {
+			if p == nil {
+				return 0
+			}
+			return *p
+		},
 		"groupByImageSource": func(tagList []models.ImageTag) []imageTagSourceGroup {
 			var userTags []models.ImageTag
 			byTagger := map[string]*imageTagSourceGroup{}
@@ -147,9 +165,30 @@ func NewServer(cfg *config.Config, configPath string, database *db.DB, jobManage
 				})
 			}
 			for _, k := range order {
-				out = append(out, *byTagger[k])
+				g := byTagger[k]
+				// Auto-tagger subgroups read more naturally ordered by the
+				// tagger's own confidence: the tags the model was most sure
+				// of sit at the top. User tags above keep the existing
+				// alphabetical-by-category-then-usage order.
+				sort.SliceStable(g.Tags, func(i, j int) bool {
+					ci, cj := 0.0, 0.0
+					if g.Tags[i].Confidence != nil {
+						ci = *g.Tags[i].Confidence
+					}
+					if g.Tags[j].Confidence != nil {
+						cj = *g.Tags[j].Confidence
+					}
+					return ci > cj
+				})
+				out = append(out, *g)
 			}
 			return out
+		},
+		"autoConfPct": func(c *float64) string {
+			if c == nil {
+				return ""
+			}
+			return strconv.Itoa(int(*c * 100))
 		},
 		"groupByImageTags": func(tagList []models.ImageTag) []imageTagGroup {
 			order := []string{}
@@ -167,6 +206,23 @@ func NewServer(cfg *config.Config, configPath string, database *db.DB, jobManage
 				out = append(out, *groups[k])
 			}
 			return out
+		},
+		"cancelTitle": func(jobType string) string {
+			// Tooltip for the job-status × button. Only the job types that
+			// observe ctx.Done() in their worker loop appear here.
+			switch jobType {
+			case "autotag":
+				return "Stop auto-tagging"
+			case "sync":
+				return "Stop syncing"
+			case "delete":
+				return "Stop deleting"
+			case "re-extract":
+				return "Stop re-extraction"
+			case "rebuild-thumbs":
+				return "Stop thumbnail rebuild"
+			}
+			return "Stop"
 		},
 		"humanBytes": func(b int64) string {
 			const unit = 1024
@@ -206,16 +262,26 @@ func NewServer(cfg *config.Config, configPath string, database *db.DB, jobManage
 	s := &Server{
 		cfg:        cfg,
 		configPath: configPath,
-		db:         database,
 		jobs:       jobManager,
-		tagSvc:     tagSvc,
 		sessions:   sessions,
 		loginRL:    newLoginRateLimiter(),
 		csrfSecret: mustRandBytes(32),
 		tmpl:       tmpl,
 		staticFS:   staticFS,
-		degraded:   degraded,
 		done:       make(chan struct{}),
+		contexts:   map[string]*galleryCtx{},
+		activeName: cfg.DefaultGallery,
+	}
+
+	for _, g := range cfg.Galleries {
+		cx, err := openGalleryCtx(g)
+		if err != nil {
+			for _, done := range s.contexts {
+				done.close()
+			}
+			return nil, err
+		}
+		s.contexts[g.Name] = cx
 	}
 
 	// Periodically sweep expired sessions and login rate-limiter entries.
@@ -233,7 +299,58 @@ func NewServer(cfg *config.Config, configPath string, database *db.DB, jobManage
 		}
 	}()
 
+	// Daily scheduled maintenance runs driven by cfg.Schedule.
+	go s.runScheduler()
+
 	return s, nil
+}
+
+// Active returns the currently-active gallery context.
+func (s *Server) Active() *galleryCtx {
+	s.ctxMu.RLock()
+	defer s.ctxMu.RUnlock()
+	return s.contexts[s.activeName]
+}
+
+// Get returns the gallery context with the given name, or nil.
+func (s *Server) Get(name string) *galleryCtx {
+	s.ctxMu.RLock()
+	defer s.ctxMu.RUnlock()
+	return s.contexts[name]
+}
+
+// ContextMiddleware RLocks ctxMu for the request so a concurrent swap can't
+// tear state out under it. Mutation endpoints bypass it because they take
+// the write lock themselves.
+func (s *Server) ContextMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if contextMiddlewareBypass(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		s.ctxMu.RLock()
+		defer s.ctxMu.RUnlock()
+		next.ServeHTTP(w, r)
+	})
+}
+
+func contextMiddlewareBypass(path string) bool {
+	if path == "/internal/gallery/switch" {
+		return true
+	}
+	return strings.HasPrefix(path, "/static/") ||
+		strings.HasPrefix(path, "/thumbnails/") ||
+		strings.HasPrefix(path, "/settings/galleries")
+}
+
+// StartActiveWatcher starts the watcher on the active gallery at startup.
+// Subsequent swaps are owned by SwitchGallery.
+func (s *Server) StartActiveWatcher() {
+	s.ctxMu.Lock()
+	defer s.ctxMu.Unlock()
+	if cx := s.contexts[s.activeName]; cx != nil {
+		cx.startWatcher(s.cfg.Gallery.WatchEnabled, s.cfg.Gallery.MaxFileSizeMB, s.jobs)
+	}
 }
 
 // Handler returns the root HTTP handler with all middleware applied.
@@ -241,7 +358,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(s.staticFS))))
-	mux.HandleFunc("GET /thumbnails/{file}", s.serveThumbnail)
+	mux.HandleFunc("GET /thumbnails/{gallery}/{file}", s.serveThumbnail)
 
 	// Health check (unauthenticated)
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -257,7 +374,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /upload", s.uploadPage)
 	mux.HandleFunc("POST /upload", s.uploadPost)
 
-	// Root only — `GET /` would otherwise act as a catch-all in Go 1.22's
+	// Root only - `GET /` would otherwise act as a catch-all in Go 1.22's
 	// servemux, turning every mistyped URL into the home page.
 	mux.HandleFunc("GET /{$}", s.galleryHandler)
 
@@ -294,6 +411,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /settings/auth/token", s.settingsTokenPost)
 	mux.HandleFunc("POST /settings/ui", s.settingsUIPost)
 	mux.HandleFunc("PATCH /settings/categories/{id}", s.updateCategoryPatch)
+	mux.HandleFunc("POST /settings/schedule", s.settingsSchedulePost)
 	mux.HandleFunc("POST /settings/maintenance/prune-missing", s.pruneMissingImagesPost)
 	mux.HandleFunc("POST /settings/maintenance/prune-orphaned-thumbnails", s.pruneOrphanedThumbnailsPost)
 	mux.HandleFunc("POST /settings/maintenance/recalc-tags", s.recalcTagsPost)
@@ -329,16 +447,44 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /images/{id}/autotag", s.autotagImage)
 	mux.HandleFunc("GET /images/{id}/tags", s.getImageTagsHandler)
 
-	api.New(s.cfg, s.db, s.jobs).Mount(mux)
+	mux.HandleFunc("POST /internal/gallery/switch", s.gallerySwitchHandler)
+	mux.HandleFunc("POST /settings/galleries", s.settingsGalleriesPost)
+	mux.HandleFunc("POST /settings/galleries/{name}/rename", s.settingsGalleryRenamePost)
+	mux.HandleFunc("POST /settings/galleries/{name}/delete", s.settingsGalleryDeletePost)
+	mux.HandleFunc("POST /settings/galleries/{name}/default", s.settingsGalleryDefaultPost)
 
-	// Middleware order: logging wraps everything, session establishes identity,
-	// CSRF runs innermost so it sees the session context.
+	api.New(s.cfg, s.jobs, s.apiResolver).Mount(mux)
+
+	// Middleware order, outermost first: logging, context (RLock), session, CSRF.
 	var h http.Handler = mux
 	h = s.CSRFMiddleware(h)
 	h = s.SessionMiddleware(h)
+	h = s.ContextMiddleware(h)
 	h = loggingMiddleware(h)
 
 	return h
+}
+
+// apiResolver looks up a gallery by name for the API package. Empty name
+// falls back to the active gallery.
+func (s *Server) apiResolver(name string) (api.Gallery, bool) {
+	var cx *galleryCtx
+	if name == "" {
+		cx = s.Active()
+	} else {
+		cx = s.Get(name)
+	}
+	if cx == nil {
+		return api.Gallery{}, false
+	}
+	return api.Gallery{
+		Name:             cx.Name,
+		GalleryPath:      cx.GalleryPath,
+		ThumbnailsPath:   cx.ThumbnailsPath,
+		DB:               cx.DB,
+		TagSvc:           cx.TagSvc,
+		InvalidateCaches: cx.InvalidateCaches,
+	}, true
 }
 
 // isNoisyPath reports paths that are requested constantly (polling, static
@@ -376,27 +522,41 @@ var Variant = ""
 
 // baseData is common template data present on every page.
 type baseData struct {
-	Title       string
-	ActiveNav   string
-	CSRFToken   string
-	AuthEnabled bool
-	Degraded    bool
-	Version     string
-	RepoURL     string
-	Variant     string
+	Title         string
+	ActiveNav     string
+	CSRFToken     string
+	AuthEnabled   bool
+	Degraded      bool
+	Version       string
+	RepoURL       string
+	Variant       string
+	ActiveGallery string
+	Galleries     []config.Gallery
 }
 
 func (s *Server) base(r *http.Request, nav, title string) baseData {
 	sessID := sessionFromContext(r.Context())
+	cx := s.contexts[s.activeName] // ctxMu RLocked by ContextMiddleware
+	degraded := false
+	if cx != nil {
+		degraded = cx.Degraded
+	}
+	// Copy the gallery list so template rendering never dereferences the map
+	// under a concurrent mutation (the middleware lock is scoped to the
+	// request, but the slice is cheap and small).
+	galleries := make([]config.Gallery, len(s.cfg.Galleries))
+	copy(galleries, s.cfg.Galleries)
 	return baseData{
-		Title:       title,
-		ActiveNav:   nav,
-		CSRFToken:   s.csrfToken(sessID),
-		AuthEnabled: s.cfg.Auth.EnablePassword,
-		Degraded:    s.degraded,
-		Version:     Version,
-		RepoURL:     RepoURL,
-		Variant:     Variant,
+		Title:         title,
+		ActiveNav:     nav,
+		CSRFToken:     s.csrfToken(sessID),
+		AuthEnabled:   s.cfg.Auth.EnablePassword,
+		Degraded:      degraded,
+		Version:       Version,
+		RepoURL:       RepoURL,
+		Variant:       Variant,
+		ActiveGallery: s.activeName,
+		Galleries:     galleries,
 	}
 }
 
@@ -423,21 +583,34 @@ func (s *Server) renderTemplate(w http.ResponseWriter, name string, data any) {
 // files, editor backups, etc.) is not served.
 var thumbnailNameRe = regexp.MustCompile(`^\d+(?:_hover\.webp|\.jpg)$`)
 
-// serveThumbnail serves a thumbnail file from the configured thumbnails directory.
+// serveThumbnail serves a thumbnail file from the named gallery's
+// thumbnails directory. The gallery name is part of the URL so each
+// gallery's thumbnails live at distinct URLs and the browser cache can't
+// show a stale preview from another gallery after a switch.
 func (s *Server) serveThumbnail(w http.ResponseWriter, r *http.Request) {
 	file := filepath.Base(r.PathValue("file"))
 	if !thumbnailNameRe.MatchString(file) {
 		http.NotFound(w, r)
 		return
 	}
-	http.ServeFile(w, r, filepath.Join(s.cfg.Paths.ThumbnailsPath, file))
+	cx := s.Get(r.PathValue("gallery"))
+	if cx == nil {
+		http.NotFound(w, r)
+		return
+	}
+	http.ServeFile(w, r, filepath.Join(cx.ThumbnailsPath, file))
 }
 
 // serveImageFile serves the raw image/video file.
 func (s *Server) serveImageFile(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
+	cx := s.Active()
+	if cx == nil {
+		http.NotFound(w, r)
+		return
+	}
 	var canonPath string
-	if err := s.db.Read.QueryRow(
+	if err := cx.DB.Read.QueryRow(
 		`SELECT canonical_path FROM images WHERE id = ?`, idStr,
 	).Scan(&canonPath); err != nil {
 		http.NotFound(w, r)
@@ -452,7 +625,7 @@ func (s *Server) serveImageFile(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	galleryAbs, err := filepath.Abs(s.cfg.Paths.GalleryPath)
+	galleryAbs, err := filepath.Abs(cx.GalleryPath)
 	if err != nil || !gallery.PathInside(galleryAbs, absPath) {
 		http.NotFound(w, r)
 		return
@@ -460,7 +633,7 @@ func (s *Server) serveImageFile(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, canonPath)
 }
 
-// Close stops background goroutines. Call on server shutdown.
+// Close stops background goroutines and closes every gallery's database.
 func (s *Server) Close() {
 	select {
 	case <-s.done:
@@ -468,11 +641,22 @@ func (s *Server) Close() {
 	default:
 		close(s.done)
 	}
+	s.ctxMu.Lock()
+	defer s.ctxMu.Unlock()
+	for _, cx := range s.contexts {
+		cx.close()
+	}
 }
 
-// saveConfig acquires the config mutex, writes the config file, and releases.
-func (s *Server) saveConfig() {
+// saveConfig acquires the config mutex, writes the config file, and returns
+// any error so callers can surface the failure to the user instead of leaving
+// the in-memory cfg out of sync with what's actually persisted to disk.
+func (s *Server) saveConfig() error {
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
-	config.Save(s.cfg, s.configPath)
+	if err := config.Save(s.cfg, s.configPath); err != nil {
+		logx.Errorf("config save: %v", err)
+		return err
+	}
+	return nil
 }

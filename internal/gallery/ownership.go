@@ -14,7 +14,7 @@ import (
 // them, or rootless Podman where container UID 0 maps to a host UID
 // that doesn't own the bind-mounted files).
 //
-// Failures are logged at debug and otherwise ignored — chown is
+// Failures are logged at debug and otherwise ignored - chown is
 // best-effort and must never abort the surrounding operation. ENOENT
 // is silenced because callers race deletions and watcher events.
 func ClaimOwnership(path string) {
