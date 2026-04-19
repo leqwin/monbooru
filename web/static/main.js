@@ -168,6 +168,17 @@ document.addEventListener('input', function(e) {
   });
 });
 
+// Tag-input (detail page) clears the invalid-tag flash as soon as the user
+// starts fixing the input, so the error isn't stuck on-screen through the
+// next submit.
+document.addEventListener('input', function(e) {
+  if (e.target.id !== 'tag-input') return;
+  var tagsDiv = document.getElementById('image-tags');
+  if (!tagsDiv) return;
+  var err = tagsDiv.querySelector('.flash-err');
+  if (err) err.remove();
+});
+
 // ---------------------------------------------------------------------------
 // Sidebar tag-add-btn: append tag to current search query
 // ---------------------------------------------------------------------------
@@ -241,6 +252,8 @@ function batchDeleteSelected() {
   if (checked.length === 0) return;
   var countEl = document.getElementById('delete-selected-count');
   if (countEl) countEl.textContent = checked.length;
+  var nounEl = document.getElementById('delete-selected-noun');
+  if (nounEl) nounEl.textContent = checked.length === 1 ? 'image' : 'images';
   var flash = document.getElementById('delete-selected-flash');
   if (flash) flash.innerHTML = '';
   var dlg = document.getElementById('delete-selected-dialog');
@@ -266,13 +279,14 @@ function refreshJobStatus() {
 // An hx-confirm element may set data-confirm-danger="..." for a second,
 // red-tinted line of warning text (same pattern as the bulk-delete dialog).
 // ---------------------------------------------------------------------------
-function showConfirm(message, onOk, danger) {
+function showConfirm(message, onOk, danger, okLabel) {
   var dlg = document.getElementById('confirm-dialog');
   if (!dlg) { if (window.confirm(message)) onOk(); return; }
   document.getElementById('confirm-dialog-msg').textContent = message || '';
   document.getElementById('confirm-dialog-danger').textContent = danger || '';
   var okBtn = document.getElementById('confirm-dialog-ok');
   var cancelBtn = document.getElementById('confirm-dialog-cancel');
+  okBtn.textContent = okLabel || 'OK';
   var close = function() { dlg.close(); okBtn.onclick = null; cancelBtn.onclick = null; };
   okBtn.onclick = function() { close(); onOk(); };
   cancelBtn.onclick = close;
@@ -282,8 +296,8 @@ function showConfirm(message, onOk, danger) {
 document.body.addEventListener('htmx:confirm', function(e) {
   if (!e.detail || !e.detail.question) return;
   e.preventDefault();
-  var danger = e.detail.elt && e.detail.elt.dataset ? e.detail.elt.dataset.confirmDanger : '';
-  showConfirm(e.detail.question, function() { e.detail.issueRequest(true); }, danger);
+  var ds = e.detail.elt && e.detail.elt.dataset ? e.detail.elt.dataset : {};
+  showConfirm(e.detail.question, function() { e.detail.issueRequest(true); }, ds.confirmDanger, ds.confirmOk);
 });
 
 // ---------------------------------------------------------------------------
@@ -302,7 +316,9 @@ document.addEventListener('click', function(e) {
   var current = btn.dataset.current || '1';
   var total = btn.dataset.total || '1';
   input.value = current;
-  input.max = total;
+  // data-max, not the HTML max attribute: max would trigger HTML5
+  // constraint validation and block submit, so the clamp never runs.
+  input.dataset.max = total;
   if (totalSpan) totalSpan.textContent = total;
   dlg.showModal();
   setTimeout(function() { input.focus(); input.select(); }, 0);
@@ -313,7 +329,7 @@ function submitPageJump() {
   if (!input) return;
   var p = parseInt(input.value, 10);
   if (!p || p < 1) p = 1;
-  var max = parseInt(input.max, 10);
+  var max = parseInt(input.dataset.max, 10);
   if (max && p > max) p = max;
   var u = new URL(window.location.href);
   u.searchParams.set('page', String(p));

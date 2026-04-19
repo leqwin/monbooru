@@ -19,6 +19,7 @@ import (
 // Watcher watches the gallery directory for new files and ingests them.
 type Watcher struct {
 	fsw            *fsnotify.Watcher
+	galleryName    string // for prefixing status messages when multiple galleries are watched
 	galleryPath    string
 	thumbnailsPath string
 	maxFileSizeMB  int
@@ -32,7 +33,9 @@ type Watcher struct {
 }
 
 // NewWatcher creates and initializes a filesystem watcher for one gallery.
-func NewWatcher(galleryPath, thumbnailsPath string, maxFileSizeMB int, database *db.DB, jobManager *jobs.Manager) (*Watcher, error) {
+// galleryName is used to prefix status messages so the user can tell which
+// gallery a watcher notification came from when several are running at once.
+func NewWatcher(galleryName, galleryPath, thumbnailsPath string, maxFileSizeMB int, database *db.DB, jobManager *jobs.Manager) (*Watcher, error) {
 	fsw, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
@@ -40,6 +43,7 @@ func NewWatcher(galleryPath, thumbnailsPath string, maxFileSizeMB int, database 
 
 	w := &Watcher{
 		fsw:            fsw,
+		galleryName:    galleryName,
 		galleryPath:    galleryPath,
 		thumbnailsPath: thumbnailsPath,
 		maxFileSizeMB:  maxFileSizeMB,
@@ -140,6 +144,17 @@ func (w *Watcher) Run(ctx context.Context) error {
 	}
 }
 
+// eventPrefix returns `watcher: ` by default, or `watcher [name]: ` when the
+// watcher was opened with a non-empty gallery name. The bracketed name lets
+// the user tell which gallery a status-bar event came from when several
+// galleries are watched at once.
+func (w *Watcher) eventPrefix() string {
+	if w.galleryName == "" {
+		return "watcher: "
+	}
+	return "watcher [" + w.galleryName + "]: "
+}
+
 func (w *Watcher) cancelPendingTimers() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -195,7 +210,7 @@ func (w *Watcher) ingestFile(path string) {
 	} else {
 		logx.Infof("watcher: ingested %q", path)
 		if w.OnEvent != nil {
-			w.OnEvent("watcher: added " + filepath.Base(path))
+			w.OnEvent(w.eventPrefix() + "added " + filepath.Base(path))
 		}
 		if w.OnChange != nil {
 			w.OnChange()
@@ -230,7 +245,7 @@ func (w *Watcher) markFileMissing(path string) {
 	}
 	logx.Infof("watcher: marked missing %q (id=%d)", path, imgID)
 	if w.OnEvent != nil {
-		w.OnEvent("watcher: removed " + filepath.Base(path))
+		w.OnEvent(w.eventPrefix() + "removed " + filepath.Base(path))
 	}
 	if w.OnChange != nil {
 		w.OnChange()

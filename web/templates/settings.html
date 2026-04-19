@@ -38,7 +38,7 @@
           <input type="number" name="max_file_size_mb" value="{{$cfg.Gallery.MaxFileSizeMB}}" min="1">
           <span class="field-hint">Files larger than this are skipped during sync.</span>
         </div>
-        <button type="submit">Save</button>
+        <button type="submit">Save files settings</button>
       </form>
     </div>
     <div class="settings-sub">
@@ -49,7 +49,7 @@
           <label>Page size</label>
           <input type="number" name="page_size" value="{{$cfg.UI.PageSize}}" min="1" max="500">
         </div>
-        <button type="submit">Save</button>
+        <button type="submit">Save UI settings</button>
       </form>
     </div>
   </section>
@@ -67,8 +67,8 @@
           <td><strong>{{.Name}}</strong></td>
           <td><code>{{.GalleryPath}}</code></td>
           <td>
-            {{if eq .Name $active}}<span class="status-ok">active</span>{{end}}
-            {{if eq .Name $cfg.DefaultGallery}}<span class="status-ok">default</span>{{end}}
+            {{if eq .Name $active}}<span class="status-badge status-ok">active</span>{{end}}
+            {{if eq .Name $cfg.DefaultGallery}}<span class="status-badge status-ok">default</span>{{end}}
           </td>
           <td><code>?gallery={{.Name}}</code></td>
           <td>
@@ -201,7 +201,9 @@
             <td><strong>{{.Name}}</strong></td>
             <td>
               <input type="hidden" name="tagger_names" value="{{.Name}}">
-              {{if .Enabled}}<span class="status-ok" title="Enabled">✓</span>{{else}}<span class="status-err" title="Disabled">✗</span>{{end}}
+              {{if not .Available}}<span class="status-dim" title="Unavailable">—</span>
+              {{else if .Enabled}}<span class="status-ok" title="Enabled">✓</span>
+              {{else}}<span class="status-err" title="Disabled">✗</span>{{end}}
             </td>
             <td>
               <input type="number" name="tagger_{{.Name}}_threshold" value="{{.ConfidenceThreshold}}" min="0" max="1" step="0.01" style="width:6em">
@@ -220,12 +222,14 @@
                         hx-post="/internal/autotag" hx-target="#flash-tagger" hx-swap="innerHTML"
                         hx-vals='{"mode":"all","tagger_name":"{{.Name}}","_csrf":"{{$csrf}}"}'
                         hx-confirm="Re-tag ALL images with {{.Name}}? This will overwrite its existing auto-tags."
+                        data-confirm-ok="Re-tag"
                         hx-on::after-request="if(event.detail.successful){document.getElementById('job-status').setAttribute('hx-trigger','load');htmx.trigger('#job-status','load')}">Run all</button>
                 {{end}}
                 <button type="button" class="btn-sm btn-warning"
                         hx-post="/settings/tagger/remove-autotagged" hx-target="#flash-tagger" hx-swap="innerHTML"
                         hx-vals='{"tagger_name":"{{.Name}}","_csrf":"{{$csrf}}"}'
-                        hx-confirm="Remove all auto-tags produced by {{.Name}} from every image?">Remove auto-tagged</button>
+                        hx-confirm="Remove all auto-tags produced by {{.Name}} from every image?"
+                        data-confirm-ok="Remove">Remove auto-tagged</button>
                 {{if .Enabled}}
                 <button type="button" class="btn-sm"
                         hx-post="/settings/tagger/{{.Name}}/disable" hx-target="#flash-tagger" hx-swap="innerHTML"
@@ -258,24 +262,28 @@
         </form>
         <form hx-post="/internal/autotag" hx-target="#flash-tagger" hx-swap="innerHTML"
               hx-on::after-request="if(event.detail.successful){document.getElementById('job-status').setAttribute('hx-trigger','load');htmx.trigger('#job-status','load')}"
-              hx-confirm="Re-tag ALL images? This will overwrite existing auto-tags.">
+              hx-confirm="Re-tag ALL images? This will overwrite existing auto-tags."
+              data-confirm-ok="Re-tag">
           <input type="hidden" name="_csrf" value="{{$csrf}}">
           <input type="hidden" name="mode" value="all">
           <button type="submit" class="btn-autotag">Run on all images</button>
         </form>
         {{end}}
         <form hx-post="/settings/tagger/remove-autotagged" hx-target="#flash-tagger" hx-swap="innerHTML"
-              hx-confirm="Remove every auto-tag from every image? Manual tags are kept.">
+              hx-confirm="Remove every auto-tag from every image? Manual tags are kept."
+              data-confirm-ok="Remove">
           <input type="hidden" name="_csrf" value="{{$csrf}}">
           <button type="submit" class="btn-warning">Remove all auto-tags</button>
         </form>
         <form hx-post="/settings/tagger/remove-user-tags" hx-target="#flash-tagger" hx-swap="innerHTML"
-              hx-confirm="Remove every user (manual) tag from every image? Auto-tags are kept.">
+              hx-confirm="Remove every user (manual) tag from every image? Auto-tags are kept."
+              data-confirm-ok="Remove">
           <input type="hidden" name="_csrf" value="{{$csrf}}">
           <button type="submit" class="btn-warning">Remove all user tags</button>
         </form>
         <form hx-post="/settings/tagger/remove-all-tags" hx-target="#flash-tagger" hx-swap="innerHTML"
-              hx-confirm="Remove EVERY tag (user and auto) from every image? This cannot be undone.">
+              hx-confirm="Remove EVERY tag (user and auto) from every image? This cannot be undone."
+              data-confirm-ok="Remove">
           <input type="hidden" name="_csrf" value="{{$csrf}}">
           <button type="submit" class="btn-warning">Remove all tags</button>
         </form>
@@ -307,7 +315,11 @@
         <tr>
           <td><strong>Missing images</strong> <span class="field-hint">- remove DB entries whose files are gone (<a href="/?q=missing:true">view</a>)</span></td>
           <td>
-            <form hx-post="/settings/maintenance/prune-missing" hx-target="#flash-maintenance" hx-swap="innerHTML" style="display:inline">
+            <form hx-post="/settings/maintenance/prune-missing" hx-target="#flash-maintenance" hx-swap="innerHTML"
+                  hx-confirm="Prune every image marked missing from the database?"
+                  data-confirm-danger="Tags on those images are removed too. Re-mounting the gallery volume before pruning restores the files."
+                  data-confirm-ok="Prune"
+                  style="display:inline">
               <input type="hidden" name="_csrf" value="{{$csrf}}">
               <button type="submit" class="btn-danger btn-sm">Prune</button>
             </form>
@@ -327,6 +339,9 @@
           <td>
             <form hx-post="/settings/maintenance/rebuild-thumbnails" hx-target="#flash-maintenance" hx-swap="innerHTML"
                   hx-on::after-request="if(event.detail.successful){document.getElementById('job-status').setAttribute('hx-trigger','load');htmx.trigger('#job-status','load')}"
+                  hx-confirm="Rebuild thumbnails for every image in this gallery?"
+                  data-confirm-danger="Long-running job; blocks other jobs until it finishes."
+                  data-confirm-ok="Rebuild"
                   style="display:inline">
               <input type="hidden" name="_csrf" value="{{$csrf}}">
               <button type="submit" class="btn-sm">Rebuild</button>
@@ -347,6 +362,7 @@
           <td>
             <form hx-post="/settings/maintenance/merge-general-tags" hx-target="#flash-maintenance" hx-swap="innerHTML"
                   hx-confirm="Merge auto-tagged-only general tags into their unique categorized counterparts? The original general tags become aliases. User-tagged general tags are skipped."
+                  data-confirm-ok="Merge"
                   style="display:inline">
               <input type="hidden" name="_csrf" value="{{$csrf}}">
               <button type="submit" class="btn-sm">Merge</button>
@@ -356,7 +372,11 @@
         <tr>
           <td><strong>Re-extract metadata</strong> <span class="field-hint">- re-parse SD/ComfyUI metadata for every image</span></td>
           <td>
-            <form hx-post="/settings/maintenance/re-extract-metadata" hx-target="#flash-maintenance" hx-swap="innerHTML" style="display:inline">
+            <form hx-post="/settings/maintenance/re-extract-metadata" hx-target="#flash-maintenance" hx-swap="innerHTML"
+                  hx-confirm="Re-parse SD/ComfyUI metadata for every image in this gallery?"
+                  data-confirm-danger="Long-running job; blocks other jobs until it finishes."
+                  data-confirm-ok="Re-extract"
+                  style="display:inline">
               <input type="hidden" name="_csrf" value="{{$csrf}}">
               <button type="submit" class="btn-sm">Re-extract</button>
             </form>
@@ -365,7 +385,11 @@
         <tr>
           <td><strong>Vacuum database</strong> <span class="field-hint">- compact the SQLite file after mass deletions</span></td>
           <td>
-            <form hx-post="/settings/maintenance/vacuum-db" hx-target="#flash-maintenance" hx-swap="innerHTML" style="display:inline">
+            <form hx-post="/settings/maintenance/vacuum-db" hx-target="#flash-maintenance" hx-swap="innerHTML"
+                  hx-confirm="Compact the SQLite database now?"
+                  data-confirm-danger="Holds a database lock for the duration of the VACUUM; other jobs and queries will wait."
+                  data-confirm-ok="Vacuum"
+                  style="display:inline">
               <input type="hidden" name="_csrf" value="{{$csrf}}">
               <button type="submit" class="btn-sm">Vacuum</button>
             </form>
@@ -380,7 +404,8 @@
       <form hx-post="/settings/maintenance/remove-duplicates"
             hx-target="#flash-maintenance" hx-swap="innerHTML"
             hx-on::after-request="if(event.detail.successful){document.getElementById('duplicates-list').innerHTML=''}"
-            hx-confirm="Remove all duplicate alias paths and their files from disk?">
+            hx-confirm="Remove all duplicate alias paths and their files from disk?"
+            data-confirm-ok="Remove">
         <input type="hidden" name="_csrf" value="{{$csrf}}">
         <input type="hidden" name="all" value="true">
         <button type="submit" class="btn-danger">Remove all duplicate paths</button>
@@ -395,10 +420,15 @@
   </section>
 
   {{$sched := $cfg.Schedule}}
+  {{$schedSt := index . "ScheduleStatus"}}
   <section id="schedule" class="settings-section">
     <h3>Schedule</h3>
     <div id="flash-schedule"></div>
     <p class="field-hint">Runs the selected maintenance actions once per day at the configured time, on every configured gallery in sequence. Skipped silently if another job is already running at fire time.</p>
+    <p class="field-hint">
+      {{if $schedSt.LastRun.IsZero}}Last run: never.{{else}}Last run: {{$schedSt.LastRun.Format "2006-01-02 15:04:05"}} ({{$schedSt.LastInfo}}, {{schedDuration $schedSt.LastDur}}).{{end}}
+      {{if $schedSt.NextRun.IsZero}}No next run scheduled (every action is off).{{else}}Next run: {{$schedSt.NextRun.Format "2006-01-02 15:04:05"}}.{{end}}
+    </p>
     <form hx-post="/settings/schedule" hx-target="#flash-schedule" hx-swap="innerHTML">
       <input type="hidden" name="_csrf" value="{{$csrf}}">
       <div class="field">

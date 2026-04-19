@@ -247,15 +247,26 @@ func TestDerivePaths(t *testing.T) {
 }
 
 func TestValidateGalleryName(t *testing.T) {
-	for _, n := range []string{"default", "a", "stock_1", "StockSet-2"} {
-		if err := ValidateGalleryName(n); err != nil {
-			t.Errorf("ValidateGalleryName(%q) = %v, want nil", n, err)
-		}
+	t.Parallel()
+	valid := []string{"default", "a", "stock_1", "StockSet-2"}
+	invalid := []string{"", "with space", "weird/slash", "dot.name", "accénté"}
+	for _, n := range valid {
+		n := n
+		t.Run("valid/"+n, func(t *testing.T) {
+			t.Parallel()
+			if err := ValidateGalleryName(n); err != nil {
+				t.Errorf("ValidateGalleryName(%q) = %v, want nil", n, err)
+			}
+		})
 	}
-	for _, n := range []string{"", "with space", "weird/slash", "dot.name", "accénté"} {
-		if err := ValidateGalleryName(n); err == nil {
-			t.Errorf("ValidateGalleryName(%q) = nil, want error", n)
-		}
+	for _, n := range invalid {
+		n := n
+		t.Run("invalid/"+n, func(t *testing.T) {
+			t.Parallel()
+			if err := ValidateGalleryName(n); err == nil {
+				t.Errorf("ValidateGalleryName(%q) = nil, want error", n)
+			}
+		})
 	}
 }
 

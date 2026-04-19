@@ -11,6 +11,7 @@
              hx-trigger="input changed delay:200ms"
              hx-target="#search-suggest"
              hx-swap="innerHTML"
+             hx-push-url="false"
              hx-include="this"
              onkeydown="handleSuggestKey(event, 'search-suggest', 'search-input')">
       <div id="search-suggest" class="suggest-dropdown search-suggest-dropdown"></div>
@@ -18,6 +19,7 @@
     <select name="sort" id="search-sort">
       <option value="newest"   {{if eq .Sort "newest"}}selected{{end}}>Newest</option>
       <option value="filesize" {{if eq .Sort "filesize"}}selected{{end}}>File size</option>
+      {{if eq .Sort "random"}}<option value="random" selected>Random</option>{{end}}
     </select>
     <select name="order">
       <option value="desc" {{if eq .Order "desc"}}selected{{end}}>↓</option>
@@ -29,11 +31,11 @@
             onclick="toggleFavFilter()" title="Show favorites">★</button>
     <button type="button" id="random-sort-btn" class="{{if eq .Sort "random"}}active{{end}}"
             onclick="applyRandomSort()" title="{{if eq .Sort "random"}}Re-shuffle{{else}}Random order{{end}}">⇄</button>
-    <span id="result-count" class="result-count">{{.Result.Total}} images</span>
+    <span id="result-count" class="result-count">{{.Result.Total}} {{plural .Result.Total "image" "images"}}</span>
   </form>
   <div id="save-search-area">
-    <button id="save-search-btn" type="button" onclick="document.getElementById('save-search-dialog').showModal()">Save search</button>
-    <button id="delete-search-btn" type="button" class="btn-danger" onclick="openDeleteSearchDialog()" title="Delete all images in current search">Delete all</button>
+    {{if .Query}}<button id="save-search-btn" type="button" onclick="document.getElementById('save-search-dialog').showModal()">Save search</button>{{end}}
+    {{if and (not .Degraded) (gt .Result.Total 0)}}<button id="delete-search-btn" type="button" class="btn-danger" onclick="openDeleteSearchDialog()" title="Delete all images in current search">Delete all</button>{{end}}
   </div>
 </div>
 
@@ -75,7 +77,7 @@
 
 <!-- Delete search dialog -->
 <dialog id="delete-search-dialog">
-  <p>Delete <strong id="delete-search-count-display">{{.Result.Total}}</strong> images in current search?</p>
+  <p>Delete <strong id="delete-search-count-display">{{.Result.Total}}</strong> <span id="delete-search-noun">{{plural .Result.Total "image" "images"}}</span> in current search?</p>
   <p style="color:var(--error);font-size:12px">Files are permanently deleted from disk. This cannot be undone.</p>
   <div id="delete-search-flash"></div>
   <div class="dialog-actions">
@@ -86,7 +88,7 @@
 
 <!-- Delete selected dialog -->
 <dialog id="delete-selected-dialog">
-  <p>Delete <strong id="delete-selected-count">0</strong> selected image(s)?</p>
+  <p>Delete <strong id="delete-selected-count">0</strong> selected <span id="delete-selected-noun">images</span>?</p>
   <p style="color:var(--error);font-size:12px">Files are permanently deleted from disk. This cannot be undone.</p>
   <div id="delete-selected-flash"></div>
   <div class="dialog-actions">
@@ -97,7 +99,7 @@
 
 <!-- Move selected dialog -->
 <dialog id="move-selected-dialog">
-  <p>Move <strong id="move-selected-count">0</strong> selected image(s) to folder:</p>
+  <p>Move <strong id="move-selected-count">0</strong> selected <span id="move-selected-noun">images</span> to folder:</p>
   <form id="move-selected-form" onsubmit="event.preventDefault(); confirmMoveSelected();">
     <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
     <div class="field" style="position:relative">
@@ -126,8 +128,11 @@ function openDeleteSearchDialog() {
   if (rcEl) {
     var m = rcEl.textContent.match(/(\d+)/);
     if (m) {
+      var n = parseInt(m[1], 10);
       var cd = document.getElementById('delete-search-count-display');
       if (cd) cd.textContent = m[1];
+      var noun = document.getElementById('delete-search-noun');
+      if (noun) noun.textContent = n === 1 ? 'image' : 'images';
     }
   }
   document.getElementById('delete-search-dialog').showModal();
@@ -170,6 +175,8 @@ function openMoveSelectedDialog() {
   if (checked.length === 0) return;
   var countEl = document.getElementById('move-selected-count');
   if (countEl) countEl.textContent = checked.length;
+  var nounEl = document.getElementById('move-selected-noun');
+  if (nounEl) nounEl.textContent = checked.length === 1 ? 'image' : 'images';
   var flash = document.getElementById('move-selected-flash');
   if (flash) flash.innerHTML = '';
   var input = document.getElementById('move-selected-folder');

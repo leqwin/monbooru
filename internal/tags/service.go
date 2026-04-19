@@ -20,8 +20,11 @@ var (
 	ErrBuiltinCategory      = errors.New("cannot delete built-in category")
 	ErrReservedCategoryName = errors.New("this name is used by a search filter (e.g. fav:, source:, cat:, width:, height:, date:, missing:, folder:, generated:, animated:)")
 
-	// Allowed tag name characters: [a-z0-9_()!@#$.~+-]
-	tagNameRe = regexp.MustCompile(`^[a-z0-9_()!@#$.~+\-]+$`)
+	// Allowed tag name characters: [a-z0-9_()!@#$.~+:-]. The colon is kept
+	// here despite doubling as the category:tag separator in inputs; the
+	// parse-time fallback treats prefix:value as a literal tag when the
+	// prefix is neither a filter keyword nor a known category.
+	tagNameRe = regexp.MustCompile(`^[a-z0-9_()!@#$.~+:\-]+$`)
 
 	// Accept #rgb or #rrggbb. Anything else would end up ZgotmplZ'd in the
 	// template's CSS context, so reject it up front with a useful message.
@@ -330,7 +333,7 @@ func ValidateTagName(name string) (string, error) {
 	}
 
 	if !tagNameRe.MatchString(name) {
-		return "", fmt.Errorf("%w: contains invalid characters (allowed: a-z 0-9 _ ( ) ! @ # $ . ~ + -)", ErrInvalidTagName)
+		return "", fmt.Errorf("%w: contains invalid characters (allowed: a-z 0-9 _ ( ) ! @ # $ . ~ + - :)", ErrInvalidTagName)
 	}
 
 	// Reject names consisting only of punctuation

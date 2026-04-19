@@ -102,6 +102,9 @@ func (s *Server) runScheduledActions() {
 	}
 	defer s.jobs.EndSchedule()
 
+	started := time.Now()
+	defer func() { s.recordScheduleRun(started, time.Since(started), "OK") }()
+
 	s.cfgMu.Lock()
 	sched := s.cfg.Schedule
 	s.cfgMu.Unlock()
@@ -153,7 +156,7 @@ func (s *Server) scheduledSync(cx *galleryCtx) {
 	// Match the user-trigger handlers' shape: ctx cancellation produces
 	// a clean Complete summary, only real failures fall to Fail().
 	if ctx.Err() != nil {
-		s.jobs.Complete(fmt.Sprintf("[%s] sync cancelled (%d added, %d removed, %d moved)",
+		s.jobs.Complete(fmt.Sprintf("[%s] sync cancelled (%d added, %d missing, %d moved)",
 			cx.Name, result.Added, result.Removed, result.Moved))
 		return
 	}
@@ -162,7 +165,7 @@ func (s *Server) scheduledSync(cx *galleryCtx) {
 		logx.Warnf("scheduler sync %q: %v", cx.Name, err)
 		return
 	}
-	s.jobs.Complete(fmt.Sprintf("[%s] %d added, %d removed, %d moved",
+	s.jobs.Complete(fmt.Sprintf("[%s] %d added, %d missing, %d moved",
 		cx.Name, result.Added, result.Removed, result.Moved))
 }
 
@@ -279,4 +282,35 @@ func (s *Server) scheduledVacuum(cx *galleryCtx) {
 		logx.Warnf("scheduler vacuum wal_checkpoint %q: %v", cx.Name, err)
 	}
 	logx.Infof("scheduler: [%s] vacuumed database", cx.Name)
+}
+
+// recordScheduleRun stores the completion of a scheduler run so the Schedule
+// settings section can show "Last run: … (OK, 3m12s)". info is a short
+// status string ("OK" or a failure summary).
+func (s *Server) recordScheduleRun(started time.Time, dur time.Duration, info string) {
+	s.schedMu.Lock()
+	defer s.schedMu.Unlock()
+	s.schedLastRun = started
+	s.schedLastDur = dur
+	s.schedLastInfo = info
+}
+
+// ScheduleStatus reports the last recorded scheduler run plus the next fire
+// time. Used by the Schedule settings section.
+type ScheduleStatus struct {
+	LastRun  time.Time     // zero value when no run has happened yet
+	LastDur  time.Duration // zero when LastRun is zero
+	LastInfo string        // "OK" or a short failure summary; empty when never run
+	NextRun  time.Time     // zero when no schedule action is enabled
+}
+
+// ScheduleStatus returns the current scheduler status for the settings page.
+func (s *Server) ScheduleStatus() ScheduleStatus {
+	s.schedMu.Lock()
+	st := ScheduleStatus{LastRun: s.schedLastRun, LastDur: s.schedLastDur, LastInfo: s.schedLastInfo}
+	s.schedMu.Unlock()
+	if next, ok := s.nextScheduledFire(time.Now()); ok {
+		st.NextRun = next
+	}
+	return st
 }

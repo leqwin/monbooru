@@ -2,6 +2,8 @@ package gallery
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"image"
 	"image/png"
 	"os"
@@ -132,34 +134,65 @@ func TestSync_Duplicate(t *testing.T) {
 
 func TestSync_SkipsLargeFile(t *testing.T) {
 	database, env, galleryDir := setupSyncTest(t)
+
+	// Build a >1 MiB PNG so a 1 MiB cap leaves it out. Random pixel data
+	// defeats deflate so the encoded size exceeds the cap.
+	big := image.NewRGBA(image.Rect(0, 0, 1024, 1024))
+	for i := 0; i < len(big.Pix); i++ {
+		big.Pix[i] = byte(i * 131 % 251)
+	}
+	bigPath := filepath.Join(galleryDir, "too_big.png")
+	bf, err := os.Create(bigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := png.Encode(bf, big); err != nil {
+		bf.Close()
+		t.Fatal(err)
+	}
+	bf.Close()
+	if fi, err := os.Stat(bigPath); err != nil || fi.Size() <= 1024*1024 {
+		t.Skipf("big PNG unexpectedly compressed below 1 MiB (%d bytes); cannot exercise cap", fi.Size())
+	}
+
+	// Also drop a tiny file that should always ingest regardless of cap.
+	createTestPNGFileSize(t, galleryDir, "small.png", 10, 10)
+
+	// 1 MiB cap → big is skipped, small ingests.
 	env.maxFileSizeMB = 1
-
-	createTestPNGFile(t, galleryDir, "small.png")
-
-	// Can't cheaply produce a multi-MB fixture; flip the cap off and confirm
-	// the code path still ingests when max is unbounded.
-	env.maxFileSizeMB = 0
-	result := env.sync(t, database)
-	if result.Added < 1 {
-		t.Error("expected at least one file added")
+	r1 := env.sync(t, database)
+	if r1.Added != 1 {
+		t.Errorf("with cap=1 MiB expected 1 added (small), got %d", r1.Added)
+	}
+	// Raise the cap; big now ingests, small stays.
+	env.maxFileSizeMB = 100
+	r2 := env.sync(t, database)
+	if r2.Added != 1 {
+		t.Errorf("after raising cap expected 1 new add (big), got %d", r2.Added)
 	}
 }
 
 func TestFolderPath(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
+		name        string
 		galleryPath string
 		filePath    string
 		want        string
 	}{
-		{"/gallery", "/gallery/image.png", ""},
-		{"/gallery", "/gallery/2024/jan/x.png", "2024/jan"},
-		{"/gallery", "/gallery/sub/image.png", "sub"},
+		{"root", "/gallery", "/gallery/image.png", ""},
+		{"nested", "/gallery", "/gallery/2024/jan/x.png", "2024/jan"},
+		{"one level", "/gallery", "/gallery/sub/image.png", "sub"},
 	}
 	for _, tt := range tests {
-		got := FolderPath(tt.galleryPath, tt.filePath)
-		if got != tt.want {
-			t.Errorf("FolderPath(%q, %q) = %q, want %q", tt.galleryPath, tt.filePath, got, tt.want)
-		}
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := FolderPath(tt.galleryPath, tt.filePath)
+			if got != tt.want {
+				t.Errorf("FolderPath(%q, %q) = %q, want %q", tt.galleryPath, tt.filePath, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -289,38 +322,51 @@ func TestFolderTree_RecursiveCount(t *testing.T) {
 }
 
 func TestCountSlashes(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
+		name string
 		s    string
 		want int
 	}{
-		{"", 0},
-		{"a/b", 1},
-		{"a/b/c", 2},
-		{"no_slashes", 0},
+		{"empty", "", 0},
+		{"one slash", "a/b", 1},
+		{"two slashes", "a/b/c", 2},
+		{"no slashes", "no_slashes", 0},
 	}
 	for _, tt := range tests {
-		if got := countSlashes(tt.s); got != tt.want {
-			t.Errorf("countSlashes(%q) = %d, want %d", tt.s, got, tt.want)
-		}
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := countSlashes(tt.s); got != tt.want {
+				t.Errorf("countSlashes(%q) = %d, want %d", tt.s, got, tt.want)
+			}
+		})
 	}
 }
 
 func TestSync_ContextCanceled(t *testing.T) {
 	database, env, galleryDir := setupSyncTest(t)
-	createTestPNGFile(t, galleryDir, "ctx.png")
+	// Seed enough files that Phase 2's per-file loop notices the cancelled
+	// context before it finishes scanning everything.
+	for i := 0; i < 32; i++ {
+		createTestPNGFileSize(t, galleryDir, fmt.Sprintf("ctx_%02d.png", i), 10+i, 10)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // cancel immediately
-
+	cancel()
 	_, err := Sync(ctx, database, env.galleryPath, env.thumbnailsPath, env.maxFileSizeMB, func(int, int, string) {})
-	// Should return context error or succeed before cancellation
-	_ = err // either is acceptable
+	if err == nil {
+		t.Fatal("Sync with a pre-cancelled ctx should surface the cancellation, got nil err")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
+	}
 }
 
 func TestWatcher_IngestsFile(t *testing.T) {
 	database, env, galleryDir := setupSyncTest(t)
 
-	w, err := NewWatcher(env.galleryPath, env.thumbnailsPath, env.maxFileSizeMB, database, nil)
+	w, err := NewWatcher("", env.galleryPath, env.thumbnailsPath, env.maxFileSizeMB, database, nil)
 	if err != nil {
 		if strings.Contains(err.Error(), "too many open files") {
 			t.Skip("skipping: system file descriptor limit reached")
@@ -328,24 +374,23 @@ func TestWatcher_IngestsFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-
 	go w.Run(ctx)
 
-	// Give watcher time to initialize
-	time.Sleep(100 * time.Millisecond)
-
-	// Create a file in the watched directory
+	// Drop a file; poll the DB for arrival instead of assuming a fixed
+	// debounce + IO budget.
 	createTestPNGFile(t, galleryDir, "new.png")
-
-	// Wait for ingest (debounce is 500ms + processing time)
-	time.Sleep(2 * time.Second)
-	cancel()
-
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		var count int
+		database.Read.QueryRow(`SELECT COUNT(*) FROM images`).Scan(&count)
+		if count == 1 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 	var count int
 	database.Read.QueryRow(`SELECT COUNT(*) FROM images`).Scan(&count)
-	if count != 1 {
-		t.Errorf("expected 1 ingested image, got %d", count)
-	}
+	t.Errorf("watcher did not ingest within 8 s; count = %d", count)
 }

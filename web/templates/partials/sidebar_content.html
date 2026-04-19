@@ -37,7 +37,7 @@
         <div class="folder-node-row">
           <span class="folder-spacer"></span>
           <a href="/?q=folder:" class="folder-link{{if eq $.Query "folder:"}} active{{end}}">/ ({{$root.Count}})</a>
-          <a href="/?q=folderonly:" class="folder-only-btn{{if eq $.Query "folderonly:"}} active{{end}}" title="Only this folder (no subfolders)">·</a>
+          <a href="/?q=folderonly:" class="folder-only-btn{{if eq $.Query "folderonly:"}} active{{end}}" title="Only this folder (no subfolders)">[·]</a>
         </div>
       </li>
       {{range $root.Children}}
@@ -45,6 +45,7 @@
       {{end}}
     </ul>
   </div>
+  {{$src := .SourceCounts}}
   <div id="source-filter-section">
     <div class="sidebar-section-header">
       <span class="sidebar-section-title">Source</span>
@@ -54,25 +55,25 @@
       <li class="folder-node-wrap">
         <div class="folder-node-row">
           <span class="folder-spacer"></span>
-          <a href="/?q=source:none" class="folder-link{{if eq $.Query "source:none"}} active{{end}}">Non-AI</a>
+          <a href="/?q=source:none" class="folder-link{{if eq $.Query "source:none"}} active{{end}}">Non-AI ({{$src.None}})</a>
         </div>
       </li>
       <li class="folder-node-wrap">
         <div class="folder-node-row">
           <button class="folder-toggle-btn folder-expand-btn" data-path="__source_ai__" data-target="fc-__source_ai__" title="Toggle AI sources">▶</button>
-          <a href="/?q=source:ai" class="folder-link{{if eq $.Query "source:ai"}} active{{end}}">AI</a>
+          <a href="/?q=source:ai" class="folder-link{{if eq $.Query "source:ai"}} active{{end}}">AI ({{$src.AI}})</a>
         </div>
         <ul id="fc-__source_ai__" class="folder-children" style="display:none">
           <li class="folder-node-wrap">
             <div class="folder-node-row">
               <span class="folder-spacer"></span>
-              <a href="/?q=source:a1111" class="folder-link{{if eq $.Query "source:a1111"}} active{{end}}">a1111</a>
+              <a href="/?q=source:a1111" class="folder-link{{if eq $.Query "source:a1111"}} active{{end}}">a1111 ({{$src.A1111}})</a>
             </div>
           </li>
           <li class="folder-node-wrap">
             <div class="folder-node-row">
               <span class="folder-spacer"></span>
-              <a href="/?q=source:comfyui" class="folder-link{{if eq $.Query "source:comfyui"}} active{{end}}">comfyui</a>
+              <a href="/?q=source:comfyui" class="folder-link{{if eq $.Query "source:comfyui"}} active{{end}}">comfyui ({{$src.Comfyui}})</a>
             </div>
           </li>
         </ul>
@@ -122,7 +123,7 @@
     <a href="/?q={{$quotedActive}}" class="folder-link{{if or (eq $query $active) (eq $query $quotedActive)}} active{{end}}">
       {{$node.Name}}/ ({{$node.Count}})
     </a>
-    <a href="/?q={{$quotedOnlyActive}}" class="folder-only-btn{{if or (eq $query $onlyActive) (eq $query $quotedOnlyActive)}} active{{end}}" title="Only this folder (no subfolders)">·</a>
+    <a href="/?q={{$quotedOnlyActive}}" class="folder-only-btn{{if or (eq $query $onlyActive) (eq $query $quotedOnlyActive)}} active{{end}}" title="Only this folder (no subfolders)">[·]</a>
   </div>
   {{if $node.Children}}
   <ul id="fc-{{$node.Path}}" class="folder-children" style="display:none">

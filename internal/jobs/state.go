@@ -24,6 +24,10 @@ type Manager struct {
 	// the scheduler's per-phase Start/Complete pairs can't race against
 	// a user job that slips into a phase boundary.
 	scheduleHeld bool
+	// viewed is set by MarkViewed when a completed job state has been
+	// rendered to at least one client, so the auto-dismiss can shorten
+	// from the 30s "no one is looking" cap to a few seconds.
+	viewed bool
 }
 
 // NewManager returns a new Manager with no active job.
@@ -63,6 +67,7 @@ func (m *Manager) startLocked(jobType string) error {
 		m.timer.Stop()
 		m.timer = nil
 	}
+	m.viewed = false
 	m.ctx, m.cancel = context.WithCancel(context.Background())
 	m.state = &models.JobState{
 		Running:   true,
@@ -189,6 +194,34 @@ func (m *Manager) IsRunning() bool {
 	return m.state != nil && m.state.Running
 }
 
+// MarkViewed is called when a client renders the completed/failed job state.
+// It shortens the auto-dismiss timer to a few seconds so the completion
+// flash doesn't linger for the full 30s cap across page navigations once
+// at least one client has seen it. The 30s cap stays in place for jobs
+// that finish while no client is looking (e.g. an unattended browser).
+func (m *Manager) MarkViewed() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.state == nil || m.state.Running || m.viewed {
+		return
+	}
+	m.viewed = true
+	if m.timer != nil {
+		m.timer.Stop()
+	}
+	m.timer = time.AfterFunc(6*time.Second, func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.state == nil || m.state.Running {
+			return
+		}
+		m.ctx, m.cancel = nil, nil
+		m.state = nil
+		m.timer = nil
+		m.viewed = false
+	})
+}
+
 // Dismiss clears the completed/failed job state so the status widget goes idle.
 func (m *Manager) Dismiss() {
 	m.mu.Lock()
@@ -202,6 +235,7 @@ func (m *Manager) Dismiss() {
 	}
 	m.ctx, m.cancel = nil, nil
 	m.state = nil
+	m.viewed = false
 }
 
 // SetWatcherMessage surfaces a transient watcher notification. When idle it

@@ -5,6 +5,9 @@
 
 <div class="upload-page">
   <h2>Upload Images</h2>
+  {{if .Degraded}}
+  <p class="field-hint">Upload is disabled for this gallery because its path is unreadable. Fix the configuration or switch to another gallery.</p>
+  {{else}}
   <p class="field-hint">Upload one or more image or video files to your gallery.</p>
 
   <form id="upload-form"
@@ -60,6 +63,7 @@
   </form>
 
   <div id="upload-result" style="margin-top:16px"></div>
+  {{end}}
 </div>
 
 <script>

@@ -58,6 +58,30 @@ func IsAvailable(cfg *config.Config) bool {
 	return len(EnabledTaggers(cfg)) > 0
 }
 
+// buildSupportsInference reports whether this build can run inference at
+// all. Always true in the tagger build; false in the noop build.
+func buildSupportsInference() bool { return true }
+
+// UnavailableReason explains why auto-tagging cannot run given the current
+// config. Returns "" when IsAvailable(cfg) is true. The returned string
+// mirrors the Reason shown in Settings → Auto-Tagger so flashes on the
+// detail page stay consistent with the settings page.
+func UnavailableReason(cfg *config.Config) string {
+	if IsAvailable(cfg) {
+		return ""
+	}
+	taggers := DiscoverTaggers(cfg)
+	if len(taggers) == 0 {
+		return "no tagger subfolders found under paths.model_path"
+	}
+	for _, t := range taggers {
+		if t.Enabled && !t.Available {
+			return t.Reason
+		}
+	}
+	return "no enabled tagger"
+}
+
 // CheckCUDAAvailable probes the ONNX Runtime shared library for CUDA support
 // and verifies that an NVIDIA GPU device file is present inside the container.
 // Called from the settings handler before persisting use_cuda=true so the user
@@ -726,13 +750,16 @@ func loadLabelsText(f io.Reader) ([]tagLabel, error) {
 }
 
 // sanitizeLabel coerces a label-file name into the documented tag
-// allowlist (`[a-z0-9_()!@#$.~+-]`, length 1-200, must contain a
+// allowlist (`[a-z0-9_()!@#$.~+:-]`, length 1-200, must contain a
 // letter or digit). Spaces collapse to underscores; out-of-set runes
-// drop. A label that empties out (or stays all-punctuation) is
-// replaced by an `_unsupported_<idx>` placeholder so the slice
-// position still aligns with the model's output channel - dropping
-// the entry would shift every later label by one and corrupt every
-// downstream tag attribution.
+// drop. The colon is preserved so tagger-emitted labels like `:3` or
+// `rating:general` round-trip into `tags` unchanged - stripping it
+// would make the rating-map lookup below miss and would render a
+// ":3" label indistinguishable from "3". A label that empties out
+// (or stays all-punctuation) is replaced by an `_unsupported_<idx>`
+// placeholder so the slice position still aligns with the model's
+// output channel - dropping the entry would shift every later label
+// by one and corrupt every downstream tag attribution.
 func sanitizeLabel(raw string, idx int) string {
 	s := strings.ToLower(strings.TrimSpace(raw))
 	var b strings.Builder
@@ -743,7 +770,7 @@ func sanitizeLabel(raw string, idx int) string {
 			r >= '0' && r <= '9',
 			r == '_' || r == '(' || r == ')' || r == '!' ||
 				r == '@' || r == '#' || r == '$' || r == '.' ||
-				r == '~' || r == '+' || r == '-':
+				r == '~' || r == '+' || r == '-' || r == ':':
 			b.WriteRune(r)
 		case r == ' ' || r == '\t':
 			b.WriteByte('_')

@@ -320,10 +320,20 @@ func ingestTestImage(t *testing.T, database *db.DB, env *searchEnv, name string)
 	ingestCounter++
 	img := image.NewRGBA(image.Rect(0, 0, 10+ingestCounter, 10))
 	path := filepath.Join(env.galleryDir, name)
-	f, _ := os.Create(path)
-	png.Encode(f, img)
-	f.Close()
-	gallery.Ingest(database, env.galleryDir, env.thumbnailsDir, path, "png")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := png.Encode(f, img); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := gallery.Ingest(database, env.galleryDir, env.thumbnailsDir, path, "png"); err != nil {
+		t.Fatalf("ingest %q: %v", name, err)
+	}
 }
 
 func TestExecute_BasicSearch(t *testing.T) {
@@ -349,18 +359,25 @@ func TestExecute_FolderFilter(t *testing.T) {
 
 	img := image.NewRGBA(image.Rect(0, 0, 10, 10))
 	path := filepath.Join(subDir, "sub.png")
-	f, _ := os.Create(path)
-	png.Encode(f, img)
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := png.Encode(f, img); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
 	f.Close()
-	gallery.Ingest(database, env.galleryDir, env.thumbnailsDir, path, "png")
+	if _, _, err := gallery.Ingest(database, env.galleryDir, env.thumbnailsDir, path, "png"); err != nil {
+		t.Fatalf("ingest sub.png: %v", err)
+	}
 
 	// Search for gallery root only
-	_, err := Execute(database, Query{
+	if _, err := Execute(database, Query{
 		Expr:  FilterExpr{Key: "folder", Val: ""},
 		Page:  1,
 		Limit: 40,
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -600,6 +617,39 @@ func TestBuildWhere_UnknownFilter(t *testing.T) {
 	}
 }
 
+func TestBuildWhereDB_ColonFallsBackToLiteral(t *testing.T) {
+	// When the prefix before `:` is not a real category, the DB-aware
+	// builder must match the whole token as a literal tag name so
+	// colon-bearing tags like "nier:automata" stay searchable by typing
+	// them verbatim.
+	database, _ := setupSearchDB(t)
+
+	expr := FilterExpr{Key: "nier", Val: "automata"}
+	where, args, _ := buildWhereDB(expr, database)
+	if strings.Contains(where, "tc.name") {
+		t.Errorf("literal-tag branch should not reference tc.name, got: %q", where)
+	}
+	if len(args) != 1 || args[0] != "nier:automata" {
+		t.Errorf("args = %v, want [nier:automata]", args)
+	}
+}
+
+func TestBuildWhereDB_ColonUsesCategoryWhenPrefixExists(t *testing.T) {
+	// When the prefix IS a real category name, the DB-aware builder must
+	// keep the old "category-qualified" behaviour so `artist:foo` still
+	// searches for the tag `foo` in the `artist` category.
+	database, _ := setupSearchDB(t)
+
+	expr := FilterExpr{Key: "artist", Val: "foo"}
+	where, args, _ := buildWhereDB(expr, database)
+	if !strings.Contains(where, "tc.name = ?") {
+		t.Errorf("category-qualified branch should reference tc.name, got: %q", where)
+	}
+	if len(args) != 2 || args[0] != "foo" || args[1] != "artist" {
+		t.Errorf("args = %v, want [foo artist]", args)
+	}
+}
+
 // --- buildDateFilter tests ---
 
 func TestBuildDateFilter_After(t *testing.T) {
@@ -746,24 +796,57 @@ func TestSidebarTagsWithGlobalCount_Empty(t *testing.T) {
 }
 
 func TestSidebarTagsWithGlobalCount_WithImages(t *testing.T) {
-	database, cfg := setupSearchDB(t)
-	ingestTestImage(t, database, cfg, "a.png")
-	ingestTestImage(t, database, cfg, "b.png")
+	database, env := setupSearchDB(t)
+	ingestTestImage(t, database, env, "a.png")
+	ingestTestImage(t, database, env, "b.png")
 
-	result, err := Execute(database, Query{Page: 1, Limit: 40})
-	if err != nil || len(result.Results) == 0 {
-		t.Skip("no images to test SidebarTagsWithGlobalCount")
+	// Both images get a shared tag so the sidebar aggregator has work.
+	var catID int64
+	if err := database.Read.QueryRow(`SELECT id FROM tag_categories WHERE name='general'`).Scan(&catID); err != nil {
+		t.Fatal(err)
 	}
-
-	ids := make([]int64, len(result.Results))
-	for i, img := range result.Results {
-		ids[i] = img.ID
-	}
-	tags, err := SidebarTagsWithGlobalCount(database, ids)
+	var tagID int64
+	res, err := database.Write.Exec(`INSERT INTO tags (name, category_id, usage_count) VALUES ('shared', ?, 2)`, catID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = tags // may be empty if no tags were added; that's OK
+	tagID, _ = res.LastInsertId()
+
+	result, err := Execute(database, Query{Page: 1, Limit: 40})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Results) != 2 {
+		t.Fatalf("expected 2 images, got %d", len(result.Results))
+	}
+	ids := make([]int64, 0, len(result.Results))
+	for _, img := range result.Results {
+		ids = append(ids, img.ID)
+		if _, err := database.Write.Exec(
+			`INSERT INTO image_tags (image_id, tag_id, is_auto) VALUES (?, ?, 0)`, img.ID, tagID,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := SidebarTagsWithGlobalCount(database, ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found *int
+	for i, tag := range got {
+		if tag.Name == "shared" {
+			i := i
+			found = &i
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("expected tag 'shared' in sidebar aggregator, got %+v", got)
+	}
+	if got[*found].UsageCount != 2 {
+		t.Errorf("shared tag usage = %d, want 2", got[*found].UsageCount)
+	}
 }
 
 // --- Execute with sort/filter integration tests ---
@@ -1040,11 +1123,3 @@ func TestSuggestTagsWithFilter(t *testing.T) {
 	}
 }
 
-func TestExprNodeMarkers(t *testing.T) {
-	// exprNode() is a marker method used to implement the Expr interface.
-	// Call each one to satisfy coverage - they are intentionally empty.
-	exprs := []Expr{AndExpr{}, OrExpr{}, NotExpr{}, TagExpr{}, FilterExpr{}}
-	for _, e := range exprs {
-		e.exprNode()
-	}
-}

@@ -39,13 +39,18 @@ func DiscoverTaggers(cfg *config.Config) []TaggerStatus {
 
 	// Start from disk so untouched subfolders appear even without config.
 	// Discovered subfolders are enabled by default; explicit TOML entries
-	// below override (Disable actions persist Enabled=false).
+	// below override (Disable actions persist Enabled=false). Completely
+	// empty subdirectories (no .onnx / .csv / .txt) are skipped so they
+	// don't show up in the settings table as permanently-broken rows.
 	if entries, err := os.ReadDir(cfg.Paths.ModelPath); err == nil {
 		for _, e := range entries {
 			if !e.IsDir() {
 				continue
 			}
 			name := e.Name()
+			if !hasTaggerFiles(filepath.Join(cfg.Paths.ModelPath, name)) {
+				continue
+			}
 			byName[name] = config.TaggerInstance{
 				Name:                name,
 				Enabled:             true,
@@ -85,8 +90,13 @@ func DiscoverTaggers(cfg *config.Config) []TaggerStatus {
 }
 
 // EnabledTaggers returns the taggers that are both enabled in config and
-// have their files present on disk.
+// have their files present on disk. Returns nil on a noop build so UI
+// affordances that offer to run the tagger stay hidden on a binary that
+// cannot run one.
 func EnabledTaggers(cfg *config.Config) []TaggerStatus {
+	if !buildSupportsInference() {
+		return nil
+	}
 	var out []TaggerStatus
 	for _, t := range DiscoverTaggers(cfg) {
 		if t.Enabled && t.Available {
@@ -156,6 +166,26 @@ func resolveTaggerFiles(dir, explicitModel, explicitTags string) (string, string
 	}
 
 	return modelFile, tagsFile
+}
+
+// hasTaggerFiles reports whether dir contains at least one file with a
+// tagger-related extension. Used to skip completely empty subdirectories
+// during discovery (H13 in the UI audit).
+func hasTaggerFiles(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		switch strings.ToLower(filepath.Ext(e.Name())) {
+		case ".onnx", ".csv", ".txt":
+			return true
+		}
+	}
+	return false
 }
 
 func contains(list []string, v string) bool {

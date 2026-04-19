@@ -103,8 +103,13 @@ func (e *testEnv) createTestImage(t *testing.T, name string, w, h int) int64 {
 	if err != nil {
 		t.Fatal(err)
 	}
-	png.Encode(f, img)
-	f.Close()
+	if err := png.Encode(f, img); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	record, _, err := gallery.Ingest(e.database, e.galleryDir, e.thumbDir, path, "png")
 	if err != nil {
@@ -182,7 +187,9 @@ func TestAPIDisabledWhenNoToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	db.Bootstrap(database)
+	if err := db.Bootstrap(database); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
 	t.Cleanup(func() { database.Close() })
 
 	cfg := config.Default()
@@ -209,7 +216,9 @@ func TestBearerAuthRejectsInvalidToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	db.Bootstrap(database)
+	if err := db.Bootstrap(database); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
 	t.Cleanup(func() { database.Close() })
 
 	cfg := config.Default()
@@ -234,7 +243,9 @@ func TestBearerAuthAcceptsValidToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	db.Bootstrap(database)
+	if err := db.Bootstrap(database); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
 	t.Cleanup(func() { database.Close() })
 
 	cfg := config.Default()
@@ -317,9 +328,17 @@ func TestCreateImage_JSONPath(t *testing.T) {
 	// Create a real PNG file in the gallery dir
 	imgPath := filepath.Join(env.galleryDir, "new_api.png")
 	img := image.NewRGBA(image.Rect(0, 0, 15, 15))
-	f, _ := os.Create(imgPath)
-	png.Encode(f, img)
-	f.Close()
+	f, err := os.Create(imgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := png.Encode(f, img); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	body, _ := json.Marshal(map[string]any{
 		"path": imgPath,
@@ -538,21 +557,206 @@ func TestRemoveImageTags_ImageNotFound(t *testing.T) {
 	}
 }
 
+// findImageTag returns the (name, category) for the first tag attached to id
+// whose name matches want, or ("","") if none. Used by the colon-fallback
+// tests to confirm that a tag containing `:` was stored whole instead of
+// being split into a category/name pair.
+func findImageTag(t *testing.T, env *testEnv, id int64, want string) (string, string) {
+	t.Helper()
+	rows, err := env.database.Read.Query(
+		`SELECT t.name, tc.name FROM image_tags it
+		 JOIN tags t ON t.id = it.tag_id
+		 JOIN tag_categories tc ON tc.id = t.category_id
+		 WHERE it.image_id = ?`, id)
+	if err != nil {
+		t.Fatalf("query image tags: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var n, c string
+		if err := rows.Scan(&n, &c); err != nil {
+			t.Fatal(err)
+		}
+		if n == want {
+			return n, c
+		}
+	}
+	return "", ""
+}
+
+func TestAddImageTags_ColonFallbackLiteral(t *testing.T) {
+	// A tag whose prefix before `:` doesn't match any category must be
+	// stored whole in the general category, so names like `nier:automata`
+	// round-trip instead of silently splitting into an `automata` tag in
+	// a non-existent `nier` category.
+	env := newTestEnv(t)
+	id := env.createTestImage(t, "colon_fallback.png", 10, 10)
+
+	body, _ := json.Marshal(map[string]any{"tags": []string{"nier:automata", ":3"}})
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/images/%d/tags", id), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	for _, name := range []string{"nier:automata", ":3"} {
+		gotName, gotCat := findImageTag(t, env, id, name)
+		if gotName != name {
+			t.Errorf("tag %q not stored on image", name)
+		}
+		if gotCat != "general" {
+			t.Errorf("tag %q category = %q, want general", name, gotCat)
+		}
+	}
+}
+
+func TestAddImageTags_CategoryPrefixStillSplits(t *testing.T) {
+	// A prefix that IS a real category (artist in this case) must still
+	// split so API callers can create tags in non-general categories the
+	// same way the web UI does.
+	env := newTestEnv(t)
+	id := env.createTestImage(t, "colon_split.png", 10, 10)
+
+	body, _ := json.Marshal(map[string]any{"tags": []string{"artist:john_doe"}})
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/images/%d/tags", id), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	gotName, gotCat := findImageTag(t, env, id, "john_doe")
+	if gotName != "john_doe" {
+		t.Error("tag john_doe not stored on image")
+	}
+	if gotCat != "artist" {
+		t.Errorf("category = %q, want artist", gotCat)
+	}
+	// And the literal form must NOT have been stored as a general tag.
+	if n, _ := findImageTag(t, env, id, "artist:john_doe"); n != "" {
+		t.Error("literal artist:john_doe must not be stored when artist is a real category")
+	}
+}
+
+func TestRemoveImageTags_ColonFallbackLiteral(t *testing.T) {
+	// The removal path mirrors the addition path: a colon-bearing tag
+	// whose prefix isn't a category must be matched literally against
+	// names on the image, not split into a category-qualified lookup
+	// that finds nothing.
+	env := newTestEnv(t)
+	id := env.createTestImage(t, "colon_rm.png", 10, 10)
+
+	addBody, _ := json.Marshal(map[string]any{"tags": []string{"nier:automata"}})
+	addReq := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/images/%d/tags", id), bytes.NewReader(addBody))
+	addReq.Header.Set("Content-Type", "application/json")
+	env.mux.ServeHTTP(httptest.NewRecorder(), addReq)
+
+	remBody, _ := json.Marshal(map[string]any{"tags": []string{"nier:automata"}})
+	req := httptest.NewRequest("DELETE", fmt.Sprintf("/api/v1/images/%d/tags", id), bytes.NewReader(remBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if n, _ := findImageTag(t, env, id, "nier:automata"); n != "" {
+		t.Error("nier:automata should have been removed from the image")
+	}
+}
+
+func TestRemoveImageTags_CategoryMissFallsThroughToLiteral(t *testing.T) {
+	// When the prefix IS a real category (artist) but the image holds
+	// no (artist, foo) pair, resolution must fall through to a literal
+	// name match so a general-category tag stored whole as "artist:foo"
+	// is still removable. Typical source: a .txt auto-tagger whose
+	// label file listed "artist:xxx" - tagger writes bypass the input
+	// splitter so the literal form lands in general.
+	env := newTestEnv(t)
+	id := env.createTestImage(t, "colon_collide.png", 10, 10)
+
+	var genID int64
+	if err := env.database.Read.QueryRow(
+		`SELECT id FROM tag_categories WHERE name = 'general'`).Scan(&genID); err != nil {
+		t.Fatal(err)
+	}
+	svc := tags.New(env.database)
+	tag, err := svc.GetOrCreateTag("artist:foo", genID)
+	if err != nil {
+		t.Fatalf("seed tag: %v", err)
+	}
+	if err := svc.AddTagToImage(id, tag.ID, false, nil); err != nil {
+		t.Fatalf("attach tag: %v", err)
+	}
+
+	remBody, _ := json.Marshal(map[string]any{"tags": []string{"artist:foo"}})
+	req := httptest.NewRequest("DELETE", fmt.Sprintf("/api/v1/images/%d/tags", id), bytes.NewReader(remBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if n, _ := findImageTag(t, env, id, "artist:foo"); n != "" {
+		t.Error("artist:foo should have been removed from the image after category-miss fall-through")
+	}
+}
+
 // --- searchImages with parameters ---
 
 func TestSearchImages_WithSort(t *testing.T) {
 	env := newTestEnv(t)
-	env.createTestImage(t, "sort1.png", 10, 10)
-	env.createTestImage(t, "sort2.png", 11, 10)
+	// Different widths produce different SHAs so each image is distinct.
+	env.createTestImage(t, "sort1.png", 10, 10) // file_size S1
+	env.createTestImage(t, "sort2.png", 30, 30) // file_size S2 > S1
 
-	for _, sort := range []string{"newest", "oldest", "most_tags", "random"} {
-		req := httptest.NewRequest("GET", "/api/v1/images/search?sort="+sort, nil)
+	get := func(t *testing.T, sort, order string) []any {
+		t.Helper()
+		u := "/api/v1/images/search?sort=" + sort
+		if order != "" {
+			u += "&order=" + order
+		}
+		req := httptest.NewRequest("GET", u, nil)
 		w := httptest.NewRecorder()
 		env.mux.ServeHTTP(w, req)
 		if w.Code != http.StatusOK {
-			t.Errorf("sort=%s: expected 200, got %d", sort, w.Code)
+			t.Fatalf("sort=%s order=%s: expected 200, got %d: %s", sort, order, w.Code, w.Body.String())
 		}
+		var resp map[string]any
+		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		r, _ := resp["results"].([]any)
+		return r
 	}
+
+	// Spec §8.3 recognises exactly three sorts: newest (default), filesize,
+	// random. Each must produce a 200 AND an ordered result.
+	t.Run("newest desc puts second upload first", func(t *testing.T) {
+		got := get(t, "newest", "desc")
+		if len(got) != 2 {
+			t.Fatalf("expected 2 results, got %d", len(got))
+		}
+		first := got[0].(map[string]any)["canonical_path"].(string)
+		if !strings.HasSuffix(first, "sort2.png") {
+			t.Errorf("newest desc first = %q, want …/sort2.png", first)
+		}
+	})
+	t.Run("filesize desc puts larger file first", func(t *testing.T) {
+		got := get(t, "filesize", "desc")
+		first := got[0].(map[string]any)["canonical_path"].(string)
+		if !strings.HasSuffix(first, "sort2.png") {
+			t.Errorf("filesize desc first = %q, want …/sort2.png", first)
+		}
+	})
+	t.Run("random returns a 200 with both results", func(t *testing.T) {
+		got := get(t, "random", "")
+		if len(got) != 2 {
+			t.Errorf("random expected 2 results, got %d", len(got))
+		}
+	})
 }
 
 func TestSearchImages_WithPagination(t *testing.T) {
@@ -573,12 +777,24 @@ func TestSearchImages_LimitCapped(t *testing.T) {
 	w := httptest.NewRecorder()
 	env.mux.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", w.Code)
+		t.Fatalf("expected 200, got %d", w.Code)
 	}
 	var resp map[string]any
-	json.NewDecoder(w.Body).Decode(&resp)
-	if limit, ok := resp["limit"].(float64); ok && limit > 200 {
-		t.Errorf("limit should be capped at 200, got %v", limit)
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// Assert both the presence of `limit` and its upper bound: the `if ok`
+	// guard used to let a missing field silently pass.
+	raw, ok := resp["limit"]
+	if !ok {
+		t.Fatal("response missing 'limit'")
+	}
+	limit, ok := raw.(float64)
+	if !ok {
+		t.Fatalf("limit had type %T, want float64", raw)
+	}
+	if limit > 200 {
+		t.Errorf("limit = %v, want <= 200 (spec §8.3 API max)", limit)
 	}
 }
 
@@ -645,7 +861,9 @@ func TestParseInt_Invalid(t *testing.T) {
 func TestCORSRejectsBadOrigin(t *testing.T) {
 	dir := t.TempDir()
 	database, _ := db.Open(dir + "/test.db")
-	db.Bootstrap(database)
+	if err := db.Bootstrap(database); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
 	t.Cleanup(func() { database.Close() })
 
 	cfg := config.Default()
@@ -667,7 +885,9 @@ func TestCORSRejectsBadOrigin(t *testing.T) {
 func TestBearerAuth_MissingHeader(t *testing.T) {
 	dir := t.TempDir()
 	database, _ := db.Open(dir + "/test.db")
-	db.Bootstrap(database)
+	if err := db.Bootstrap(database); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
 	t.Cleanup(func() { database.Close() })
 
 	cfg := config.Default()
@@ -775,31 +995,52 @@ func TestListTags_WithUnknownCategory(t *testing.T) {
 func TestDeleteImage_DeleteEmptyFolder(t *testing.T) {
 	env := newTestEnv(t)
 
-	// Create image in a subfolder
 	subDir := filepath.Join(env.galleryDir, "sub2024")
-	os.MkdirAll(subDir, 0755)
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	img := image.NewRGBA(image.Rect(0, 0, 13, 13))
 	imgPath := filepath.Join(subDir, "sub_img.png")
-	f, _ := os.Create(imgPath)
-	png.Encode(f, img)
+	f, err := os.Create(imgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := png.Encode(f, img); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
 	f.Close()
 
 	record, _, err := gallery.Ingest(env.database, env.galleryDir, env.thumbDir, imgPath, "png")
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	// Delete the file from disk first so the folder becomes empty after db delete
-	os.Remove(imgPath)
+	// Remove the file off disk so the sub-folder is empty after the DB delete.
+	if err := os.Remove(imgPath); err != nil {
+		t.Fatal(err)
+	}
 
 	req := httptest.NewRequest("DELETE",
 		fmt.Sprintf("/api/v1/images/%d?delete_empty_folder=true", record.ID), nil)
 	w := httptest.NewRecorder()
 	env.mux.ServeHTTP(w, req)
 
-	// Should be 200 (folder deleted) or 204 (folder still not empty or doesn't exist)
-	if w.Code != http.StatusNoContent && w.Code != http.StatusOK {
-		t.Errorf("expected 200 or 204 for delete with empty folder, got %d: %s",
-			w.Code, w.Body.String())
+	// With the folder empty, the handler must return 200 + the folder_deleted
+	// payload (images.go:431). 204 would mean the folder was not removed.
+	if w.Code != http.StatusOK {
+		t.Fatalf("empty-folder delete expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var body map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body["folder_deleted"] != true {
+		t.Errorf("folder_deleted = %v, want true", body["folder_deleted"])
+	}
+	if body["folder"] != "sub2024" {
+		t.Errorf("folder = %v, want sub2024", body["folder"])
+	}
+	if _, err := os.Stat(subDir); !os.IsNotExist(err) {
+		t.Errorf("sub-folder should have been removed, stat err = %v", err)
 	}
 }

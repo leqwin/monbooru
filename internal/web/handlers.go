@@ -32,12 +32,15 @@ import (
 
 func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
 	if !s.cfg.Auth.EnablePassword {
-		// Render the login form with an inline notice instead of silently
-		// redirecting - a user who bookmarked /login after disabling auth
-		// otherwise gets no explanation for why the page vanished.
+		// Render the login form with an inline notice and the input/submit
+		// disabled instead of silently redirecting - a user who bookmarked
+		// /login after disabling auth otherwise gets no explanation for why
+		// the page vanished, and leaving the fields live makes it look like
+		// the 'login' somehow worked when the server just redirects to /.
 		s.renderTemplate(w, "login.html", map[string]any{
-			"CSRFToken": s.csrfToken("anon"),
-			"Error":     "Password authentication is disabled. Enable it from Settings → Authentication.",
+			"CSRFToken":    s.csrfToken("anon"),
+			"Error":        "Password authentication is disabled. Enable it from Settings → Authentication.",
+			"AuthDisabled": true,
 		})
 		return
 	}
@@ -117,6 +120,7 @@ type galleryData struct {
 	Result        *models.SearchResult
 	SidebarTags   []models.Tag
 	FolderTree    []gallery.FolderNode
+	SourceCounts  gallery.SourceCounts
 	SavedSearches []models.SavedSearch
 	SidebarURL    string // populated on full-page renders so the placeholder can lazy-load the sidebar
 }
@@ -228,6 +232,7 @@ func (s *Server) galleryHandler(w http.ResponseWriter, r *http.Request) {
 	var (
 		sidebarTags   []models.Tag
 		folderTree    []gallery.FolderNode
+		sourceCounts  gallery.SourceCounts
 		savedSearches []models.SavedSearch
 	)
 	if htmxGridTarget {
@@ -235,7 +240,7 @@ func (s *Server) galleryHandler(w http.ResponseWriter, r *http.Request) {
 		for _, img := range result.Results {
 			ids = append(ids, img.ID)
 		}
-		sidebarTags, folderTree, savedSearches = s.sidebarLoad(ids)
+		sidebarTags, folderTree, sourceCounts, savedSearches = s.sidebarLoad(ids)
 	}
 
 	data := galleryData{
@@ -249,6 +254,7 @@ func (s *Server) galleryHandler(w http.ResponseWriter, r *http.Request) {
 		Result:        result,
 		SidebarTags:   sidebarTags,
 		FolderTree:    folderTree,
+		SourceCounts:  sourceCounts,
 		SavedSearches: savedSearches,
 	}
 
@@ -260,18 +266,19 @@ func (s *Server) galleryHandler(w http.ResponseWriter, r *http.Request) {
 	s.renderTemplate(w, "gallery.html", data)
 }
 
-// sidebarLoad runs the three reads that populate the gallery sidebar -
-// current-page tags, folder tree, saved searches - in parallel across the
+// sidebarLoad runs the reads that populate the gallery sidebar - current-page
+// tags, folder tree, source counts, saved searches - in parallel across the
 // read pool. Called from galleryHandler on HTMX grid swaps (to keep the OOB
 // sidebar update) and from gallerySidebar (lazy-load on full-page render).
-func (s *Server) sidebarLoad(pageImageIDs []int64) ([]models.Tag, []gallery.FolderNode, []models.SavedSearch) {
+func (s *Server) sidebarLoad(pageImageIDs []int64) ([]models.Tag, []gallery.FolderNode, gallery.SourceCounts, []models.SavedSearch) {
 	var (
 		tags    []models.Tag
 		folders []gallery.FolderNode
+		sources gallery.SourceCounts
 		saved   []models.SavedSearch
 	)
 	var wg sync.WaitGroup
-	wg.Add(3)
+	wg.Add(4)
 	go func() {
 		defer wg.Done()
 		tags, _ = search.SidebarTagsWithGlobalCount(s.db(), pageImageIDs)
@@ -280,6 +287,12 @@ func (s *Server) sidebarLoad(pageImageIDs []int64) ([]models.Tag, []gallery.Fold
 		defer wg.Done()
 		if cx := s.Active(); cx != nil {
 			folders, _ = cx.FolderTree()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if cx := s.Active(); cx != nil {
+			sources, _ = cx.SourceCounts()
 		}
 	}()
 	go func() {
@@ -296,7 +309,7 @@ func (s *Server) sidebarLoad(pageImageIDs []int64) ([]models.Tag, []gallery.Fold
 		}
 	}()
 	wg.Wait()
-	return tags, folders, saved
+	return tags, folders, sources, saved
 }
 
 // gallerySidebar renders the gallery sidebar partial on demand. Initial
@@ -353,13 +366,14 @@ func (s *Server) gallerySidebar(w http.ResponseWriter, r *http.Request) {
 	for _, img := range result.Results {
 		ids = append(ids, img.ID)
 	}
-	sidebarTags, folderTree, savedSearches := s.sidebarLoad(ids)
+	sidebarTags, folderTree, sourceCounts, savedSearches := s.sidebarLoad(ids)
 
 	s.renderTemplate(w, "partials/sidebar_content.html", map[string]any{
 		"Query":         queryStr,
 		"CSRFToken":     s.csrfToken(sessionFromContext(r.Context())),
 		"SidebarTags":   sidebarTags,
 		"FolderTree":    folderTree,
+		"SourceCounts":  sourceCounts,
 		"SavedSearches": savedSearches,
 	})
 }
@@ -393,6 +407,7 @@ func buildSidebarURL(q, sort, order, page, seed string) string {
 type detailData struct {
 	baseData
 	Image          models.Image
+	Filename       string // basename of the canonical path, shown on the detail page topbar
 	ImageTags      []models.ImageTag
 	SDMeta         *models.SDMetadata
 	ComfyMeta      *models.ComfyUIMetadata
@@ -497,9 +512,11 @@ func (s *Server) detailHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	baseName := filepath.Base(img.CanonicalPath)
 	data := detailData{
-		baseData:       s.base(r, "gallery", fmt.Sprintf("Image #%d - Monbooru", id)),
+		baseData:       s.base(r, "gallery", fmt.Sprintf("%s - Monbooru", baseName)),
 		Image:          *img,
+		Filename:       baseName,
 		ImageTags:      imageTags,
 		SDMeta:         sdMeta,
 		ComfyMeta:      comfyMeta,
@@ -591,13 +608,14 @@ func (s *Server) parseTagInput(tagInput string) ([]catTag, string) {
 			var catID int64
 			if err := s.db().Read.QueryRow(
 				`SELECT id FROM tag_categories WHERE name=?`, catName,
-			).Scan(&catID); err != nil {
-				return nil, "unknown category: " + catName
+			).Scan(&catID); err == nil {
+				if tagName != "" {
+					catTags = append(catTags, catTag{catID, tagName})
+				}
+				continue
 			}
-			if tagName != "" {
-				catTags = append(catTags, catTag{catID, tagName})
-			}
-			continue
+			// Prefix isn't a known category; treat the whole token as a
+			// literal general-category tag (e.g. "nier:automata").
 		}
 		catTags = append(catTags, catTag{generalID, name})
 	}
@@ -711,23 +729,26 @@ func (s *Server) renderTagListWithSidebar(w http.ResponseWriter, r *http.Request
 			break
 		}
 	}
+	var folderPath string
+	_ = s.db().Read.QueryRow(`SELECT folder_path FROM images WHERE id = ?`, id).Scan(&folderPath)
 	q := r.URL.Query()
 	s.renderTemplate(w, "partials/tag_list.html", map[string]any{
-		"ImageID":      id,
-		"ImageTags":    imageTags,
-		"SidebarTags":  true,
-		"DangerZone":   true,
-		"HasUserTags":  hasUserTags,
-		"ImageTaggers": distinctAutoTaggerNames(imageTags),
-		"BackQuery":    q.Get("back_q"),
-		"BackSort":     q.Get("back_sort"),
-		"BackOrder":    q.Get("back_order"),
-		"BackPage":     q.Get("back_page"),
-		"BackSeed":     q.Get("back_seed"),
-		"CSRFToken":    s.csrfToken(sessionFromContext(r.Context())),
-		"EditMode":     true,
-		"ErrMsg":       errMsg,
-		"ClearInput":   clearInput,
+		"ImageID":       id,
+		"ImageTags":     imageTags,
+		"SidebarTags":   true,
+		"DangerZone":    true,
+		"HasUserTags":   hasUserTags,
+		"ImageTaggers":  distinctAutoTaggerNames(imageTags),
+		"BackQuery":     q.Get("back_q"),
+		"BackSort":      q.Get("back_sort"),
+		"BackOrder":     q.Get("back_order"),
+		"BackPage":      q.Get("back_page"),
+		"BackSeed":      q.Get("back_seed"),
+		"CSRFToken":     s.csrfToken(sessionFromContext(r.Context())),
+		"EditMode":      true,
+		"ErrMsg":        errMsg,
+		"ClearInput":    clearInput,
+		"CurrentFolder": folderPath,
 	})
 }
 
@@ -1077,7 +1098,7 @@ func (s *Server) mergeTagsPost(w http.ResponseWriter, r *http.Request) {
 	}
 	if id, err := strconv.ParseInt(canonInput, 10, 64); err == nil {
 		canonID = id
-	} else if idx := strings.Index(canonInput, ":"); idx > 0 {
+	} else if idx := strings.Index(canonInput, ":"); idx > 0 && s.categoryExists(canonInput[:idx]) {
 		catName := canonInput[:idx]
 		tagName := canonInput[idx+1:]
 		if err := s.db().Read.QueryRow(
@@ -1163,19 +1184,20 @@ func (s *Server) settingsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	data := map[string]any{
-		"Title":         base.Title,
-		"ActiveNav":     base.ActiveNav,
-		"CSRFToken":     base.CSRFToken,
-		"AuthEnabled":   base.AuthEnabled,
-		"Degraded":      base.Degraded,
-		"Version":       base.Version,
-		"RepoURL":       base.RepoURL,
-		"Variant":       base.Variant,
-		"ActiveGallery": base.ActiveGallery,
-		"Galleries":     s.galleryList(),
-		"Config":        s.cfg,
-		"Taggers":       taggers,
-		"EnabledCount":  enabledCount,
+		"Title":          base.Title,
+		"ActiveNav":      base.ActiveNav,
+		"CSRFToken":      base.CSRFToken,
+		"AuthEnabled":    base.AuthEnabled,
+		"Degraded":       base.Degraded,
+		"Version":        base.Version,
+		"RepoURL":        base.RepoURL,
+		"Variant":        base.Variant,
+		"ActiveGallery":  base.ActiveGallery,
+		"Galleries":      s.galleryList(),
+		"Config":         s.cfg,
+		"Taggers":        taggers,
+		"EnabledCount":   enabledCount,
+		"ScheduleStatus": s.ScheduleStatus(),
 	}
 	s.renderTemplate(w, "settings.html", data)
 }
@@ -2243,6 +2265,11 @@ func (s *Server) uploadPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) uploadPost(w http.ResponseWriter, r *http.Request) {
+	if cx := s.Active(); cx == nil || cx.Degraded {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`<div class="flash flash-err">Upload unavailable: gallery path is unreadable.</div>`))
+		return
+	}
 	maxBytes := int64(s.cfg.Gallery.MaxFileSizeMB) * 1024 * 1024
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes*10+4096) // allow multiple files
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
@@ -2381,6 +2408,9 @@ func (s *Server) helpHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) jobStatusHandler(w http.ResponseWriter, r *http.Request) {
+	// Mark before Get so the first render of a completed state starts the
+	// short post-view dismiss timer. Subsequent views don't re-arm it.
+	s.jobs.MarkViewed()
 	state := s.jobs.Get()
 	s.renderTemplate(w, "partials/job_status.html", state)
 }
@@ -2416,7 +2446,7 @@ func (s *Server) syncTrigger(w http.ResponseWriter, r *http.Request) {
 			s.jobs.Fail(err.Error())
 			return
 		}
-		s.jobs.Complete(fmt.Sprintf("%d added, %d removed, %d moved",
+		s.jobs.Complete(fmt.Sprintf("%d added, %d missing, %d moved",
 			result.Added, result.Removed, result.Moved))
 	}()
 
@@ -2488,7 +2518,7 @@ func (s *Server) removeAllTagsPost(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) autotagTrigger(w http.ResponseWriter, r *http.Request) {
 	if !tagger.IsAvailable(s.cfg) {
-		http.Error(w, "auto-tagger not available (model files missing or built without -tags tagger)", http.StatusServiceUnavailable)
+		http.Error(w, "auto-tagger not available: "+tagger.UnavailableReason(s.cfg), http.StatusServiceUnavailable)
 		return
 	}
 
@@ -3013,9 +3043,12 @@ func (s *Server) tagSuggest(w http.ResponseWriter, r *http.Request) {
 		prefix = q.Get("canonical_id")
 	}
 
-	// If the prefix contains "category:name", filter by category
+	// If the prefix contains "category:name" and the prefix is a real
+	// category, filter by category. Otherwise suggest literal tags whose
+	// full name matches the raw input (so tags like "nier:automata" still
+	// surface while the user types).
 	var catName, tagPrefix string
-	if idx := strings.Index(prefix, ":"); idx > 0 {
+	if idx := strings.Index(prefix, ":"); idx > 0 && s.categoryExists(prefix[:idx]) {
 		catName = prefix[:idx]
 		tagPrefix = prefix[idx+1:]
 	} else {
@@ -3079,9 +3112,16 @@ func (s *Server) searchSuggest(w http.ResponseWriter, r *http.Request) {
 			case "fav", "source", "width", "height", "date", "missing", "folder", "folderonly", "generated":
 				// no tag suggestions
 			default:
-				// key is a category name - suggest tags from that category
-				catFilter = key
-				prefix = val
+				// Category-qualified only when the prefix actually names
+				// a category; otherwise suggest literal tags that match
+				// the whole "key:val" string (e.g. "nier:aut…" →
+				// "nier:automata").
+				if colonIdx > 0 && s.categoryExists(key) {
+					catFilter = key
+					prefix = val
+				} else {
+					prefix = last
+				}
 			}
 		} else {
 			prefix = last
@@ -3184,11 +3224,12 @@ func (s *Server) changeTagCategory(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) autotagImage(w http.ResponseWriter, r *http.Request) {
 	if !tagger.IsAvailable(s.cfg) {
+		reason := tagger.UnavailableReason(s.cfg)
 		if isHTMXRequest(r) {
-			w.Write([]byte(`<div class="flash flash-err">Auto-tagger not available (model files missing).</div>`))
+			w.Write([]byte(`<div class="flash flash-err">Auto-tagger not available: ` + html.EscapeString(reason) + `.</div>`))
 			return
 		}
-		http.Error(w, "auto-tagger not available", http.StatusServiceUnavailable)
+		http.Error(w, "auto-tagger not available: "+reason, http.StatusServiceUnavailable)
 		return
 	}
 

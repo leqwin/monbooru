@@ -3,6 +3,7 @@ package tagger
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/leqwin/monbooru/internal/config"
@@ -151,22 +152,63 @@ func TestDiscoverTaggers_MissingFilesUnavailable(t *testing.T) {
 	for _, t := range got {
 		byName[t.Name] = t
 	}
-	if wd, ok := byName["wd"]; !ok || wd.Available {
+	wd, ok := byName["wd"]
+	if !ok {
+		t.Fatal("wd not discovered")
+	}
+	if wd.Available {
 		t.Errorf("wd should be unavailable: %+v", wd)
 	}
-	if jt, ok := byName["joytag"]; !ok || jt.Available {
+	// The Reason surfaces in Settings → Auto-Tagger so users know *which*
+	// file is missing. Pin the fragment so a cosmetic rename doesn't
+	// silently degrade the error.
+	if !strings.Contains(wd.Reason, "tags") {
+		t.Errorf("wd.Reason should mention the missing tags file, got %q", wd.Reason)
+	}
+
+	jt, ok := byName["joytag"]
+	if !ok {
+		t.Fatal("joytag not discovered")
+	}
+	if jt.Available {
 		t.Errorf("joytag should be unavailable: %+v", jt)
+	}
+	if !strings.Contains(jt.Reason, "model") {
+		t.Errorf("joytag.Reason should mention the missing model file, got %q", jt.Reason)
 	}
 }
 
-func TestEnabledTaggers_FiltersUnavailable(t *testing.T) {
+func TestDiscoverTaggers_SkipsEmptyFolder(t *testing.T) {
 	tmp := t.TempDir()
-	makeTaggerDir(t, tmp, "ok", []string{"model.onnx", "tags.csv"})
-	makeTaggerDir(t, tmp, "broken", []string{"model.onnx"}) // no labels
+	makeTaggerDir(t, tmp, "wd", []string{"model.onnx", "tags.csv"})
+	makeTaggerDir(t, tmp, "empty", nil)
 
 	cfg := &config.Config{Paths: config.PathsConfig{ModelPath: tmp}}
-	got := EnabledTaggers(cfg)
-	if len(got) != 1 || got[0].Name != "ok" {
-		t.Errorf("EnabledTaggers = %+v, want only `ok`", got)
+	got := DiscoverTaggers(cfg)
+	for _, ts := range got {
+		if ts.Name == "empty" {
+			t.Errorf("empty folder should not appear in the tagger list: %+v", ts)
+		}
+	}
+	if len(got) != 1 || got[0].Name != "wd" {
+		t.Errorf("DiscoverTaggers = %+v, want only `wd`", got)
+	}
+}
+
+func TestEnabledTaggers_NoopBuildReturnsNil(t *testing.T) {
+	// The default (noop) build can't run inference at all, so EnabledTaggers
+	// must return nil so UI affordances that offer to run the tagger stay
+	// hidden. The tagger-build variant is exercised by the build-tagged
+	// counterpart in discover_tagger_test.go.
+	if buildSupportsInference() {
+		t.Skip("tagger build: covered elsewhere")
+	}
+
+	tmp := t.TempDir()
+	makeTaggerDir(t, tmp, "ok", []string{"model.onnx", "tags.csv"})
+
+	cfg := &config.Config{Paths: config.PathsConfig{ModelPath: tmp}}
+	if got := EnabledTaggers(cfg); len(got) != 0 {
+		t.Errorf("EnabledTaggers on noop build = %+v, want nil", got)
 	}
 }

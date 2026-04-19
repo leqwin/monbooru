@@ -49,9 +49,9 @@ func main() {
 	}
 	defer srv.Close()
 
-	// Start the watcher on the active gallery. Subsequent switches start/stop
-	// watchers inside the Server so the gallery context owns that lifecycle.
-	srv.StartActiveWatcher()
+	// Start a watcher per configured gallery. All of them run for the lifetime
+	// of the process so file drops into any gallery are picked up in real time.
+	srv.StartWatchers()
 
 	httpSrv := &http.Server{
 		Addr:        cfg.Server.BindAddress,

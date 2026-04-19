@@ -133,13 +133,23 @@ func TestGalleryHTMXPartialReturnsGrid(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("HTMX partial expected 200, got %d", w.Code)
 	}
+	// Content-Type must be text/html so HTMX's swap logic accepts it;
+	// a JSON default would silently break grid updates.
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("HTMX partial Content-Type = %q, want text/html…", ct)
+	}
 	body := w.Body.String()
-	// Should return partial, not full page
+	// Should return partial, not full page.
 	if strings.Contains(body, "<html") {
 		t.Error("HTMX partial response should not contain <html>")
 	}
 	if !strings.Contains(body, "thumb-grid") {
 		t.Error("HTMX partial should contain thumb-grid")
+	}
+	// Partials include the OOB sidebar swap so filtering updates tag
+	// counts without an extra round trip (spec §12.3).
+	if !strings.Contains(body, "sidebar-inner") {
+		t.Error("HTMX partial should carry the OOB sidebar swap")
 	}
 }
 
@@ -230,6 +240,60 @@ func TestJobStatusPartialReturns200(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Errorf("job status expected 200, got %d", w.Code)
+	}
+}
+
+// TestJobStatusHandler_RunningMarkup covers the template branch that
+// Playwright cannot reliably reach: racing a running indicator across the
+// 2 s HTMX poll produces flaky tests. Here we stage the manager in
+// "running" state directly and assert the template emits job-running plus
+// a × cancel button for cancellable types.
+func TestJobStatusHandler_RunningMarkup(t *testing.T) {
+	srv := newTestServer(t)
+	// Stage the manager in running re-extract state.
+	if err := srv.jobs.Start("re-extract"); err != nil {
+		t.Fatalf("jobs.Start: %v", err)
+	}
+	defer srv.jobs.Complete("done")
+	srv.jobs.Update(3, 10, "reading metadata")
+
+	req := httptest.NewRequest("GET", "/internal/job/status", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("job status expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	for _, want := range []string{
+		`class="job-running`,           // running class flips on the wrapper
+		`data-job-type="re-extract"`,   // job type surfaces for UI hooks
+		`<button class="job-dismiss"`,  // × cancel button
+		`reading metadata`,             // progress message rendered
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("running job partial missing %q\nbody: %s", want, body)
+		}
+	}
+}
+
+// TestJobStatusHandler_NoCancelForWatcher pins the complementary branch:
+// the transient "watcher" pseudo-job is surfaced as a summary, not as a
+// cancellable running job.
+func TestJobStatusHandler_NoCancelForWatcher(t *testing.T) {
+	srv := newTestServer(t)
+	srv.jobs.SetWatcherMessage("added foo.png")
+
+	req := httptest.NewRequest("GET", "/internal/job/status", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	body := w.Body.String()
+	if strings.Contains(body, `class="job-running`) {
+		t.Error("watcher pseudo-event must not render as a running job")
+	}
+	if !strings.Contains(body, "added foo.png") {
+		t.Errorf("expected watcher summary in body, got: %s", body)
 	}
 }
 

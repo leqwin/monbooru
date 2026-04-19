@@ -9,10 +9,13 @@ import (
 )
 
 func TestHashFile(t *testing.T) {
+	t.Parallel()
 	content := []byte("hello monbooru")
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.txt")
-	os.WriteFile(path, content, 0644)
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	want := sha256.Sum256(content)
 	wantHex := hex.EncodeToString(want[:])
@@ -27,6 +30,7 @@ func TestHashFile(t *testing.T) {
 }
 
 func TestDetectFileType_Extensions(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		wantType string
@@ -41,14 +45,17 @@ func TestDetectFileType_Extensions(t *testing.T) {
 		{"video.webm", "webm"},
 	}
 	for _, tt := range tests {
-		got, err := DetectFileType(tt.name)
-		if err != nil {
-			t.Errorf("DetectFileType(%q) error: %v", tt.name, err)
-			continue
-		}
-		if got != tt.wantType {
-			t.Errorf("DetectFileType(%q) = %q, want %q", tt.name, got, tt.wantType)
-		}
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := DetectFileType(tt.name)
+			if err != nil {
+				t.Fatalf("DetectFileType error: %v", err)
+			}
+			if got != tt.wantType {
+				t.Errorf("DetectFileType(%q) = %q, want %q", tt.name, got, tt.wantType)
+			}
+		})
 	}
 }
 

@@ -137,7 +137,7 @@ document.querySelectorAll('.btn-delete-category').forEach(function(btn) {
       .catch(function() {
         showConfirm('Delete category "' + catName + '"?', function() {
           doDeleteCategory(catId, csrf, 'delete_all', null);
-        });
+        }, '', 'Delete');
       });
   });
 });

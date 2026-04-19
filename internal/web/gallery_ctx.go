@@ -26,12 +26,13 @@ type galleryCtx struct {
 	TagSvc         *tags.Service
 	Degraded       bool
 
-	// Per-gallery caches of queries that scan every visible image. Both are
-	// nilled by InvalidateCaches after any ingest/delete/missing-toggle so
-	// the next reader re-populates from SQLite. visibleCount holds the count
-	// of is_missing=0 images as a pointer so "not cached" is distinguishable
-	// from "cached zero".
+	// Per-gallery caches of queries that scan every visible image. All three
+	// are nilled by InvalidateCaches after any ingest/delete/missing-toggle
+	// so the next reader re-populates from SQLite. visibleCount holds the
+	// count of is_missing=0 images as a pointer so "not cached" is
+	// distinguishable from "cached zero".
 	folderTree   atomic.Pointer[[]gallery.FolderNode]
+	sourceCounts atomic.Pointer[gallery.SourceCounts]
 	visibleCount atomic.Pointer[int]
 
 	watcherCancel context.CancelFunc
@@ -46,6 +47,7 @@ func (cx *galleryCtx) InvalidateCaches() {
 		return
 	}
 	cx.folderTree.Store(nil)
+	cx.sourceCounts.Store(nil)
 	cx.visibleCount.Store(nil)
 }
 
@@ -61,6 +63,20 @@ func (cx *galleryCtx) FolderTree() ([]gallery.FolderNode, error) {
 	}
 	cx.folderTree.Store(&tree)
 	return tree, nil
+}
+
+// SourceCounts returns the cached source-tree counts or queries them on
+// demand. The cache is invalidated by InvalidateCaches.
+func (cx *galleryCtx) SourceCounts() (gallery.SourceCounts, error) {
+	if p := cx.sourceCounts.Load(); p != nil {
+		return *p, nil
+	}
+	sc, err := gallery.SourceCountsQuery(cx.DB)
+	if err != nil {
+		return gallery.SourceCounts{}, err
+	}
+	cx.sourceCounts.Store(&sc)
+	return sc, nil
 }
 
 // VisibleCount returns the cached count of non-missing images or queries it
@@ -129,7 +145,7 @@ func (cx *galleryCtx) startWatcher(watchEnabled bool, maxFileSizeMB int, jm *job
 	if !watchEnabled || cx.Degraded || cx.watcherCancel != nil {
 		return
 	}
-	w, err := gallery.NewWatcher(cx.GalleryPath, cx.ThumbnailsPath, maxFileSizeMB, cx.DB, jm)
+	w, err := gallery.NewWatcher(cx.Name, cx.GalleryPath, cx.ThumbnailsPath, maxFileSizeMB, cx.DB, jm)
 	if err != nil {
 		logx.Warnf("gallery %q: watcher start: %v", cx.Name, err)
 		return
@@ -174,6 +190,22 @@ func (s *Server) tagSvc() *tags.Service {
 		return cx.TagSvc
 	}
 	return nil
+}
+
+// categoryExists reports whether name matches a row in tag_categories on
+// the active gallery. Callers use it to disambiguate a `prefix:value`
+// token that might be category-qualified or a literal tag containing a
+// colon. Database errors (including nil gallery) count as "no match" so
+// an ambiguous input degrades to literal.
+func (s *Server) categoryExists(name string) bool {
+	d := s.db()
+	if d == nil {
+		return false
+	}
+	var n int
+	return d.Read.QueryRow(
+		`SELECT 1 FROM tag_categories WHERE name = ? LIMIT 1`, name,
+	).Scan(&n) == nil
 }
 
 func (s *Server) galleryPath() string {

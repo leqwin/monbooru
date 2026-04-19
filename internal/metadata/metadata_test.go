@@ -147,29 +147,53 @@ func TestParseComfyWorkflow_InvalidJSON(t *testing.T) {
 }
 
 func TestExtractFromPNG_SD(t *testing.T) {
-	sd, comfy, err := Extract("/workspace/Projets/monbooru/testdata/sd_a1111.png", "png")
+	t.Parallel()
+	// Synthesise a PNG with a `parameters` tEXt chunk so the assertion pins
+	// real extractor behaviour instead of depending on committed testdata.
+	param := "sample prompt\nNegative prompt: bad\nSteps: 12, Sampler: Euler, CFG scale: 6, Seed: 7, Model: mdl"
+	buf := makePNGWithTextChunk("parameters", param)
+	dir := t.TempDir()
+	path := dir + "/sd.png"
+	if err := os.WriteFile(path, buf, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sd, comfy, err := Extract(path, "png")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The file should have SD metadata
 	if sd == nil {
-		t.Log("sd_a1111.png returned nil SD metadata (may not have embedded params)")
+		t.Fatal("expected non-nil SDMetadata for PNG with `parameters` chunk")
 	}
-	// ComfyUI should not be set
+	if sd.Prompt != "sample prompt" {
+		t.Errorf("Prompt = %q", sd.Prompt)
+	}
 	if comfy != nil {
-		t.Log("sd_a1111.png unexpectedly has ComfyUI workflow")
+		t.Error("SD-only PNG should not yield ComfyUIMetadata")
 	}
 }
 
 func TestExtractFromPNG_ComfyUI(t *testing.T) {
-	sd, comfy, err := Extract("/workspace/Projets/monbooru/testdata/comfyui_workflow.png", "png")
+	t.Parallel()
+	workflow := `{"1":{"type":"KSampler","inputs":{"seed":9,"steps":14,"cfg":5,"sampler_name":"euler"}},"2":{"type":"CheckpointLoaderSimple","inputs":{"ckpt_name":"mdl.ckpt"}}}`
+	buf := makePNGWithTextChunk("workflow", workflow)
+	dir := t.TempDir()
+	path := dir + "/cf.png"
+	if err := os.WriteFile(path, buf, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sd, comfy, err := Extract(path, "png")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if comfy == nil {
-		t.Log("comfyui_workflow.png returned nil ComfyUI metadata (may not have embedded workflow)")
+		t.Fatal("expected ComfyUIMetadata for PNG with `workflow` chunk")
 	}
-	_ = sd
+	if comfy.Seed == nil || *comfy.Seed != 9 {
+		t.Errorf("Seed = %v, want 9", comfy.Seed)
+	}
+	if sd != nil {
+		t.Error("ComfyUI-only PNG should not yield SDMetadata")
+	}
 }
 
 func TestExtract_UnsupportedType(t *testing.T) {
@@ -183,12 +207,12 @@ func TestExtract_UnsupportedType(t *testing.T) {
 }
 
 func TestExtract_JPEG(t *testing.T) {
-	// Create a minimal valid JPEG file
+	t.Parallel()
+	// Minimal valid JPEG (SOI + EOI, no EXIF). Extract must return
+	// (nil, nil, nil) - no SD or ComfyUI metadata, no decode error.
 	dir := t.TempDir()
 	path := dir + "/test.jpg"
-	// Minimal JPEG: SOI marker + EOI marker
-	jpegData := []byte{0xFF, 0xD8, 0xFF, 0xD9}
-	if err := writeFile(path, jpegData); err != nil {
+	if err := os.WriteFile(path, []byte{0xFF, 0xD8, 0xFF, 0xD9}, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -196,31 +220,50 @@ func TestExtract_JPEG(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// No EXIF metadata in this minimal JPEG
 	if comfy != nil {
-		t.Error("JPEG should not return ComfyUI metadata")
+		t.Error("JPEG must never produce ComfyUI metadata")
 	}
-	_ = sd // nil is acceptable for minimal JPEG without EXIF
+	if sd != nil {
+		t.Errorf("minimal JPEG without EXIF must produce nil SDMetadata, got %+v", sd)
+	}
 }
 
 func TestExtract_JPEG_NonExistent(t *testing.T) {
-	// Should not return a fatal error for missing file
+	t.Parallel()
+	// Extract swallows every IO error silently (sd.go:16 comment "silently
+	// skip") so a missing file produces (nil, nil, nil). Pin that contract:
+	// the ingest pipeline relies on the extractor never failing so an image
+	// without metadata still lands with source_type='none'.
 	sd, comfy, err := Extract("/nonexistent/path/image.jpg", "jpeg")
-	// Either err is set or both are nil - no panic
-	_ = sd
-	_ = comfy
-	_ = err
+	if err != nil {
+		t.Errorf("Extract on missing file should swallow errors silently, got %v", err)
+	}
+	if sd != nil || comfy != nil {
+		t.Errorf("missing file must produce no metadata, got sd=%+v comfy=%+v", sd, comfy)
+	}
 }
 
 func TestExtractComfyUI_FromPNG(t *testing.T) {
-	// Test that extractComfyUI works via Extract for a PNG with workflow
-	// Use the existing testdata PNG
-	sd, comfy, err := Extract("/workspace/Projets/monbooru/testdata/comfyui_workflow.png", "png")
+	t.Parallel()
+	// Pin the `prompt` chunk → ComfyUIMetadata path too (API format, not just
+	// the workflow format covered elsewhere).
+	prompt := `{"1":{"type":"KSampler","inputs":{"seed":3,"steps":8,"cfg":4,"sampler_name":"dpm"}},"2":{"type":"CheckpointLoaderSimple","inputs":{"ckpt_name":"m.ckpt"}}}`
+	buf := makePNGWithTextChunk("prompt", prompt)
+	dir := t.TempDir()
+	path := dir + "/cfp.png"
+	if err := os.WriteFile(path, buf, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sd, comfy, err := Extract(path, "png")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = sd
-	_ = comfy
+	if comfy == nil {
+		t.Fatal("expected ComfyUI metadata from `prompt` chunk")
+	}
+	if sd != nil {
+		t.Error("ComfyUI-only PNG must not produce SDMetadata")
+	}
 }
 
 func TestParseA1111_PromptOnly(t *testing.T) {
@@ -345,11 +388,14 @@ func TestExtractComfyUI_NoWorkflow(t *testing.T) {
 }
 
 func TestExtractComfyUI_NotPNG(t *testing.T) {
-	_, err := extractComfyUI(bytes.NewReader([]byte("not a png")))
+	t.Parallel()
+	got, err := extractComfyUI(bytes.NewReader([]byte("not a png")))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// should return nil, nil for non-PNG
+	if got != nil {
+		t.Errorf("non-PNG data must yield nil ComfyUIMetadata, got %+v", got)
+	}
 }
 
 func TestReadPNGTextChunks_InvalidMagic(t *testing.T) {
@@ -425,15 +471,17 @@ func writeTestChunk(w *bytes.Buffer, chunkType string, data []byte) {
 }
 
 func TestExtractSDFromJPEG_WithExif(t *testing.T) {
-	// Our test JPEG has a valid EXIF UserComment (type UNDEFINED).
-	// This covers the path where exif.Decode succeeds, x.Get(UserComment) succeeds,
-	// but tag.StringVal() fails (UNDEFINED type can't be converted to string).
+	t.Parallel()
+	// The committed testdata/sd_exif_jpeg.jpg carries a UserComment in
+	// type UNDEFINED, which goexif returns as a non-string. The extractor
+	// must return (nil, nil) for that shape - no error, no partial metadata.
 	sd, err := extractSDFromJPEG("/workspace/Projets/monbooru/testdata/sd_exif_jpeg.jpg")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// StringVal fails for UNDEFINED type → returns nil, nil (expected)
-	_ = sd
+	if sd != nil {
+		t.Errorf("UNDEFINED-typed UserComment must not produce SDMetadata, got %+v", sd)
+	}
 }
 
 func TestReadPNGTextChunks_TooShort(t *testing.T) {
@@ -445,23 +493,26 @@ func TestReadPNGTextChunks_TooShort(t *testing.T) {
 }
 
 func TestReadPNGTextChunks_TruncatedChunkData(t *testing.T) {
-	// Valid PNG signature + chunk header but truncated data
+	t.Parallel()
+	// Valid PNG signature + chunk header claiming 100 bytes of tEXt data but
+	// no actual payload. readPNGTextChunks should bail out cleanly (returns
+	// nil error, no chunks) rather than surface the io.ReadFull error to
+	// the caller - the extractor silently dismisses corrupt chunks so the
+	// ingest pipeline still accepts the file.
 	var buf bytes.Buffer
-	buf.Write([]byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}) // PNG sig
-	// Write a chunk header claiming length=100 but provide no data
+	buf.Write([]byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A})
 	header := make([]byte, 8)
-	// length = 100 (big-endian)
 	header[0], header[1], header[2], header[3] = 0, 0, 0, 100
-	// type = "tEXt"
 	copy(header[4:], "tEXt")
 	buf.Write(header)
-	// Don't write the 100 bytes of data - ReadFull will fail → break
-
+	// Deliberately short - no 100 payload bytes.
 	chunks, err := readPNGTextChunks(bytes.NewReader(buf.Bytes()))
 	if err != nil {
-		t.Fatal(err) // readPNGTextChunks returns nil error even on truncated chunks
+		t.Fatalf("truncated chunk must not surface error, got %v", err)
 	}
-	_ = chunks
+	if len(chunks) != 0 {
+		t.Errorf("truncated chunk must not emit entries, got %v", chunks)
+	}
 }
 
 func TestReadPNGTextChunks_tEXtWithoutNull(t *testing.T) {
@@ -487,7 +538,9 @@ func TestReadPNGTextChunks_tEXtWithoutNull(t *testing.T) {
 }
 
 func TestReadPNGTextChunks_iTXtTooShort(t *testing.T) {
-	// iTXt chunk where rest is < 2 bytes after null separator - should be skipped
+	t.Parallel()
+	// iTXt with fewer than 2 bytes after the null separator must be dropped
+	// silently (no panic, no entry).
 	var buf bytes.Buffer
 	buf.Write([]byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A})
 	ihdr := make([]byte, 13)
@@ -495,16 +548,16 @@ func TestReadPNGTextChunks_iTXtTooShort(t *testing.T) {
 	ihdr[7] = 1
 	ihdr[8] = 8
 	writeTestChunk(&buf, "IHDR", ihdr)
-	// iTXt with keyword but only 1 byte after the null separator
-	data := []byte("keyword\x00X") // only 1 byte after null
-	writeTestChunk(&buf, "iTXt", data)
+	writeTestChunk(&buf, "iTXt", []byte("keyword\x00X")) // 1 byte after null
 	writeTestChunk(&buf, "IEND", nil)
 
 	chunks, err := readPNGTextChunks(bytes.NewReader(buf.Bytes()))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("malformed iTXt must not surface error, got %v", err)
 	}
-	_ = chunks
+	if _, ok := chunks["keyword"]; ok {
+		t.Errorf("short iTXt must not emit an entry, got %v", chunks)
+	}
 }
 
 func TestParseA1111_NegativeOnly(t *testing.T) {
@@ -529,7 +582,7 @@ func TestExtractSDFromWebP_NoEXIF(t *testing.T) {
 	buf.WriteString("WEBP")
 	dir := t.TempDir()
 	path := dir + "/empty.webp"
-	if err := writeFile(path, buf.Bytes()); err != nil {
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	sd, _, err := Extract(path, "webp")
@@ -542,9 +595,10 @@ func TestExtractSDFromWebP_NoEXIF(t *testing.T) {
 }
 
 func TestExtractSDFromWebP_NotWebP(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := dir + "/junk.webp"
-	if err := writeFile(path, []byte("not a webp at all")); err != nil {
+	if err := os.WriteFile(path, []byte("not a webp at all"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	sd, _, err := Extract(path, "webp")
@@ -554,15 +608,4 @@ func TestExtractSDFromWebP_NotWebP(t *testing.T) {
 	if sd != nil {
 		t.Error("expected nil for non-WebP data")
 	}
-}
-
-// writeFile is a helper for test file creation
-func writeFile(path string, data []byte) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	_, err = f.Write(data)
-	return err
 }

@@ -27,7 +27,7 @@ type Query struct {
 
 // Execute runs the query against the DB and returns paginated results.
 func Execute(database *db.DB, q Query) (*models.SearchResult, error) {
-	where, args, hasMissingFilter := buildWhere(q.Expr)
+	where, args, hasMissingFilter := buildWhereDB(q.Expr, database)
 
 	if !hasMissingFilter {
 		if where == "" {
@@ -132,7 +132,7 @@ func ExecuteAdjacent(database *db.DB, q Query, currentID int64) (*int64, *int64,
 		return nil, nil, nil
 	}
 
-	where, args, hasMissingFilter := buildWhere(q.Expr)
+	where, args, hasMissingFilter := buildWhereDB(q.Expr, database)
 	if !hasMissingFilter {
 		if where == "" {
 			where = "i.is_missing = 0"
@@ -221,7 +221,7 @@ func ExecuteForDelete(database *db.DB, expr Expr) ([]DeleteTarget, error) {
 // directly off the cursor so very large result sets never materialise in
 // Go. visit returning a non-nil error aborts the iteration.
 func ExecuteForDeleteStream(database *db.DB, expr Expr, visit func(DeleteTarget) error) error {
-	where, args, hasMissingFilter := buildWhere(expr)
+	where, args, hasMissingFilter := buildWhereDB(expr, database)
 	if !hasMissingFilter {
 		if where == "" {
 			where = "i.is_missing = 0"
@@ -338,7 +338,7 @@ func SuggestTagsWithFilter(database *db.DB, expr Expr, prefix, categoryName stri
 		return suggestByUsage(database, prefix, categoryName, limit)
 	}
 
-	where, args, hasMissingFilter := buildWhere(expr)
+	where, args, hasMissingFilter := buildWhereDB(expr, database)
 	if !hasMissingFilter {
 		if where == "" {
 			where = "i.is_missing = 0"
@@ -526,10 +526,37 @@ type whereBuilder struct {
 	parts            []string
 	args             []any
 	hasMissingFilter bool
+	// db is optional: when set, FilterExpr's default branch checks whether
+	// an unknown `prefix:value` key matches a real tag category. On miss
+	// the token falls back to a literal tag match so names like
+	// `nier:automata` remain searchable by their raw form. A nil db keeps
+	// the historic "always category-qualified" behaviour used in tests.
+	db *db.DB
 }
 
 func buildWhere(expr Expr) (string, []any, bool) {
-	b := &whereBuilder{}
+	return buildWhereDB(expr, nil)
+}
+
+// categoryExists reports whether the given name matches a tag_categories
+// row. Returns false when the builder has no DB handle (tests), which
+// preserves the old "always treat unknown key as category-qualified"
+// default for the pure-parser test path.
+func (b *whereBuilder) categoryExists(name string) bool {
+	if b.db == nil {
+		return true
+	}
+	var n int
+	if err := b.db.Read.QueryRow(
+		`SELECT 1 FROM tag_categories WHERE name = ? LIMIT 1`, name,
+	).Scan(&n); err != nil {
+		return false
+	}
+	return true
+}
+
+func buildWhereDB(expr Expr, database *db.DB) (string, []any, bool) {
+	b := &whereBuilder{db: database}
 	if expr != nil {
 		part := b.buildExpr(expr)
 		if part != "" {
@@ -691,16 +718,26 @@ func (b *whereBuilder) buildFilterExpr(e FilterExpr) string {
 		         OR EXISTS (SELECT 1 FROM comfyui_metadata cm WHERE cm.image_id = i.id AND cm.generation_hash = ?))`
 
 	default:
-		// Unknown key is treated as a category-qualified tag search.
-		// e.g. "character:cat" → images that have tag "cat" in category "character".
+		// Unknown key is either a category-qualified tag search
+		// (e.g. "character:cat") or a literal tag name that happens to
+		// contain a colon (e.g. "nier:automata", ":3"). Resolution is by
+		// existence: if the key matches a real tag category the token
+		// is split; otherwise the whole `key:val` is matched as a tag
+		// name so colon-bearing tags stay searchable by their raw form.
 		if e.Val == "" {
 			return "1=1"
 		}
-		b.args = append(b.args, e.Val, e.Key)
+		if b.categoryExists(e.Key) {
+			b.args = append(b.args, e.Val, e.Key)
+			return `EXISTS (SELECT 1 FROM image_tags it
+			         JOIN tags t ON t.id = it.tag_id
+			         JOIN tag_categories tc ON tc.id = t.category_id
+			         WHERE it.image_id = i.id AND t.name = ? AND tc.name = ?)`
+		}
+		b.args = append(b.args, e.Key+":"+e.Val)
 		return `EXISTS (SELECT 1 FROM image_tags it
 		         JOIN tags t ON t.id = it.tag_id
-		         JOIN tag_categories tc ON tc.id = t.category_id
-		         WHERE it.image_id = i.id AND t.name = ? AND tc.name = ?)`
+		         WHERE it.image_id = i.id AND t.name = ?)`
 	}
 }
 

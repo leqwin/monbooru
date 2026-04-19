@@ -87,11 +87,19 @@ func TestGenerate_SmallImage_NoUpscale(t *testing.T) {
 	srcPath := createTestJPEG(t, dir, "small.jpg", 100, 80)
 
 	dstDir := filepath.Join(dir, "thumbs")
-	Generate(srcPath, dstDir, 3, "jpeg")
+	if err := Generate(srcPath, dstDir, 3, "jpeg"); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
 
-	f, _ := os.Open(ThumbnailPath(dstDir, 3))
+	f, err := os.Open(ThumbnailPath(dstDir, 3))
+	if err != nil {
+		t.Fatalf("open thumbnail: %v", err)
+	}
 	defer f.Close()
-	img, _ := jpeg.Decode(f)
+	img, err := jpeg.Decode(f)
+	if err != nil {
+		t.Fatalf("decode thumbnail: %v", err)
+	}
 	b := img.Bounds()
 	// Should stay at original size (100x80)
 	if b.Dx() != 100 || b.Dy() != 80 {

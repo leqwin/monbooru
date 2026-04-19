@@ -38,6 +38,6 @@
 </div>
 {{end}}
 {{if .DangerZone}}
-{{template "partials/detail_danger_zone.html" (dict "ImageID" .ImageID "ImageTags" .ImageTags "HasUserTags" .HasUserTags "ImageTaggers" .ImageTaggers "CSRFToken" .CSRFToken "BackQuery" .BackQuery "BackSort" .BackSort "BackOrder" .BackOrder "BackPage" .BackPage "BackSeed" .BackSeed "OOB" true)}}
+{{template "partials/detail_danger_zone.html" (dict "ImageID" .ImageID "ImageTags" .ImageTags "HasUserTags" .HasUserTags "ImageTaggers" .ImageTaggers "CSRFToken" .CSRFToken "BackQuery" .BackQuery "BackSort" .BackSort "BackOrder" .BackOrder "BackPage" .BackPage "BackSeed" .BackSeed "CurrentFolder" .CurrentFolder "OOB" true)}}
 {{end}}
 {{end}}

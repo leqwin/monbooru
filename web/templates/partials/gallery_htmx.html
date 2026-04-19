@@ -5,5 +5,5 @@
   {{template "partials/sidebar_content.html" .}}
 </div>
 {{/* OOB result count so "N images" in the header reflects the new search */}}
-<span id="result-count" class="result-count" hx-swap-oob="true">{{.Result.Total}} images</span>
+<span id="result-count" class="result-count" hx-swap-oob="true">{{.Result.Total}} {{plural .Result.Total "image" "images"}}</span>
 {{end}}

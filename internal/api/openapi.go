@@ -336,6 +336,7 @@ func (h *Handler) openAPIJSON(w http.ResponseWriter, r *http.Request) {
 // content updates automatically whenever buildSpec changes.
 func (h *Handler) openAPIDocs(w http.ResponseWriter, r *http.Request) {
 	view := extractDocsView(buildSpec(h.cfg.Server.BaseURL))
+	view.APIEnabled = h.cfg.Auth.APIToken != ""
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := docsTemplate.Execute(w, view); err != nil {
 		http.Error(w, "template error", http.StatusInternalServerError)
@@ -343,11 +344,12 @@ func (h *Handler) openAPIDocs(w http.ResponseWriter, r *http.Request) {
 }
 
 type docsView struct {
-	Title     string
-	Version   string
-	BaseURL   string
-	Endpoints []endpointView
-	Schemas   []schemaView
+	Title      string
+	Version    string
+	BaseURL    string
+	APIEnabled bool // true when an API token is configured
+	Endpoints  []endpointView
+	Schemas    []schemaView
 }
 
 type endpointView struct {
@@ -590,8 +592,14 @@ var docsTemplate = template.Must(template.New("api-docs").Parse(`<!DOCTYPE html>
 </style>
 </head>
 <body>
+ <p class="muted"><a href="/">← Back</a></p>
  <h1>{{.Title}}</h1>
  <p class="muted">Version {{.Version}} · base URL <code>{{.BaseURL}}</code></p>
+ {{if .APIEnabled}}
+ <p style="color:#22aa44;border:1px solid #22aa44;padding:4px 8px;">API is active - authenticate with your bearer token from Settings → Authentication.</p>
+ {{else}}
+ <p style="color:#ffaa00;border:1px solid #ffaa00;padding:4px 8px;">API is disabled - generate a token in Settings → Authentication to enable it. All endpoints currently return <code>503 api_disabled</code>.</p>
+ {{end}}
  <p>Every endpoint except <code>/docs</code> and <code>/openapi.json</code> requires <code>Authorization: Bearer &lt;token&gt;</code>. Generate a token from Settings → Authentication; while no token is set every authenticated endpoint returns <code>503 api_disabled</code>.</p>
  <p>Endpoints take an optional <code>?gallery=&lt;name&gt;</code> (or <code>X-Monbooru-Gallery</code> header) to target a specific gallery; omit both for the active one.</p>
  <p class="muted">Raw spec: <a href="/api/v1/openapi.json">openapi.json</a></p>

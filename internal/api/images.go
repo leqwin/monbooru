@@ -557,15 +557,21 @@ func (h *Handler) addImageTags(w http.ResponseWriter, r *http.Request) {
 }
 
 // resolveCategoryTag splits an input like "artist:foo" into (artist_id, "foo"),
-// or returns (general_id, "tagname") for a bare name. Unknown category names
-// are reported as an error so the caller can surface a tag_warnings entry.
+// or returns (general_id, "tagname") for a bare name. When the prefix before
+// the first colon is not a real category the whole input is kept as a
+// general-category tag (e.g. "nier:automata", ":3") so tag names containing
+// colons round-trip through the API without a tag_warnings entry.
 func (h *Handler) resolveCategoryTag(g Gallery, input string) (int64, string, error) {
 	input = strings.TrimSpace(input)
 	catName := "general"
 	tagName := input
 	if idx := strings.Index(input, ":"); idx > 0 {
-		catName = input[:idx]
-		tagName = input[idx+1:]
+		var catID int64
+		if err := g.DB.Read.QueryRow(
+			`SELECT id FROM tag_categories WHERE name = ?`, input[:idx],
+		).Scan(&catID); err == nil {
+			return catID, input[idx+1:], nil
+		}
 	}
 	var catID int64
 	if err := g.DB.Read.QueryRow(
@@ -623,26 +629,39 @@ func (h *Handler) removeImageTags(w http.ResponseWriter, r *http.Request) {
 }
 
 // resolveImageTagID finds the single tag_id attached to imageID that matches
-// tagName. A `category:name` input targets that category exactly; a plain
-// name is only accepted when it resolves to exactly one tag on the image.
-// Returns (0, nil) when the tag is not present on the image.
+// tagName. A `category:name` input targets that category exactly when the
+// prefix is a real category; otherwise the whole string is matched as a
+// literal tag name (so colon-bearing names like "nier:automata" resolve
+// without disambiguation). When the prefix IS a real category but the
+// image has no such (category, name) pair, resolution falls through to a
+// literal-name lookup so a general-category tag whose name collides with
+// a real category prefix (e.g. "artist:foo" stored whole) is still
+// removable. A plain name is accepted only when it resolves to exactly
+// one tag on the image. Returns (0, nil) when the tag is not present.
 func (h *Handler) resolveImageTagID(g Gallery, imageID int64, tagName string) (int64, error) {
 	tagName = strings.TrimSpace(tagName)
 	if idx := strings.Index(tagName, ":"); idx > 0 {
 		catName := tagName[:idx]
-		bareName := tagName[idx+1:]
-		var tagID int64
-		err := g.DB.Read.QueryRow(
-			`SELECT t.id FROM image_tags it
-			 JOIN tags t             ON t.id  = it.tag_id
-			 JOIN tag_categories tc  ON tc.id = t.category_id
-			 WHERE it.image_id = ? AND t.name = ? AND tc.name = ?`,
-			imageID, bareName, catName,
-		).Scan(&tagID)
-		if err != nil {
-			return 0, nil
+		var catID int64
+		if g.DB.Read.QueryRow(
+			`SELECT id FROM tag_categories WHERE name = ?`, catName,
+		).Scan(&catID) == nil {
+			bareName := tagName[idx+1:]
+			var tagID int64
+			if err := g.DB.Read.QueryRow(
+				`SELECT t.id FROM image_tags it
+				 JOIN tags t             ON t.id  = it.tag_id
+				 JOIN tag_categories tc  ON tc.id = t.category_id
+				 WHERE it.image_id = ? AND t.name = ? AND tc.name = ?`,
+				imageID, bareName, catName,
+			).Scan(&tagID); err == nil {
+				return tagID, nil
+			}
+			// Category-qualified miss: fall through to the literal-name
+			// branch so a tag whose name happens to contain `:` and whose
+			// prefix matches a real category (e.g. a general-category
+			// "artist:foo") still resolves on the image.
 		}
-		return tagID, nil
 	}
 
 	rows, err := g.DB.Read.Query(

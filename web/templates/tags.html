@@ -145,7 +145,7 @@
                hx-swap="innerHTML"
                hx-include="this"
                onkeydown="handleSuggestKey(event, 'merge-suggest', 'merge-canon-input')">
-        <div id="merge-suggest" class="suggest-dropdown"></div>
+        <div id="merge-suggest" class="suggest-dropdown tag-suggest-dropdown"></div>
       </div>
     </div>
     <div id="merge-error"></div>
@@ -192,7 +192,7 @@ document.querySelectorAll('.btn-delete-tag').forEach(function(btn) {
           });
         }
       });
-    }, 'This cannot be undone.');
+    }, 'This cannot be undone.', 'Delete');
   });
 });
 

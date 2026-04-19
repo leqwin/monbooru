@@ -12,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/leqwin/monbooru/internal/config"
-	"github.com/leqwin/monbooru/internal/gallery"
 	"github.com/leqwin/monbooru/internal/logx"
 )
 
@@ -20,8 +19,8 @@ var errJobRunning = errors.New("a job is running; try again when it finishes")
 
 // SwitchGallery changes the runtime-active gallery. The change is ephemeral:
 // the persisted default_gallery in monbooru.toml is only touched by
-// SetDefault. After the swap, a sync is kicked off because the watcher was
-// off while the target was inactive.
+// SetDefault. Every gallery runs its own watcher for the whole process
+// lifetime, so the swap does not stop/start watchers or trigger a sync.
 func (s *Server) SwitchGallery(name string) error {
 	if s.jobs.IsRunning() {
 		return errJobRunning
@@ -31,21 +30,15 @@ func (s *Server) SwitchGallery(name string) error {
 		s.ctxMu.Unlock()
 		return nil
 	}
-	target, ok := s.contexts[name]
-	if !ok {
+	if _, ok := s.contexts[name]; !ok {
 		s.ctxMu.Unlock()
 		return fmt.Errorf("unknown gallery %q", name)
 	}
 	oldName := s.activeName
-	if old := s.contexts[oldName]; old != nil {
-		old.stopWatcher()
-	}
 	s.activeName = name
-	target.startWatcher(s.cfg.Gallery.WatchEnabled, s.cfg.Gallery.MaxFileSizeMB, s.jobs)
 	s.ctxMu.Unlock()
 
 	logx.Infof("gallery: switched from %q to %q", oldName, name)
-	s.kickoffSyncForActive()
 	return nil
 }
 
@@ -71,41 +64,6 @@ func (s *Server) SetDefault(name string) error {
 	return nil
 }
 
-// kickoffSyncForActive starts a background Sync on the active gallery.
-// Silent when another job owns the manager.
-func (s *Server) kickoffSyncForActive() {
-	s.ctxMu.RLock()
-	cx := s.contexts[s.activeName]
-	if cx == nil || cx.Degraded {
-		s.ctxMu.RUnlock()
-		return
-	}
-	database := cx.DB
-	galleryPath := cx.GalleryPath
-	thumbnailsPath := cx.ThumbnailsPath
-	maxFileSizeMB := s.cfg.Gallery.MaxFileSizeMB
-	galleryName := cx.Name
-	s.ctxMu.RUnlock()
-
-	if err := s.jobs.Start("sync"); err != nil {
-		return
-	}
-	go func() {
-		ctx := s.jobs.Context()
-		result, err := gallery.Sync(ctx, database, galleryPath, thumbnailsPath, maxFileSizeMB, s.jobs.Update)
-		if ctx.Err() != nil {
-			s.jobs.Complete(fmt.Sprintf("[%s] sync cancelled", galleryName))
-			return
-		}
-		if err != nil {
-			s.jobs.Fail(err.Error())
-			return
-		}
-		s.jobs.Complete(fmt.Sprintf("[%s] %d added, %d removed, %d moved",
-			galleryName, result.Added, result.Removed, result.Moved))
-	}()
-}
-
 // AddGallery opens a new gallery and appends it to the config. DB and
 // thumbnails directories are created under paths.data_path/<name>/.
 func (s *Server) AddGallery(name, galleryPath string) error {
@@ -116,6 +74,13 @@ func (s *Server) AddGallery(name, galleryPath string) error {
 	}
 	if galleryPath == "" {
 		return fmt.Errorf("gallery path must not be empty")
+	}
+	// Reject non-existent or unreadable paths at add time. Existing configs
+	// that point at a temporarily-unreadable path still load (degraded mode);
+	// this gate only applies to the explicit Add mutation so the user doesn't
+	// walk away with a gallery that can never sync or watch.
+	if _, err := os.ReadDir(galleryPath); err != nil {
+		return fmt.Errorf("gallery path %q is not readable: %w", galleryPath, err)
 	}
 	if s.jobs.IsRunning() {
 		return errJobRunning
@@ -144,6 +109,7 @@ func (s *Server) AddGallery(name, galleryPath string) error {
 	}
 	s.contexts[name] = cx
 	s.cfg.Galleries = append(s.cfg.Galleries, g)
+	cx.startWatcher(s.cfg.Gallery.WatchEnabled, s.cfg.Gallery.MaxFileSizeMB, s.jobs)
 	s.ctxMu.Unlock()
 
 	if err := s.saveConfig(); err != nil {
@@ -270,11 +236,11 @@ func (s *Server) RenameGallery(oldName, newName string) error {
 	}
 	if s.activeName == oldName {
 		s.activeName = newName
-		newCx.startWatcher(s.cfg.Gallery.WatchEnabled, s.cfg.Gallery.MaxFileSizeMB, s.jobs)
 	}
 	if s.cfg.DefaultGallery == oldName {
 		s.cfg.DefaultGallery = newName
 	}
+	newCx.startWatcher(s.cfg.Gallery.WatchEnabled, s.cfg.Gallery.MaxFileSizeMB, s.jobs)
 	s.ctxMu.Unlock()
 
 	if err := s.saveConfig(); err != nil {

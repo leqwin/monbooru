@@ -32,6 +32,50 @@ type FolderNode struct {
 	Children []FolderNode
 }
 
+// SourceCounts holds the non-missing image counts for each source_type
+// branch surfaced in the gallery sidebar's Source tree.
+type SourceCounts struct {
+	AI      int // a1111 + comfyui + combined
+	A1111   int // standalone or combined
+	Comfyui int // standalone or combined
+	None    int
+}
+
+// SourceCountsQuery returns the source-tree counts for the given database.
+// Used by the sidebar to surface `(N)` next to each Source entry.
+func SourceCountsQuery(database *db.DB) (SourceCounts, error) {
+	var out SourceCounts
+	rows, err := database.Read.Query(
+		`SELECT source_type, COUNT(*) FROM images WHERE is_missing = 0 GROUP BY source_type`,
+	)
+	if err != nil {
+		return out, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var src string
+		var n int
+		if err := rows.Scan(&src, &n); err != nil {
+			return out, err
+		}
+		switch src {
+		case "a1111":
+			out.A1111 += n
+			out.AI += n
+		case "comfyui":
+			out.Comfyui += n
+			out.AI += n
+		case "a1111,comfyui":
+			out.A1111 += n
+			out.Comfyui += n
+			out.AI += n
+		case "none", "":
+			out.None += n
+		}
+	}
+	return out, rows.Err()
+}
+
 // Sync performs a full 3-phase gallery sync.
 // progress is called with (processed, total, message) tuples, matching
 // jobs.Manager.Update so the handler can forward the call verbatim.
@@ -356,8 +400,9 @@ func Sync(ctx context.Context, database *db.DB, galleryPath, thumbnailsPath stri
 		tags.RecalcAndPruneDB(database)
 	}
 
-	// Phase 3: Report
-	progress(0, 0, fmt.Sprintf("Done: %d added, %d removed, %d moved, %d duplicates",
+	// Phase 3: Report. "missing" rather than "removed" because Sync marks
+	// gone-from-disk rows as is_missing=1 — it does not delete them.
+	progress(0, 0, fmt.Sprintf("Done: %d added, %d missing, %d moved, %d duplicates",
 		result.Added, result.Removed, result.Moved, result.Duplicates))
 
 	return result, nil

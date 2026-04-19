@@ -15,7 +15,8 @@
             hx-delete="/images/{{.Image.ID}}"
             hx-swap="none"
             hx-headers='{"X-CSRF-Token":"{{.CSRFToken}}"}'
-            hx-confirm="Remove this missing image from the library?">Remove from library</button>
+            hx-confirm="Remove this missing image from the library?"
+            data-confirm-ok="Remove">Remove from library</button>
   </div>
   {{end}}
 
@@ -29,6 +30,7 @@
       {{else}}
       <a href="/#img-{{.Image.ID}}" class="back-link">← Images</a>
       {{end}}
+      {{if .Filename}}<span class="detail-filename mono-small" title="{{.Filename}}">{{.Filename}}</span>{{end}}
     </div>
     <div class="detail-topbar-right">
       <div class="detail-meta-nav">
@@ -124,8 +126,19 @@
 
       {{/* Danger zone: delete + remove all tags + remove auto-tagged. Rendered
            via a partial so HTMX tag-list updates can refresh it via OOB swap. */}}
-      {{template "partials/detail_danger_zone.html" (dict "ImageID" .Image.ID "ImageTags" .ImageTags "HasUserTags" .HasUserTags "ImageTaggers" .ImageTaggers "CSRFToken" .CSRFToken "BackQuery" .BackQuery "BackSort" .BackSort "BackOrder" .BackOrder "BackPage" .BackPage "BackSeed" .BackSeed)}}
+      {{template "partials/detail_danger_zone.html" (dict "ImageID" .Image.ID "ImageTags" .ImageTags "HasUserTags" .HasUserTags "ImageTaggers" .ImageTaggers "CSRFToken" .CSRFToken "BackQuery" .BackQuery "BackSort" .BackSort "BackOrder" .BackOrder "BackPage" .BackPage "BackSeed" .BackSeed "CurrentFolder" .Image.FolderPath)}}
       <script>
+      function openMoveImageDialog() {
+        var dlg = document.getElementById('move-image-dialog');
+        var input = document.getElementById('move-image-folder');
+        if (!dlg || !input) return;
+        input.value = dlg.dataset.currentFolder || '';
+        var sg = document.getElementById('move-image-suggest');
+        if (sg) sg.innerHTML = '';
+        dlg.showModal();
+        input.focus();
+        input.select();
+      }
       function submitRemoveAutoTags(imageId) {
         var form = document.getElementById('remove-auto-form');
         var names = Array.from(form.querySelectorAll('input[name="taggers"]:checked')).map(function(cb){ return cb.value; });
@@ -141,7 +154,7 @@
     {{/* Right: metadata panel */}}
     <div class="detail-meta-col">
     <details class="detail-meta-panel" open>
-      <summary>▶ Metadata</summary>
+      <summary>Metadata</summary>
       <div class="detail-meta-content">
 
         {{/* Basic metadata table */}}
@@ -259,13 +272,13 @@
           {{if .ComfyNodes}}
           <div class="node-list">
             {{range .ComfyNodes}}
-            <div class="node-entry">
+            <div class="node-entry" id="comfy-node-{{.Key}}">
               <div class="node-header"><span class="node-key">[{{.Key}}]</span> <span class="node-title">{{.Title}}</span>{{if ne .Title .ClassType}} <span class="node-class">{{.ClassType}}</span>{{end}}</div>
               {{if .Params}}
               <table class="node-params">
                 {{range .Params}}
                 <tr><td class="node-param-name">{{.Name}}</td><td class="node-param-value{{if .IsRef}} node-ref{{end}}">
-                  {{if isLongValue .Value}}<details class="long-value"><summary>{{truncate .Value 140}}…</summary><pre class="long-value-full">{{.Value}}</pre></details>{{else}}{{.Value}}{{end}}
+                  {{if .IsRef}}<a href="#comfy-node-{{comfyRefTarget .Value}}" class="node-ref-link">{{.Value}}</a>{{else if isLongValue .Value}}<details class="long-value"><summary>{{truncate .Value 140}}…</summary><pre class="long-value-full">{{.Value}}</pre></details>{{else}}{{.Value}}{{end}}
                 </td></tr>
                 {{end}}
               </table>

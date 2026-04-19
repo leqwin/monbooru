@@ -18,13 +18,16 @@ import (
 // yields the gallery root itself. Paths containing ".." or absolute
 // paths are rejected so callers cannot escape the gallery root.
 func ResolveSubdir(galleryPath, folder string) (string, error) {
-	folder = strings.Trim(strings.TrimSpace(folder), "/\\")
+	folder = strings.TrimSpace(folder)
 	if folder == "" {
 		return galleryPath, nil
 	}
+	// Reject absolute paths before the slash trim - otherwise "/tmp/x"
+	// is trimmed to "tmp/x" and looks relative by the time IsAbs runs.
 	if filepath.IsAbs(folder) {
 		return "", fmt.Errorf("folder must be relative to the gallery root")
 	}
+	folder = strings.Trim(folder, "/\\")
 	cleaned := filepath.Clean(filepath.ToSlash(folder))
 	if cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.Contains(cleaned, "/../") {
 		return "", fmt.Errorf("folder path may not contain ..")

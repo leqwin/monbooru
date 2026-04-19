@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/leqwin/monbooru/internal/db"
+	"github.com/leqwin/monbooru/internal/models"
 )
 
 func setupTestDB(t *testing.T) (*db.DB, *Service) {
@@ -308,31 +309,38 @@ func TestMergeGeneralIntoCategorized_AmbiguousLeftAlone(t *testing.T) {
 }
 
 func TestSuggestTags_PrefixFirst(t *testing.T) {
-	_, svc := setupTestDB(t)
+	database, svc := setupTestDB(t)
 	catID := generalCategoryID(t, svc)
 
+	// Two prefix matches (abc_123, abc_456) + one substring match (xyz_abc).
+	// Make xyz_abc the most-used tag so any plain "order by usage" would
+	// float it to the top. The spec promises prefix matches win regardless.
 	svc.GetOrCreateTag("abc_123", catID)
 	svc.GetOrCreateTag("xyz_abc", catID)
 	svc.GetOrCreateTag("abc_456", catID)
+	imgA := insertTestImage(t, database, "abc_img_a")
+	imgB := insertTestImage(t, database, "abc_img_b")
+	xyzTag, _ := svc.GetOrCreateTag("xyz_abc", catID)
+	for _, img := range []int64{imgA, imgB} {
+		svc.AddTagToImage(img, xyzTag.ID, false, nil)
+	}
 
-	// Increment usage for xyz_abc so it would rank higher if not for prefix rule
-	// (we won't actually add to images - just note that prefix should come first)
 	results, err := svc.SuggestTags("abc", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results) < 2 {
-		t.Fatalf("expected at least 2 suggestions, got %d", len(results))
+	if len(results) < 3 {
+		t.Fatalf("expected 3 suggestions, got %d: %+v", len(results), results)
 	}
-	// First two must start with "abc"
-	for i := 0; i < 2 && i < len(results); i++ {
-		if len(results[i].Name) < 3 || results[i].Name[:3] != "abc" {
-			// xyz_abc contains "abc" but doesn't start with it
-			if results[i].Name == "xyz_abc" && i < 2 {
-				// It's in the result (substring match), just not in prefix group
-				// This is OK if prefix group is returned first
-			}
+	// The first two results must both start with "abc" even though xyz_abc
+	// has higher usage - prefix matches win.
+	for i := 0; i < 2; i++ {
+		if !strings.HasPrefix(results[i].Name, "abc") {
+			t.Errorf("position %d: got %q, want a name starting with 'abc' (full order: %+v)", i, results[i].Name, results)
 		}
+	}
+	if results[2].Name != "xyz_abc" {
+		t.Errorf("position 2: got %q, want xyz_abc (substring match last)", results[2].Name)
 	}
 }
 
@@ -425,18 +433,43 @@ func TestListTags_SortByUsage(t *testing.T) {
 	database, svc := setupTestDB(t)
 	catID := generalCategoryID(t, svc)
 
-	imgID := insertTestImage(t, database, "usage_sort")
+	// Three images. sort_c used by 3, sort_a by 2, sort_b by 1. Expected
+	// descending order: sort_c, sort_a, sort_b.
+	img1 := insertTestImage(t, database, "usage_sort_1")
+	img2 := insertTestImage(t, database, "usage_sort_2")
+	img3 := insertTestImage(t, database, "usage_sort_3")
 	tagA, _ := svc.GetOrCreateTag("sort_a", catID)
 	tagB, _ := svc.GetOrCreateTag("sort_b", catID)
-	svc.AddTagToImage(imgID, tagA.ID, false, nil)
-	// tagB has 0 usage, tagA has 1
+	tagC, _ := svc.GetOrCreateTag("sort_c", catID)
+	for _, img := range []int64{img1, img2} {
+		svc.AddTagToImage(img, tagA.ID, false, nil)
+	}
+	svc.AddTagToImage(img3, tagB.ID, false, nil)
+	for _, img := range []int64{img1, img2, img3} {
+		svc.AddTagToImage(img, tagC.ID, false, nil)
+	}
 
-	tags, _, err := svc.ListTags(TagFilter{Sort: "usage", Limit: 100})
+	tags, _, err := svc.ListTags(TagFilter{Sort: "usage", Prefix: "sort_", Limit: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = tagB
-	_ = tags
+	if len(tags) < 3 {
+		t.Fatalf("expected at least 3 tags with prefix sort_, got %d", len(tags))
+	}
+	wantOrder := []string{"sort_c", "sort_a", "sort_b"}
+	for i, want := range wantOrder {
+		if tags[i].Name != want {
+			t.Errorf("position %d: got %q, want %q (full order: %+v)", i, tags[i].Name, want, tagNames(tags))
+		}
+	}
+}
+
+func tagNames(ts []models.Tag) []string {
+	out := make([]string, 0, len(ts))
+	for _, t := range ts {
+		out = append(out, t.Name)
+	}
+	return out
 }
 
 func TestRecalcAndPrune_CountsOnlyNonMissing(t *testing.T) {
@@ -657,11 +690,28 @@ func TestRemoveTagFromImage_NotOnImage(t *testing.T) {
 	catID := generalCategoryID(t, svc)
 	imgID := insertTestImage(t, database, "rem_not_on")
 
-	tag, _ := svc.GetOrCreateTag("not_on_image", catID)
-	// Remove a tag that was never added - should not error
-	err := svc.RemoveTagFromImage(imgID, tag.ID)
-	// Returns error or not - behavior depends on implementation
-	_ = err
+	tag, err := svc.GetOrCreateTag("not_on_image", catID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Removing a tag that isn't on the image is a no-op that must NOT error.
+	// This lets callers rebuild an image's tag set idempotently.
+	if err := svc.RemoveTagFromImage(imgID, tag.ID); err != nil {
+		t.Errorf("removing absent tag must be a no-op, got err %v", err)
+	}
+	// No image_tags row existed so the auto-prune branch is never entered;
+	// the tag sits at usage_count=0 and is still retrievable. Callers that
+	// want the tag gone entirely must call svc.RecalcAndPruneCount.
+	got, err := svc.GetTag(tag.ID)
+	if err != nil {
+		t.Fatalf("tag lookup: %v", err)
+	}
+	if got == nil {
+		t.Fatal("tag should still exist (auto-prune only fires when a row is deleted)")
+	}
+	if got.UsageCount != 0 {
+		t.Errorf("UsageCount = %d, want 0 after no-op remove", got.UsageCount)
+	}
 }
 
 func TestListCategories(t *testing.T) {
@@ -704,16 +754,31 @@ func TestListTags_DefaultLimit(t *testing.T) {
 func TestListTags_WithPage(t *testing.T) {
 	_, svc := setupTestDB(t)
 	catID := generalCategoryID(t, svc)
+	// Three tags so page 1 with limit=1 returns a different single tag than
+	// page 0 - proves the OFFSET math.
 	svc.GetOrCreateTag("page_tag_a", catID)
 	svc.GetOrCreateTag("page_tag_b", catID)
+	svc.GetOrCreateTag("page_tag_c", catID)
 
-	// Page 1 with limit 1 should get different result than page 0
-	_, total, err := svc.ListTags(TagFilter{Prefix: "page_tag_", Limit: 1, PageIndex: 0})
+	p0, total, err := svc.ListTags(TagFilter{Prefix: "page_tag_", Sort: "name", Limit: 1, PageIndex: 0})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if total < 2 {
-		t.Errorf("total = %d, want >= 2", total)
+	if total != 3 {
+		t.Errorf("total = %d, want 3", total)
+	}
+	if len(p0) != 1 {
+		t.Fatalf("page 0 len = %d, want 1", len(p0))
+	}
+	p1, _, err := svc.ListTags(TagFilter{Prefix: "page_tag_", Sort: "name", Limit: 1, PageIndex: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p1) != 1 {
+		t.Fatalf("page 1 len = %d, want 1", len(p1))
+	}
+	if p0[0].Name == p1[0].Name {
+		t.Errorf("page 0 and page 1 returned the same tag %q; pagination is broken", p0[0].Name)
 	}
 }
 
@@ -740,17 +805,13 @@ func TestGetTag_WithCanonical(t *testing.T) {
 func TestValidateTagName_TooLong(t *testing.T) {
 	_, svc := setupTestDB(t)
 	catID := generalCategoryID(t, svc)
-	long := "a" + string(make([]byte, 200)) // 201 bytes
-	for i := range long {
-		_ = i
-	}
-	long = ""
-	for i := 0; i < 201; i++ {
-		long += "a"
-	}
-	_, err := svc.GetOrCreateTag(long, catID)
-	if err == nil {
+	long := strings.Repeat("a", 201)
+	if _, err := svc.GetOrCreateTag(long, catID); err == nil {
 		t.Error("expected error for tag name > 200 chars")
+	}
+	// A 200-char name is on the boundary and must still be accepted.
+	if _, err := svc.GetOrCreateTag(strings.Repeat("b", 200), catID); err != nil {
+		t.Errorf("200-char name should be accepted, got %v", err)
 	}
 }
 
@@ -760,6 +821,27 @@ func TestValidateTagName_PunctuationOnly(t *testing.T) {
 	_, err := svc.GetOrCreateTag("---", catID)
 	if err == nil {
 		t.Error("expected error for punctuation-only tag name")
+	}
+}
+
+func TestValidateTagName_AllowsColon(t *testing.T) {
+	// Colon was moved into the allowed set so legitimate names like `:3`
+	// and `nier:automata` round-trip. The colon doubles as the
+	// category:tag separator at input-parse time, but that's resolved
+	// before names reach the validator.
+	_, svc := setupTestDB(t)
+	catID := generalCategoryID(t, svc)
+
+	for _, name := range []string{":3", "nier:automata"} {
+		if _, err := svc.GetOrCreateTag(name, catID); err != nil {
+			t.Errorf("GetOrCreateTag(%q) error: %v", name, err)
+		}
+	}
+
+	// All-punctuation (colons and hyphens only) must still be rejected:
+	// the "must contain a letter or digit" rule is unchanged.
+	if _, err := svc.GetOrCreateTag("::-:", catID); err == nil {
+		t.Error("expected all-punctuation name to be rejected even with colon allowed")
 	}
 }
 
