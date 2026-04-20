@@ -12,8 +12,18 @@ document.addEventListener('keydown', function(e) {
     if (isInput) { e.target.blur(); return; }
     const openDialogs = document.querySelectorAll('dialog[open]');
     if (openDialogs.length > 0) { openDialogs.forEach(function(d) { d.close(); }); return; }
-    if (document.getElementById('detail-page')) {
+    var detailPage = document.getElementById('detail-page');
+    if (detailPage) {
       e.preventDefault();
+      // If the page was reached via a Similar-images click (the server-set
+      // data-ref marks this) walk the browser history one step. Using
+      // history.back() rather than navigating to data-ref preserves the
+      // full chain: the previous detail page is still the one the user saw,
+      // with its own predecessors intact.
+      if (detailPage.dataset.ref && history.length > 1) {
+        history.back();
+        return;
+      }
       var backLink = document.querySelector('.back-link');
       if (backLink) { backLink.click(); }
       else { window.location.href = '/'; }
@@ -28,13 +38,17 @@ document.addEventListener('keydown', function(e) {
     return;
   }
 
-  // 't' → focus tag input (detail page) or search bar (gallery)
-  if (e.key === 't' && !isInput) {
-    e.preventDefault();
-    const tagInput = document.getElementById('tag-input');
-    if (tagInput) { tagInput.focus(); return; }
+  // 's' → focus the search input (on any page that has one)
+  if (e.key === 's' && !isInput) {
     const si = document.getElementById('search-input');
-    if (si) { si.focus(); si.select(); }
+    if (si) { e.preventDefault(); si.focus(); si.select(); }
+    return;
+  }
+
+  // 't' → focus the tag input (detail page)
+  if (e.key === 't' && !isInput) {
+    const tagInput = document.getElementById('tag-input');
+    if (tagInput) { e.preventDefault(); tagInput.focus(); }
     return;
   }
 
@@ -42,6 +56,17 @@ document.addEventListener('keydown', function(e) {
   if ((e.key === 'Delete' || e.key === 'Del') && !isInput) {
     var delBtn = document.getElementById('delete-image-btn');
     if (delBtn) { e.preventDefault(); delBtn.click(); }
+    return;
+  }
+
+  // Spacebar → play/pause the detail-page video. Guarded by !isInput so it
+  // doesn't hijack spaces inside the tag or search inputs.
+  if (e.key === ' ' && !isInput) {
+    var vid = document.querySelector('.detail-video');
+    if (vid) {
+      e.preventDefault();
+      if (vid.paused) vid.play(); else vid.pause();
+    }
     return;
   }
 
@@ -104,6 +129,21 @@ document.addEventListener('keydown', function(e) {
     const focused = document.querySelector('.thumb-card.focused a');
     if (focused) { window.location.href = focused.href; }
     return;
+  }
+});
+
+// On a similar-click detail page (marked by data-ref), the "← Previous image"
+// link walks browser history instead of navigating to its href so chains of
+// any depth unwind one page at a time - matching the Escape keybinding. The
+// href stays wired for cold loads (direct URL, bookmarked tab) where history
+// has no predecessor.
+document.addEventListener('click', function(e) {
+  var link = e.target.closest('.back-link');
+  if (!link) return;
+  var detailPage = document.getElementById('detail-page');
+  if (detailPage && detailPage.dataset.ref && history.length > 1) {
+    e.preventDefault();
+    history.back();
   }
 });
 

@@ -4,7 +4,8 @@
   <h3>Similar images</h3>
   <div class="related-mini-grid">
     {{range .Images}}
-    <a href="/images/{{.ID}}" class="related-mini-card" title="Image {{.ID}}">
+    <a href="/images/{{.ID}}?ref={{$.SourceID}}&back_q={{$.BackQuery}}&back_sort={{$.BackSort}}&back_order={{$.BackOrder}}{{if $.BackPage}}&back_page={{$.BackPage}}{{end}}{{if $.BackSeed}}&back_seed={{$.BackSeed}}{{end}}"
+       class="related-mini-card" title="Image {{.ID}}">
       <img src="/thumbnails/{{$.ActiveGallery}}/{{.ID}}.jpg" alt="image {{.ID}}" loading="lazy"
            onerror="this.parentElement.innerHTML='?'">
     </a>

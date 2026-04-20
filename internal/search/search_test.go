@@ -904,6 +904,23 @@ func TestExecute_TagSearch(t *testing.T) {
 	}
 }
 
+func TestExecute_SkipCount(t *testing.T) {
+	database, cfg := setupSearchDB(t)
+	ingestTestImage(t, database, cfg, "sc1.png")
+	ingestTestImage(t, database, cfg, "sc2.png")
+
+	result, err := Execute(database, Query{Page: 1, Limit: 40, SkipCount: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Total != 0 {
+		t.Errorf("Total = %d, want 0 (skip-count)", result.Total)
+	}
+	if len(result.Results) != 2 {
+		t.Errorf("Results = %d, want 2", len(result.Results))
+	}
+}
+
 func TestExecute_DefaultPagination(t *testing.T) {
 	database, cfg := setupSearchDB(t)
 	ingestTestImage(t, database, cfg, "p1.png")
@@ -1013,6 +1030,115 @@ func TestExecuteAdjacent_RandomNoSeed(t *testing.T) {
 	prev, next, err := ExecuteAdjacent(database, Query{Sort: "random"}, 1)
 	if err != nil || prev != nil || next != nil {
 		t.Errorf("random adjacency without seed must be nil/nil, got prev=%v next=%v err=%v", prev, next, err)
+	}
+}
+
+func TestExecutePosition_Newest(t *testing.T) {
+	database, cfg := setupSearchDB(t)
+	ingestTestImage(t, database, cfg, "pos_a.png")
+	ingestTestImage(t, database, cfg, "pos_b.png")
+	ingestTestImage(t, database, cfg, "pos_c.png")
+
+	result, err := Execute(database, Query{Sort: "newest", Order: "desc", Page: 1, Limit: 40})
+	if err != nil || len(result.Results) != 3 {
+		t.Fatalf("setup Execute: err=%v len=%d", err, len(result.Results))
+	}
+	newest, middle, oldest := result.Results[0].ID, result.Results[1].ID, result.Results[2].ID
+
+	cases := []struct {
+		name    string
+		id      int64
+		wantPos int
+	}{
+		{"newest is #1", newest, 1},
+		{"middle is #2", middle, 2},
+		{"oldest is #3", oldest, 3},
+	}
+	for _, c := range cases {
+		pos, total, err := ExecutePosition(database, Query{Sort: "newest", Order: "desc"}, c.id)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if pos != c.wantPos {
+			t.Errorf("%s: pos = %d, want %d", c.name, pos, c.wantPos)
+		}
+		if total != 3 {
+			t.Errorf("%s: total = %d, want 3", c.name, total)
+		}
+	}
+}
+
+func TestExecutePosition_AscFlipsOrder(t *testing.T) {
+	database, cfg := setupSearchDB(t)
+	ingestTestImage(t, database, cfg, "pos_asc_a.png")
+	ingestTestImage(t, database, cfg, "pos_asc_b.png")
+	ingestTestImage(t, database, cfg, "pos_asc_c.png")
+
+	// Ascending ingestion order means the first-ingested image is #1.
+	result, _ := Execute(database, Query{Sort: "newest", Order: "asc", Page: 1, Limit: 40})
+	if len(result.Results) != 3 {
+		t.Fatalf("setup: got %d rows, want 3", len(result.Results))
+	}
+	first := result.Results[0].ID
+
+	pos, total, err := ExecutePosition(database, Query{Sort: "newest", Order: "asc"}, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pos != 1 || total != 3 {
+		t.Errorf("asc first: pos=%d total=%d, want 1/3", pos, total)
+	}
+}
+
+func TestExecutePosition_Random(t *testing.T) {
+	database, cfg := setupSearchDB(t)
+	ingestTestImage(t, database, cfg, "pos_rnd_a.png")
+	ingestTestImage(t, database, cfg, "pos_rnd_b.png")
+	ingestTestImage(t, database, cfg, "pos_rnd_c.png")
+
+	const seed int64 = 1234567
+	q := Query{Sort: "random", RandomSeed: seed, Page: 1, Limit: 40}
+	result, err := Execute(database, q)
+	if err != nil || len(result.Results) != 3 {
+		t.Fatalf("setup Execute: err=%v len=%d", err, len(result.Results))
+	}
+	first, second, third := result.Results[0].ID, result.Results[1].ID, result.Results[2].ID
+
+	cases := []struct {
+		name    string
+		id      int64
+		wantPos int
+	}{
+		{"first", first, 1},
+		{"second", second, 2},
+		{"third", third, 3},
+	}
+	for _, c := range cases {
+		pos, total, err := ExecutePosition(database, q, c.id)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if pos != c.wantPos || total != 3 {
+			t.Errorf("%s: pos=%d total=%d, want %d/3", c.name, pos, total, c.wantPos)
+		}
+	}
+}
+
+func TestExecutePosition_RandomNoSeed(t *testing.T) {
+	database, cfg := setupSearchDB(t)
+	ingestTestImage(t, database, cfg, "pos_rnd_noseed.png")
+	pos, total, err := ExecutePosition(database, Query{Sort: "random"}, 1)
+	if err != nil || pos != 0 || total != 0 {
+		t.Errorf("random without seed must return 0/0, got pos=%d total=%d err=%v", pos, total, err)
+	}
+}
+
+func TestExecutePosition_UnknownID(t *testing.T) {
+	database, cfg := setupSearchDB(t)
+	ingestTestImage(t, database, cfg, "pos_unknown.png")
+	pos, total, err := ExecutePosition(database, Query{Sort: "newest", Order: "desc"}, 99999)
+	if err != nil || pos != 0 || total != 0 {
+		t.Errorf("unknown id must return 0/0, got pos=%d total=%d err=%v", pos, total, err)
 	}
 }
 

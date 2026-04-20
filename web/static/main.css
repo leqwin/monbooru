@@ -358,6 +358,19 @@ button:hover { border-color: var(--accent); }
   border: 1px solid var(--border);
 }
 #search-input:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+/* Uniform, compact height for every control in the search bar row.
+   Explicit height + line-height:1 bypasses the browser quirk where
+   <select> ignores line-height and ends up 3px shorter than the input
+   and buttons next to it. Padding is horizontal-only so the fixed
+   height is what actually drives the box geometry. */
+#gallery-header input,
+#gallery-header button,
+#gallery-header select {
+  height: 28px;
+  padding: 0 10px;
+  line-height: 1;
+  box-sizing: border-box;
+}
 .result-count { font-size: 12px; color: var(--fg-dim); white-space: nowrap; }
 #save-search-area { flex-shrink: 0; }
 
@@ -1011,6 +1024,8 @@ dialog .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
   gap: 6px;
 }
 .detail-meta-nav { display: flex; gap: 8px; align-items: center; }
+.detail-pos { color: var(--fg-dim); font-size: 13px; white-space: nowrap; }
+.detail-nav-sep { color: var(--fg-dim); font-size: 13px; user-select: none; }
 
 /* Detail sidebar inner */
 .detail-sidebar-inner { padding: 8px 0; }

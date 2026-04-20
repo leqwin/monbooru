@@ -6,7 +6,37 @@
 </div>
 {{template "layout_mid" .}}
 
-<div id="detail-page">
+<div id="detail-page"{{if .RefURL}} data-ref="{{.RefURL}}"{{end}}>
+  {{/* Search bar: mirrors the gallery's #gallery-header so the input stays
+       visually in place when switching between gallery and detail. Plain
+       GET submit to / - no HTMX, since detail has no #gallery-grid target.
+       The tag-suggest dropdown uses the same endpoint and ids gallery does
+       so applySearchSuggest and initSuggestDismiss work unchanged. */}}
+  <div id="gallery-header">
+    <form id="search-form" action="/" method="GET">
+      <div style="position:relative;flex:1;min-width:0;">
+        <input type="text" name="q" id="search-input" value="{{.BackQuery}}" placeholder="Search tags…" autocomplete="off"
+               hx-get="/internal/search/suggest"
+               hx-trigger="input changed delay:200ms"
+               hx-target="#search-suggest"
+               hx-swap="innerHTML"
+               hx-push-url="false"
+               hx-include="this"
+               onkeydown="handleSuggestKey(event, 'search-suggest', 'search-input')">
+        <div id="search-suggest" class="suggest-dropdown search-suggest-dropdown"></div>
+      </div>
+      <select name="sort" id="search-sort">
+        <option value="newest"   {{if eq .BackSort "newest"}}selected{{end}}>Newest</option>
+        <option value="filesize" {{if eq .BackSort "filesize"}}selected{{end}}>File size</option>
+      </select>
+      <select name="order">
+        <option value="desc" {{if ne .BackOrder "asc"}}selected{{end}}>↓</option>
+        <option value="asc"  {{if eq .BackOrder "asc"}}selected{{end}}>↑</option>
+      </select>
+      <button type="submit">Search</button>
+    </form>
+  </div>
+
   {{/* Missing image banner */}}
   {{if .Image.IsMissing}}
   <div class="missing-banner">
@@ -25,12 +55,21 @@
   {{/* Top bar: back link | prev/next + download/fav (mirrors body column layout) */}}
   <div class="detail-topbar">
     <div class="detail-nav-group">
-      {{if or .BackQuery .BackSort}}
+      {{if .RefURL}}
+      <a href="{{.RefURL}}" class="back-link">← Previous image</a>
+      {{else if or .BackQuery .BackSort}}
       <a href="/?q={{.BackQuery}}&sort={{.BackSort}}&order={{.BackOrder}}{{if .BackPage}}&page={{.BackPage}}{{end}}{{if .BackSeed}}&seed={{.BackSeed}}{{end}}#img-{{.Image.ID}}" class="back-link">← Images</a>
       {{else}}
       <a href="/#img-{{.Image.ID}}" class="back-link">← Images</a>
       {{end}}
-      {{if .Filename}}<span class="detail-filename mono-small" title="{{.Filename}}">{{.Filename}}</span>{{end}}
+      {{if gt .PositionTotal 0}}
+      <span class="detail-nav-sep">·</span>
+      <span class="detail-pos" title="Position in current search">{{.Position}}/{{.PositionTotal}}</span>
+      {{end}}
+      {{if .Filename}}
+      <span class="detail-nav-sep">·</span>
+      <span class="detail-filename mono-small" title="{{.Filename}}">{{.Filename}}</span>
+      {{end}}
     </div>
     <div class="detail-topbar-right">
       <div class="detail-meta-nav">
@@ -90,7 +129,7 @@
       {{/* Media */}}
       <div class="detail-media">
         {{if or (eq .Image.FileType "mp4") (eq .Image.FileType "webm")}}
-        <video src="/images/{{.Image.ID}}/file" controls loop preload="metadata" class="detail-video">
+        <video src="/images/{{.Image.ID}}/file" controls loop autoplay muted playsinline preload="metadata" class="detail-video">
           Your browser does not support video.
         </video>
         {{else}}
@@ -326,7 +365,7 @@
 
       </div>
     </details>
-    <div hx-get="/images/{{.Image.ID}}/related" hx-trigger="load" hx-swap="outerHTML"></div>
+    <div hx-get="/images/{{.Image.ID}}/related?back_q={{.BackQuery}}&back_sort={{.BackSort}}&back_order={{.BackOrder}}{{if .BackPage}}&back_page={{.BackPage}}{{end}}{{if .BackSeed}}&back_seed={{.BackSeed}}{{end}}" hx-trigger="load" hx-swap="outerHTML"></div>
     </div>{{/* end detail-meta-col */}}
   </div>
 </div>

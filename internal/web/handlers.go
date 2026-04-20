@@ -339,6 +339,10 @@ func (s *Server) gallerySidebar(w http.ResponseWriter, r *http.Request) {
 	}
 
 	expr, _ := search.Parse(queryStr)
+	// Sidebar render only needs the page's image IDs to build per-page tag
+	// aggregation; Total is never surfaced. Skipping COUNT(*) cuts the work
+	// on filtered searches where the count pass is itself a full filter
+	// evaluation.
 	sq := search.Query{
 		Expr:       expr,
 		Sort:       sortStr,
@@ -346,13 +350,7 @@ func (s *Server) gallerySidebar(w http.ResponseWriter, r *http.Request) {
 		RandomSeed: randomSeed,
 		Page:       page,
 		Limit:      s.cfg.UI.PageSize,
-	}
-	if expr == nil {
-		if cx := s.Active(); cx != nil {
-			if n, err := cx.VisibleCount(); err == nil {
-				sq.PresetTotal = &n
-			}
-		}
+		SkipCount:  true,
 	}
 
 	result, err := search.Execute(s.db(), sq)
@@ -375,6 +373,56 @@ func (s *Server) gallerySidebar(w http.ResponseWriter, r *http.Request) {
 		"FolderTree":    folderTree,
 		"SourceCounts":  sourceCounts,
 		"SavedSearches": savedSearches,
+	})
+}
+
+// sidebarBrowse renders the folder/source/saved-searches sections only -
+// no per-page tag groups. Lazy-loaded from the detail page so its sidebar
+// gets the same browse shortcuts the gallery sidebar does without paying
+// the folder-tree aggregation cost on first paint.
+func (s *Server) sidebarBrowse(w http.ResponseWriter, r *http.Request) {
+	queryStr := r.URL.Query().Get("q")
+
+	var (
+		folders []gallery.FolderNode
+		sources gallery.SourceCounts
+		saved   []models.SavedSearch
+	)
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		if cx := s.Active(); cx != nil {
+			folders, _ = cx.FolderTree()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if cx := s.Active(); cx != nil {
+			sources, _ = cx.SourceCounts()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		rows, err := s.db().Read.Query(`SELECT id, name, query FROM saved_searches ORDER BY name`)
+		if err != nil {
+			return
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var ss models.SavedSearch
+			rows.Scan(&ss.ID, &ss.Name, &ss.Query)
+			saved = append(saved, ss)
+		}
+	}()
+	wg.Wait()
+
+	s.renderTemplate(w, "partials/sidebar_browse.html", map[string]any{
+		"Query":         queryStr,
+		"CSRFToken":     s.csrfToken(sessionFromContext(r.Context())),
+		"FolderTree":    folders,
+		"SourceCounts":  sources,
+		"SavedSearches": saved,
 	})
 }
 
@@ -417,6 +465,9 @@ type detailData struct {
 	ThumbnailURL   string
 	PrevID         *int64
 	NextID         *int64
+	Position       int    // 1-based rank of Image within the referring search; 0 = unknown (no back-* context)
+	PositionTotal  int    // total matching rows in the referring search
+	RefURL         string // predecessor detail URL when the user arrived via a Similar-images click; drives the "← Previous image" back link and Escape
 	BackQuery      string
 	BackSort       string
 	BackOrder      string
@@ -451,7 +502,22 @@ func (s *Server) detailHandler(w http.ResponseWriter, r *http.Request) {
 	backOrder := r.URL.Query().Get("back_order")
 	backPage := r.URL.Query().Get("back_page")
 	backSeed := r.URL.Query().Get("back_seed")
-	wantAdjacent := backSort != "" || backQ != ""
+
+	// A "ref" query param points at the detail page the user just came from
+	// (a Similar-images click). When set and valid, the gallery-context UI
+	// (X/Y counter, prev/next arrows, "← Images" back link) is suppressed
+	// because the user just switched contexts - the current image may not
+	// even be in the referring search. back_* still flows through so the
+	// rebuilt refURL lands the user back on the source with its original
+	// gallery context when they click "← Previous image".
+	refURL := ""
+	if refStr := r.URL.Query().Get("ref"); refStr != "" {
+		if refID, err := strconv.ParseInt(refStr, 10, 64); err == nil && refID != id {
+			refURL = buildDetailURL(refID, backQ, backSort, backOrder, backPage, backSeed)
+		}
+	}
+
+	wantAdjacent := refURL == "" && (backSort != "" || backQ != "")
 	if wantAdjacent {
 		if backSort == "" {
 			backSort = "newest"
@@ -470,13 +536,15 @@ func (s *Server) detailHandler(w http.ResponseWriter, r *http.Request) {
 	// sequential - it's pure CPU on the comfyMeta payload and only matters
 	// once that read returns.
 	var (
-		imageTags   []models.ImageTag
-		sdMeta      *models.SDMetadata
-		comfyMeta   *models.ComfyUIMetadata
-		genericMeta []models.SDParam
-		imagePaths  []models.ImagePath
-		prevID      *int64
-		nextID      *int64
+		imageTags     []models.ImageTag
+		sdMeta        *models.SDMetadata
+		comfyMeta     *models.ComfyUIMetadata
+		genericMeta   []models.SDParam
+		imagePaths    []models.ImagePath
+		prevID        *int64
+		nextID        *int64
+		position      int
+		positionTotal int
 	)
 	var wg sync.WaitGroup
 	wg.Add(5)
@@ -489,10 +557,14 @@ func (s *Server) detailHandler(w http.ResponseWriter, r *http.Request) {
 		genericMeta = meta.ExtractGeneric(img.CanonicalPath, img.FileType)
 	}()
 	if wantAdjacent {
-		wg.Add(1)
+		wg.Add(2)
 		go func() {
 			defer wg.Done()
 			prevID, nextID = s.findAdjacentImages(id, backQ, backSort, backOrder, backSeed)
+		}()
+		go func() {
+			defer wg.Done()
+			position, positionTotal = s.findImagePosition(id, backQ, backSort, backOrder, backSeed)
 		}()
 	}
 	wg.Wait()
@@ -526,6 +598,9 @@ func (s *Server) detailHandler(w http.ResponseWriter, r *http.Request) {
 		ThumbnailURL:   fmt.Sprintf("/thumbnails/%s/%d.jpg", s.activeName, id),
 		PrevID:         prevID,
 		NextID:         nextID,
+		Position:       position,
+		PositionTotal:  positionTotal,
+		RefURL:         refURL,
 		BackQuery:      backQ,
 		BackSort:       backSort,
 		BackOrder:      backOrder,
@@ -549,9 +624,21 @@ func (s *Server) relatedImagesHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	related, _ := s.tagSvc().RelatedImages(id, 9)
+	q := r.URL.Query()
 	s.renderTemplate(w, "partials/related_images.html", map[string]any{
 		"Images":        related,
 		"ActiveGallery": s.activeName,
+		// Each similar-image link carries ref=<current image> so the
+		// destination detail page swaps "← Images" for "← Previous image"
+		// (pointing back here) and Escape walks browser history. back_*
+		// flow through so that "← Previous image" link restores this
+		// page's own gallery context when clicked.
+		"SourceID":  id,
+		"BackQuery": q.Get("back_q"),
+		"BackSort":  q.Get("back_sort"),
+		"BackOrder": q.Get("back_order"),
+		"BackPage":  q.Get("back_page"),
+		"BackSeed":  q.Get("back_seed"),
 	})
 }
 
@@ -858,6 +945,29 @@ func (s *Server) deleteImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	backQ := r.URL.Query().Get("back_q")
+	backSort := r.URL.Query().Get("back_sort")
+	backOrder := r.URL.Query().Get("back_order")
+	backPage := r.URL.Query().Get("back_page")
+	backSeed := r.URL.Query().Get("back_seed")
+
+	// Compute the neighbour before the delete so we don't miss it once the
+	// current row is gone. When the caller carried back_* params the detail
+	// page had a search context; we keep the user in that stream by jumping
+	// to the adjacent image instead of bouncing back to the gallery.
+	var prevID, nextID *int64
+	if backSort != "" || backQ != "" {
+		sortStr := backSort
+		if sortStr == "" {
+			sortStr = "newest"
+		}
+		orderStr := backOrder
+		if orderStr == "" {
+			orderStr = "desc"
+		}
+		prevID, nextID = s.findAdjacentImages(id, backQ, sortStr, orderStr, backSeed)
+	}
+
 	result, err := gallery.DeleteImage(s.db(), s.thumbnailsPath(), id, s.tagSvc().RemoveAllTagsFromImage)
 	if err != nil {
 		http.NotFound(w, r)
@@ -869,13 +979,15 @@ func (s *Server) deleteImage(w http.ResponseWriter, r *http.Request) {
 		gallery.DeleteEmptyFolderIfEmpty(s.galleryPath(), result.FolderPath)
 	}
 
-	redirectURL := buildGalleryURL(
-		r.URL.Query().Get("back_q"),
-		r.URL.Query().Get("back_sort"),
-		r.URL.Query().Get("back_order"),
-		r.URL.Query().Get("back_page"),
-		r.URL.Query().Get("back_seed"),
-	)
+	redirectURL := ""
+	switch {
+	case nextID != nil:
+		redirectURL = buildDetailURL(*nextID, backQ, backSort, backOrder, backPage, backSeed)
+	case prevID != nil:
+		redirectURL = buildDetailURL(*prevID, backQ, backSort, backOrder, backPage, backSeed)
+	default:
+		redirectURL = buildGalleryURL(backQ, backSort, backOrder, backPage, backSeed)
+	}
 
 	if isHTMXRequest(r) {
 		w.Header().Set("HX-Redirect", redirectURL)
@@ -883,6 +995,33 @@ func (s *Server) deleteImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, redirectURL, http.StatusSeeOther)
+}
+
+// buildDetailURL constructs a detail-page URL with back_* params so the
+// destination page keeps the same gallery context (prev/next adjacency,
+// back-link target) the user came in with.
+func buildDetailURL(id int64, q, sort, order, page, seed string) string {
+	base := fmt.Sprintf("/images/%d", id)
+	v := url.Values{}
+	if q != "" {
+		v.Set("back_q", q)
+	}
+	if sort != "" {
+		v.Set("back_sort", sort)
+	}
+	if order != "" {
+		v.Set("back_order", order)
+	}
+	if page != "" {
+		v.Set("back_page", page)
+	}
+	if seed != "" {
+		v.Set("back_seed", seed)
+	}
+	if len(v) == 0 {
+		return base
+	}
+	return base + "?" + v.Encode()
 }
 
 func (s *Server) promoteCanonical(w http.ResponseWriter, r *http.Request) {
@@ -3320,6 +3459,22 @@ func (s *Server) getImageTagsHandler(w http.ResponseWriter, r *http.Request) {
 // full matching ID list. seedStr carries the random-sort seed forward from the
 // referring gallery so the same shuffle resolves to the same neighbours.
 func (s *Server) findAdjacentImages(currentID int64, queryStr, sortStr, orderStr, seedStr string) (prevID, nextID *int64) {
+	sq := adjacentSearchQuery(queryStr, sortStr, orderStr, seedStr)
+	prevID, nextID, _ = search.ExecuteAdjacent(s.db(), sq, currentID)
+	return
+}
+
+// findImagePosition returns the 1-based rank of currentID in the referring
+// search and the total matching rows. Used by the detail page's X/Y counter.
+// Shares the same query-building path as findAdjacentImages so both numbers
+// agree with the prev/next arrows they sit next to.
+func (s *Server) findImagePosition(currentID int64, queryStr, sortStr, orderStr, seedStr string) (pos, total int) {
+	sq := adjacentSearchQuery(queryStr, sortStr, orderStr, seedStr)
+	pos, total, _ = search.ExecutePosition(s.db(), sq, currentID)
+	return
+}
+
+func adjacentSearchQuery(queryStr, sortStr, orderStr, seedStr string) search.Query {
 	expr, _ := search.Parse(queryStr)
 	sq := search.Query{
 		Expr:  expr,
@@ -3331,8 +3486,7 @@ func (s *Server) findAdjacentImages(currentID int64, queryStr, sortStr, orderStr
 			sq.RandomSeed = seed
 		}
 	}
-	prevID, nextID, _ = search.ExecuteAdjacent(s.db(), sq, currentID)
-	return
+	return sq
 }
 
 // buildGalleryURL constructs a properly URL-encoded gallery redirect URL.

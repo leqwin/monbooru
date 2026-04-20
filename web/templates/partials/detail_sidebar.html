@@ -18,4 +18,12 @@
   </div>
   {{end}}
 
+  {{/* Folder tree, source filters, and saved searches. Lazy-loaded so the
+       folder-tree aggregation doesn't block first paint - same pattern the
+       gallery sidebar uses. BackQuery drives active-state highlighting when
+       the detail page was reached with gallery context. */}}
+  <div id="detail-sidebar-browse"
+       hx-get="/internal/sidebar-browse?q={{.BackQuery}}"
+       hx-trigger="load"
+       hx-swap="innerHTML"></div>
 {{end}}

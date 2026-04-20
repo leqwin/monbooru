@@ -147,10 +147,11 @@ Per-tagger settings (enable flags, confidence thresholds, worker count) live in 
 
 | Key | Where | Action |
 |---|---|---|
-| `t` | Gallery | Focus search |
+| `s` | Anywhere | Focus search input |
 | `t` | Image detail | Focus tag input |
 | `f` | Image detail | Toggle favorite |
-| `Delete` | Image detail | Delete image |
+| `Delete` | Image detail | Delete image (advances to the next in the current search) |
+| `Space` | Image detail | Play / pause the video |
 | `h` / `l` | Gallery | Previous / next page |
 | Arrows | Gallery | Navigate the grid |
 | `Enter` | Gallery | Open focused image |

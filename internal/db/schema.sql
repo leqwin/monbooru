@@ -106,4 +106,5 @@ CREATE INDEX IF NOT EXISTS idx_images_source     ON images(source_type);
 CREATE INDEX IF NOT EXISTS idx_images_missing    ON images(is_missing);
 CREATE INDEX IF NOT EXISTS idx_images_folder     ON images(folder_path);
 CREATE INDEX IF NOT EXISTS idx_images_folder_visible ON images(folder_path) WHERE is_missing = 0;
+CREATE INDEX IF NOT EXISTS idx_images_filesize_visible ON images(file_size DESC, id DESC) WHERE is_missing = 0;
 CREATE INDEX IF NOT EXISTS idx_image_paths_image ON image_paths(image_id);

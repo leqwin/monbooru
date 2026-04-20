@@ -1,0 +1,111 @@
+{{define "partials/sidebar_browse.html"}}
+  {{/* Folder tree */}}
+  {{if .FolderTree}}
+  {{$root := index .FolderTree 0}}
+  <div id="folder-tree-section">
+    <div class="sidebar-section-header">
+      <span class="sidebar-section-title">Folders</span>
+      <button id="folder-tree-toggle" class="folder-toggle-btn" data-target="folder-tree-list">▶</button>
+    </div>
+    <ul id="folder-tree-list" class="folder-tree" style="display:none">
+      <li class="folder-node-wrap">
+        <div class="folder-node-row">
+          <span class="folder-spacer"></span>
+          <a href="/?q=folder:" class="folder-link{{if eq $.Query "folder:"}} active{{end}}">/ ({{$root.Count}})</a>
+          <a href="/?q=folderonly:" class="folder-only-btn{{if eq $.Query "folderonly:"}} active{{end}}" title="Only this folder (no subfolders)">[·]</a>
+        </div>
+      </li>
+      {{range $root.Children}}
+      {{template "folder_node" (dict "Node" . "Query" $.Query)}}
+      {{end}}
+    </ul>
+  </div>
+  {{$src := .SourceCounts}}
+  <div id="source-filter-section">
+    <div class="sidebar-section-header">
+      <span class="sidebar-section-title">Source</span>
+      <button id="source-tree-toggle" class="folder-toggle-btn" data-target="source-tree-list">▶</button>
+    </div>
+    <ul id="source-tree-list" class="folder-tree" style="display:none">
+      <li class="folder-node-wrap">
+        <div class="folder-node-row">
+          <span class="folder-spacer"></span>
+          <a href="/?q=source:none" class="folder-link{{if eq $.Query "source:none"}} active{{end}}">Non-AI ({{$src.None}})</a>
+        </div>
+      </li>
+      <li class="folder-node-wrap">
+        <div class="folder-node-row">
+          <button class="folder-toggle-btn folder-expand-btn" data-path="__source_ai__" data-target="fc-__source_ai__" title="Toggle AI sources">▶</button>
+          <a href="/?q=source:ai" class="folder-link{{if eq $.Query "source:ai"}} active{{end}}">AI ({{$src.AI}})</a>
+        </div>
+        <ul id="fc-__source_ai__" class="folder-children" style="display:none">
+          <li class="folder-node-wrap">
+            <div class="folder-node-row">
+              <span class="folder-spacer"></span>
+              <a href="/?q=source:a1111" class="folder-link{{if eq $.Query "source:a1111"}} active{{end}}">a1111 ({{$src.A1111}})</a>
+            </div>
+          </li>
+          <li class="folder-node-wrap">
+            <div class="folder-node-row">
+              <span class="folder-spacer"></span>
+              <a href="/?q=source:comfyui" class="folder-link{{if eq $.Query "source:comfyui"}} active{{end}}">comfyui ({{$src.Comfyui}})</a>
+            </div>
+          </li>
+        </ul>
+      </li>
+    </ul>
+  </div>
+  {{end}}
+
+  {{/* Saved searches */}}
+  {{if .SavedSearches}}
+  <div id="saved-searches-section">
+    <div class="sidebar-section-header">
+      <span class="sidebar-section-title">Saved Searches</span>
+    </div>
+    <ul class="saved-search-list-sidebar">
+      {{$csrf := $.CSRFToken}}
+      {{range .SavedSearches}}
+      <li class="saved-search-entry" id="ss-{{.ID}}">
+        <a href="/?q={{.Query}}" class="saved-search-link" title="{{.Query}}">{{.Name}}</a>
+        <button class="saved-search-del"
+                hx-delete="/search/saved/{{.ID}}"
+                hx-target="#ss-{{.ID}}"
+                hx-swap="outerHTML"
+                hx-headers='{"X-CSRF-Token":"{{$csrf}}"}'
+                title="Remove saved search">×</button>
+      </li>
+      {{end}}
+    </ul>
+  </div>
+  {{end}}
+{{end}}
+
+{{define "folder_node"}}
+{{$node := .Node}}
+{{$query := .Query}}
+{{$active := printf "folder:%s" $node.Path}}
+{{$quotedActive := printf `folder:"%s"` $node.Path}}
+{{$onlyActive := printf "folderonly:%s" $node.Path}}
+{{$quotedOnlyActive := printf `folderonly:"%s"` $node.Path}}
+<li class="folder-node-wrap">
+  <div class="folder-node-row">
+    {{if $node.Children}}
+    <button class="folder-toggle-btn folder-expand-btn" data-path="{{$node.Path}}" data-target="fc-{{$node.Path}}" title="Toggle folder">▶</button>
+    {{else}}
+    <span class="folder-spacer"></span>
+    {{end}}
+    <a href="/?q={{$quotedActive}}" class="folder-link{{if or (eq $query $active) (eq $query $quotedActive)}} active{{end}}">
+      {{$node.Name}}/ ({{$node.Count}})
+    </a>
+    <a href="/?q={{$quotedOnlyActive}}" class="folder-only-btn{{if or (eq $query $onlyActive) (eq $query $quotedOnlyActive)}} active{{end}}" title="Only this folder (no subfolders)">[·]</a>
+  </div>
+  {{if $node.Children}}
+  <ul id="fc-{{$node.Path}}" class="folder-children" style="display:none">
+    {{range $node.Children}}
+    {{template "folder_node" (dict "Node" . "Query" $query)}}
+    {{end}}
+  </ul>
+  {{end}}
+</li>
+{{end}}

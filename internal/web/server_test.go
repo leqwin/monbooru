@@ -334,11 +334,40 @@ func TestDetailPageContainsMetadata(t *testing.T) {
 	h.ServeHTTP(w, req)
 
 	body := w.Body.String()
-	checks := []string{"detail-topbar", "detail-media", "meta-table", "danger-zone"}
+	checks := []string{"detail-topbar", "detail-media", "meta-table", "danger-zone",
+		// Browse sections on the sidebar are lazy-loaded from this endpoint.
+		`/internal/sidebar-browse`,
+		// Search bar (trimmed copy of the gallery header) lives on detail too.
+		`id="gallery-header"`, `id="search-form"`, `id="search-input"`,
+	}
 	for _, sel := range checks {
 		if !strings.Contains(body, sel) {
 			t.Errorf("detail page missing element %q", sel)
 		}
+	}
+}
+
+func TestSidebarBrowseReturnsBrowseSections(t *testing.T) {
+	srv := newTestServer(t)
+	h := srv.Handler()
+
+	req := httptest.NewRequest("GET", "/internal/sidebar-browse", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d\nbody: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	// Folder tree + source filter + saved searches markup; per-page tag
+	// groups must not leak in.
+	for _, sel := range []string{"folder-tree-section", "source-filter-section"} {
+		if !strings.Contains(body, sel) {
+			t.Errorf("sidebar-browse missing %q\nbody: %s", sel, body)
+		}
+	}
+	if strings.Contains(body, `id="tag-groups"`) {
+		t.Error("sidebar-browse should not render the per-page tag-groups block")
 	}
 }
 
@@ -454,6 +483,82 @@ func TestDeleteImage(t *testing.T) {
 	srv.db().Read.QueryRow(`SELECT COUNT(*) FROM images WHERE id = ?`, id).Scan(&count)
 	if count != 0 {
 		t.Error("image should be deleted from DB")
+	}
+	// Without back_* params there's no referring search context, so the
+	// redirect still falls through to the gallery root.
+	if got := w.Header().Get("HX-Redirect"); got != "/" {
+		t.Errorf("no back-context redirect = %q, want /", got)
+	}
+}
+
+// insertTwoDistinctImages inserts two image rows (different shas + paths,
+// older then newer) and returns their IDs as (older, newer).
+func insertTwoDistinctImages(t *testing.T, database *db.DB) (older, newer int64) {
+	t.Helper()
+	r1, err := database.Write.Exec(`
+		INSERT INTO images (canonical_path, file_type, file_size, sha256, ingested_at)
+		VALUES ('/tmp/older.jpg', 'jpg', 1024, 'sha_older', '2024-01-01T00:00:00Z')`)
+	if err != nil {
+		t.Fatalf("insert older: %v", err)
+	}
+	older, _ = r1.LastInsertId()
+	r2, err := database.Write.Exec(`
+		INSERT INTO images (canonical_path, file_type, file_size, sha256, ingested_at)
+		VALUES ('/tmp/newer.jpg', 'jpg', 1024, 'sha_newer', '2025-01-01T00:00:00Z')`)
+	if err != nil {
+		t.Fatalf("insert newer: %v", err)
+	}
+	newer, _ = r2.LastInsertId()
+	return
+}
+
+func TestDeleteImage_RedirectsToNextInSearch(t *testing.T) {
+	srv := newTestServer(t)
+	older, newer := insertTwoDistinctImages(t, srv.db())
+	h := srv.Handler()
+
+	// Delete the newer image with a referring-search context. Under
+	// newest-desc, the next image after the deleted one is the older one,
+	// so the redirect should land on its detail page with back_* preserved.
+	url := fmt.Sprintf("/images/%d?back_q=&back_sort=newest&back_order=desc", newer)
+	req := httptest.NewRequest("DELETE", url, nil)
+	req.Header.Set("X-CSRF-Token", srv.csrfToken("anon"))
+	req.Header.Set("HX-Request", "true")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("delete expected 200, got %d", w.Code)
+	}
+	got := w.Header().Get("HX-Redirect")
+	wantPrefix := fmt.Sprintf("/images/%d", older)
+	if !strings.HasPrefix(got, wantPrefix) {
+		t.Errorf("redirect = %q, want prefix %q", got, wantPrefix)
+	}
+	if !strings.Contains(got, "back_sort=newest") || !strings.Contains(got, "back_order=desc") {
+		t.Errorf("redirect %q should carry back_sort/back_order", got)
+	}
+}
+
+func TestDeleteImage_FallsBackToGalleryOnLastImage(t *testing.T) {
+	srv := newTestServer(t)
+	id := insertTestImage(t, srv.db())
+	h := srv.Handler()
+
+	// Single image + back_* context: no next, no prev → fall back to gallery.
+	url := fmt.Sprintf("/images/%d?back_q=&back_sort=newest&back_order=desc", id)
+	req := httptest.NewRequest("DELETE", url, nil)
+	req.Header.Set("X-CSRF-Token", srv.csrfToken("anon"))
+	req.Header.Set("HX-Request", "true")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("delete expected 200, got %d", w.Code)
+	}
+	got := w.Header().Get("HX-Redirect")
+	if strings.HasPrefix(got, "/images/") {
+		t.Errorf("last-image redirect = %q, want gallery URL", got)
 	}
 }
 

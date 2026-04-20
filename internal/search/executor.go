@@ -1,6 +1,7 @@
 package search
 
 import (
+	"database/sql"
 	"fmt"
 	"strconv"
 	"strings"
@@ -23,6 +24,12 @@ type Query struct {
 	// gallery page using a cached visible-image count) should set this to
 	// avoid scanning the whole index on large libraries.
 	PresetTotal *int
+	// SkipCount drops the COUNT(*) query entirely and returns Total = 0.
+	// For callers that only need Results (e.g. the sidebar handlers, which
+	// use the returned IDs to build the per-page tag aggregation but never
+	// surface Total). On filtered searches against 100k-image libraries the
+	// count pass is a full filter evaluation; skipping it halves the work.
+	SkipCount bool
 }
 
 // Execute runs the query against the DB and returns paginated results.
@@ -50,9 +57,12 @@ func Execute(database *db.DB, q Query) (*models.SearchResult, error) {
 	offset := (page - 1) * limit
 
 	var total int
-	if q.PresetTotal != nil {
+	switch {
+	case q.SkipCount:
+		// total stays 0; caller opted out.
+	case q.PresetTotal != nil:
 		total = *q.PresetTotal
-	} else {
+	default:
 		countSQL := "SELECT COUNT(*) FROM images i WHERE " + where
 		if err := database.Read.QueryRow(countSQL, args...).Scan(&total); err != nil {
 			return nil, fmt.Errorf("count query: %w", err)
@@ -191,6 +201,78 @@ func ExecuteAdjacent(database *db.DB, q Query, currentID int64) (*int64, *int64,
 		return &id
 	}
 	return lookup(prevCmp, prevSort), lookup(nextCmp, nextSort), nil
+}
+
+// ExecutePosition returns the 1-based rank of currentID in the same sort
+// order Execute would produce under q, and the total number of matching
+// rows. The detail page uses it for the "X/Y" counter next to prev/next.
+// A single combined COUNT exploits the same key-col indexes ExecuteAdjacent
+// does instead of materialising the full match list.
+func ExecutePosition(database *db.DB, q Query, currentID int64) (int, int, error) {
+	var ingestedAt string
+	var fileSize int64
+	if err := database.Read.QueryRow(
+		`SELECT ingested_at, file_size FROM images WHERE id = ?`, currentID,
+	).Scan(&ingestedAt, &fileSize); err != nil {
+		return 0, 0, nil
+	}
+
+	where, args, hasMissingFilter := buildWhereDB(q.Expr, database)
+	if !hasMissingFilter {
+		if where == "" {
+			where = "i.is_missing = 0"
+		} else {
+			where = where + " AND i.is_missing = 0"
+		}
+	}
+
+	var keyCol string
+	var keyVal any
+	switch q.Sort {
+	case "random":
+		if q.RandomSeed == 0 {
+			return 0, 0, nil
+		}
+		// SAFETY: q.RandomSeed is generated server-side via crypto/rand;
+		// %d only emits digits. Same inlined-literal approach ExecuteAdjacent
+		// and buildOrder use.
+		keyCol = fmt.Sprintf("((i.id * %d) & 2147483647)", q.RandomSeed)
+		keyVal = (currentID * q.RandomSeed) & 2147483647
+	case "filesize":
+		keyCol = "i.file_size"
+		keyVal = fileSize
+	default: // "newest"
+		keyCol = "i.ingested_at"
+		keyVal = ingestedAt
+	}
+
+	// prevCmp mirrors ExecuteAdjacent: it matches rows that come before
+	// currentID in the active sort order, so SUM(CASE WHEN prevCmp …) gives
+	// the zero-based rank. Position = rank + 1.
+	var prevCmp string
+	if q.Order == "asc" || q.Sort == "random" {
+		prevCmp = fmt.Sprintf("(%s < ? OR (%s = ? AND i.id < ?))", keyCol, keyCol)
+	} else {
+		prevCmp = fmt.Sprintf("(%s > ? OR (%s = ? AND i.id > ?))", keyCol, keyCol)
+	}
+
+	stmt := fmt.Sprintf(
+		`SELECT SUM(CASE WHEN %s THEN 1 ELSE 0 END), COUNT(*) FROM images i WHERE %s`,
+		prevCmp, where,
+	)
+	qargs := make([]any, 0, len(args)+3)
+	qargs = append(qargs, keyVal, keyVal, currentID)
+	qargs = append(qargs, args...)
+
+	var rankBefore sql.NullInt64
+	var total int
+	if err := database.Read.QueryRow(stmt, qargs...).Scan(&rankBefore, &total); err != nil {
+		return 0, 0, err
+	}
+	if total == 0 {
+		return 0, 0, nil
+	}
+	return int(rankBefore.Int64) + 1, total, nil
 }
 
 // DeleteTarget holds minimal image data needed for bulk deletion.

@@ -881,23 +881,38 @@ func (s *Service) RemoveAllTagsFromImage(imageID int64) error {
 	return tx.Commit()
 }
 
+// relatedGeneralTagsCap bounds the general-category portion of the probe
+// set: only the K rarest general tags of the source image feed into the
+// candidate GROUP BY. General is the noisy default bucket - a source
+// carrying `1girl` would otherwise drag every image_tags row for that tag
+// into the join. Character/artist/copyright (and other non-general
+// non-meta categories) carry too much distinguishing signal to cap, so
+// they pass through uncapped no matter how common they are.
+const relatedGeneralTagsCap = 15
+
 // RelatedImages returns up to limit images that share the most tags with
 // imageID, ranked by the shared tag count. The source image itself, missing
 // images, and images whose only shared tags are meta tags are excluded.
 //
 // Staged so the images join only runs against the top-N candidates: the
-// source image's non-meta tags resolve once into my_tags; candidates
-// aggregate from image_tags alone, capped by an inner LIMIT buffer; the
-// images row is joined last so is_missing filtering and display-column
-// fetches cost O(buffer) rather than O(shared-tag intermediate set).
+// source image's non-meta tags resolve once into my_tags (general capped
+// to the K rarest, every other category kept whole); candidates aggregate
+// from image_tags alone, capped by an inner LIMIT buffer; the images row
+// is joined last so is_missing filtering and display-column fetches cost
+// O(buffer) rather than O(shared-tag intermediate set).
 func (s *Service) RelatedImages(imageID int64, limit int) ([]models.Image, error) {
 	rows, err := s.db.Read.Query(
 		`WITH my_tags AS (
-		     SELECT it.tag_id
-		     FROM image_tags it
-		     JOIN tags t ON t.id = it.tag_id
-		     JOIN tag_categories tc ON tc.id = t.category_id
-		     WHERE it.image_id = ? AND tc.name != 'meta'
+		     SELECT tag_id FROM (
+		         SELECT it.tag_id, tc.name AS cat_name,
+		                ROW_NUMBER() OVER (PARTITION BY tc.name
+		                                   ORDER BY t.usage_count ASC, t.id ASC) AS rn
+		         FROM image_tags it
+		         JOIN tags t ON t.id = it.tag_id
+		         JOIN tag_categories tc ON tc.id = t.category_id
+		         WHERE it.image_id = ? AND tc.name != 'meta'
+		     )
+		     WHERE cat_name != 'general' OR rn <= ?
 		 ),
 		 candidates AS (
 		     SELECT theirs.image_id, COUNT(*) AS shared
@@ -917,7 +932,7 @@ func (s *Service) RelatedImages(imageID int64, limit int) ([]models.Image, error
 		 WHERE i.is_missing = 0
 		 ORDER BY c.shared DESC, c.image_id DESC
 		 LIMIT ?`,
-		imageID, imageID, limit*3+10, limit,
+		imageID, relatedGeneralTagsCap, imageID, limit*3+10, limit,
 	)
 	if err != nil {
 		return nil, err

@@ -94,6 +94,19 @@ func (cx *galleryCtx) VisibleCount() (int, error) {
 	return n, nil
 }
 
+// warmCaches primes FolderTree, SourceCounts, and VisibleCount so the first
+// user-facing sidebar/gallery request doesn't pay the cold aggregation scan.
+// Errors are ignored: the lazy path in each accessor still recomputes on
+// demand if the warm failed.
+func (cx *galleryCtx) warmCaches() {
+	if cx == nil || cx.DB == nil {
+		return
+	}
+	cx.FolderTree()   //nolint:errcheck
+	cx.SourceCounts() //nolint:errcheck
+	cx.VisibleCount() //nolint:errcheck
+}
+
 // openGalleryCtx opens the DB and creates the thumbnails directory. The
 // watcher is started separately so only the active gallery runs one.
 func openGalleryCtx(g config.Gallery) (*galleryCtx, error) {

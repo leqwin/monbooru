@@ -377,11 +377,18 @@ func contextMiddlewareBypass(path string) bool {
 // StartWatchers starts a watcher on every configured gallery at startup. Each
 // gallery owns its own watcher for the lifetime of the process so file drops
 // into any gallery are picked up in real time, not just the active one.
+//
+// Also spawns a pre-warm goroutine per gallery that populates the FolderTree,
+// SourceCounts, and VisibleCount caches. The first user request then hits
+// warm caches instead of paying a cold aggregation scan against every
+// visible image - on libraries with tens of thousands of images that walk
+// was the dominant contributor to first-sidebar latency.
 func (s *Server) StartWatchers() {
 	s.ctxMu.Lock()
 	defer s.ctxMu.Unlock()
 	for _, cx := range s.contexts {
 		cx.startWatcher(s.cfg.Gallery.WatchEnabled, s.cfg.Gallery.MaxFileSizeMB, s.jobs)
+		go cx.warmCaches()
 	}
 }
 
@@ -479,6 +486,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /internal/search/suggest", s.searchSuggest)
 	mux.HandleFunc("GET /internal/folders/suggest", s.foldersSuggest)
 	mux.HandleFunc("GET /internal/sidebar", s.gallerySidebar)
+	mux.HandleFunc("GET /internal/sidebar-browse", s.sidebarBrowse)
 	mux.HandleFunc("POST /images/{id}/autotag", s.autotagImage)
 	mux.HandleFunc("GET /images/{id}/tags", s.getImageTagsHandler)
 
