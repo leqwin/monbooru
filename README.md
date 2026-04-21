@@ -1,6 +1,8 @@
 # Monbooru
 
 Your own self-hosted and lightweight booru.  
+Designed for organizing your local media collection, including AI-generated images (Stable Diffusion, ComfyUI, A1111/Forge).  
+Works fully offline and with no telemetry. Supports ONNX models for local auto-tagging of your collection (WD14, JoyTag...).  
 
 <table>
   <tr>
@@ -12,8 +14,6 @@ Your own self-hosted and lightweight booru.
     <td><img src="/.github/assets/tags.png" width="400"/></td>
   </tr>
 </table>
-
-> **Intended for local network use.** Not hardened for direct exposure to the public internet.
 
 ---
 
@@ -189,3 +189,9 @@ CGO_ENABLED=1 go build -tags tagger -o monbooru ./cmd/monbooru
 ## Inotify limit (Docker)
 
 If the watcher reports an inotify limit error, raise `fs.inotify.max_user_instances` on the host (not inside the container) and restart. Alternatively, disable the watcher in Settings and use the manual Sync button when adding new files.
+
+---
+
+## Warning
+
+> **Intended for local network use.** This project is not designed for direct exposure to the public internet.
