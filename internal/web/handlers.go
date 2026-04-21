@@ -468,6 +468,7 @@ type detailData struct {
 	Position       int    // 1-based rank of Image within the referring search; 0 = unknown (no back-* context)
 	PositionTotal  int    // total matching rows in the referring search
 	RefURL         string // predecessor detail URL when the user arrived via a Similar-images click; drives the "← Previous image" back link and Escape
+	Ref            string // raw ref=<sourceID> value when valid; forwarded on the delete button so the post-delete redirect returns to the source instead of an arbitrary neighbour
 	BackQuery      string
 	BackSort       string
 	BackOrder      string
@@ -511,9 +512,11 @@ func (s *Server) detailHandler(w http.ResponseWriter, r *http.Request) {
 	// rebuilt refURL lands the user back on the source with its original
 	// gallery context when they click "← Previous image".
 	refURL := ""
+	refStrValid := ""
 	if refStr := r.URL.Query().Get("ref"); refStr != "" {
 		if refID, err := strconv.ParseInt(refStr, 10, 64); err == nil && refID != id {
 			refURL = buildDetailURL(refID, backQ, backSort, backOrder, backPage, backSeed)
+			refStrValid = strconv.FormatInt(refID, 10)
 		}
 	}
 
@@ -601,6 +604,7 @@ func (s *Server) detailHandler(w http.ResponseWriter, r *http.Request) {
 		Position:       position,
 		PositionTotal:  positionTotal,
 		RefURL:         refURL,
+		Ref:            refStrValid,
 		BackQuery:      backQ,
 		BackSort:       backSort,
 		BackOrder:      backOrder,
@@ -951,12 +955,27 @@ func (s *Server) deleteImage(w http.ResponseWriter, r *http.Request) {
 	backPage := r.URL.Query().Get("back_page")
 	backSeed := r.URL.Query().Get("back_seed")
 
+	// When the caller arrived via a Similar-images click the URL carries
+	// ref=<sourceID> and the back_* params describe the source's gallery
+	// context, not a search the current image is part of. Snapshotting the
+	// valid source id up front keeps the post-delete redirect aimed at the
+	// original image instead of jumping to an arbitrary neighbour of the
+	// unrelated back_* search.
+	var refID *int64
+	if refStr := r.URL.Query().Get("ref"); refStr != "" {
+		if parsed, err := strconv.ParseInt(refStr, 10, 64); err == nil && parsed != id {
+			refID = &parsed
+		}
+	}
+
 	// Compute the neighbour before the delete so we don't miss it once the
 	// current row is gone. When the caller carried back_* params the detail
 	// page had a search context; we keep the user in that stream by jumping
-	// to the adjacent image instead of bouncing back to the gallery.
+	// to the adjacent image instead of bouncing back to the gallery. Ref
+	// takes precedence over adjacency: the current image may not even be in
+	// the referring search.
 	var prevID, nextID *int64
-	if backSort != "" || backQ != "" {
+	if refID == nil && (backSort != "" || backQ != "") {
 		sortStr := backSort
 		if sortStr == "" {
 			sortStr = "newest"
@@ -981,6 +1000,8 @@ func (s *Server) deleteImage(w http.ResponseWriter, r *http.Request) {
 
 	redirectURL := ""
 	switch {
+	case refID != nil:
+		redirectURL = buildDetailURL(*refID, backQ, backSort, backOrder, backPage, backSeed)
 	case nextID != nil:
 		redirectURL = buildDetailURL(*nextID, backQ, backSort, backOrder, backPage, backSeed)
 	case prevID != nil:
@@ -990,6 +1011,20 @@ func (s *Server) deleteImage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if isHTMXRequest(r) {
+		// Ref case: the user arrived here via a Similar-images click, which
+		// itself may be any depth into a chain. Redirecting to the source
+		// would push a fresh history entry that drops the ref chain - the
+		// post-delete source page then has no data-ref and Escape escapes
+		// straight to the gallery. Fire a delete-go-back trigger instead so
+		// the client can prefer history.back(), landing on the source's
+		// original URL (with its own ref intact) and keeping the chain
+		// walkable. The fallback URL handles the cold-load case where the
+		// browser has no predecessor (direct link, bookmarked tab).
+		if refID != nil {
+			w.Header().Set("HX-Trigger", fmt.Sprintf(`{"delete-go-back":{"fallback":%q}}`, redirectURL))
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		w.Header().Set("HX-Redirect", redirectURL)
 		w.WriteHeader(http.StatusOK)
 		return
@@ -1308,6 +1343,9 @@ func (s *Server) categoriesHandler(w http.ResponseWriter, r *http.Request) {
 		"Variant":       base.Variant,
 		"ActiveGallery": base.ActiveGallery,
 		"Galleries":     s.galleryList(),
+		"VisibleCount":  base.VisibleCount,
+		"TagCount":      base.TagCount,
+		"SavedCount":    base.SavedCount,
 		"Categories":    cats,
 	}
 	s.renderTemplate(w, "categories.html", data)
@@ -1333,6 +1371,9 @@ func (s *Server) settingsHandler(w http.ResponseWriter, r *http.Request) {
 		"Variant":        base.Variant,
 		"ActiveGallery":  base.ActiveGallery,
 		"Galleries":      s.galleryList(),
+		"VisibleCount":   base.VisibleCount,
+		"TagCount":       base.TagCount,
+		"SavedCount":     base.SavedCount,
 		"Config":         s.cfg,
 		"Taggers":        taggers,
 		"EnabledCount":   enabledCount,
@@ -2397,6 +2438,9 @@ func (s *Server) uploadPage(w http.ResponseWriter, r *http.Request) {
 		"Variant":         base.Variant,
 		"ActiveGallery":   base.ActiveGallery,
 		"Galleries":       s.galleryList(),
+		"VisibleCount":    base.VisibleCount,
+		"TagCount":        base.TagCount,
+		"SavedCount":      base.SavedCount,
 		"AcceptFileTypes": gallery.SupportedMIMETypes,
 		"TaggerAvailable": tagger.IsAvailable(s.cfg),
 		"EnabledTaggers":  tagger.EnabledTaggers(s.cfg),
@@ -2476,7 +2520,7 @@ func (s *Server) uploadPost(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		img, isDup, ingestErr := gallery.Ingest(s.db(), s.galleryPath(), s.thumbnailsPath(), dstPath, ft)
+		img, isDup, ingestErr := gallery.Ingest(s.db(), s.galleryPath(), s.thumbnailsPath(), dstPath, ft, models.OriginUpload)
 		if ingestErr != nil {
 			logx.Warnf("upload ingest %q: %v", fh.Filename, ingestErr)
 			errors++
@@ -3523,12 +3567,12 @@ func loadImage(ctx context.Context, database *db.DB, id int64) (*models.Image, e
 	err := database.Read.QueryRowContext(ctx,
 		`SELECT id, sha256, canonical_path, folder_path, file_type,
 		        width, height, file_size, is_missing, is_favorited,
-		        auto_tagged_at, source_type, ingested_at
+		        auto_tagged_at, source_type, origin, ingested_at
 		 FROM images WHERE id = ?`, id,
 	).Scan(
 		&img.ID, &img.SHA256, &img.CanonicalPath, &img.FolderPath, &img.FileType,
 		&width, &height, &img.FileSize, &isMissing, &isFav,
-		&autoTaggedAt, &img.SourceType, &ingestedAt,
+		&autoTaggedAt, &img.SourceType, &img.Origin, &ingestedAt,
 	)
 	if err != nil {
 		return nil, err

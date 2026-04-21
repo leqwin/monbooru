@@ -42,7 +42,7 @@ func buildSpec(baseURL string) map[string]any {
 						"category":    map[string]any{"type": "string"},
 						"is_auto":     map[string]any{"type": "boolean"},
 						"confidence":  map[string]any{"type": "number", "nullable": true},
-						"tagger_name": map[string]any{"type": "string", "nullable": true, "description": "Source auto-tagger name; null for manual tags"},
+						"tagger_name": map[string]any{"type": "string", "nullable": true, "description": "Source identifier: auto-tagger subfolder name when is_auto, caller-supplied source (e.g. app name) when manual, null for UI-driven user adds"},
 					},
 				},
 				"TagRow": map[string]any{
@@ -110,6 +110,7 @@ func buildSpec(baseURL string) map[string]any {
 						"is_missing":     map[string]any{"type": "boolean"},
 						"auto_tagged_at": map[string]any{"type": "string", "format": "date-time", "nullable": true},
 						"source_type":    map[string]any{"type": "string"},
+						"origin":         map[string]any{"type": "string", "description": "How the image got into the gallery: 'ingest' for watcher/sync, 'upload' for the web UI, or any caller-supplied string (app name, URL…) set via POST /images with 'source'"},
 						"ingested_at":    map[string]any{"type": "string", "format": "date-time"},
 						"thumbnail_url":  map[string]any{"type": "string"},
 						"tags":           map[string]any{"type": "array", "items": map[string]any{"$ref": "#/components/schemas/Tag"}},
@@ -149,6 +150,7 @@ func buildSpec(baseURL string) map[string]any {
 										"folder":      map[string]any{"type": "string", "description": "Destination subfolder under the gallery root; missing directories are created. Leave blank for the gallery root."},
 										"autotag":     map[string]any{"type": "string", "description": "Set to \"true\" to kick off an auto-tag job on the new image"},
 										"tagger_name": map[string]any{"type": "string", "description": "Optional auto-tagger name; when set with autotag, restricts the job to that tagger"},
+										"source":      map[string]any{"type": "string", "description": "Optional source identifier (app name, URL…). Stored as images.origin and attached to each initial tag via image_tags.tagger_name. Blank defaults images.origin to 'upload' for multipart mode."},
 									},
 								},
 							},
@@ -162,6 +164,7 @@ func buildSpec(baseURL string) map[string]any {
 										"folder":      map[string]any{"type": "string", "description": "Destination subfolder for relative paths"},
 										"autotag":     map[string]any{"type": "boolean", "description": "Kick off an auto-tag job on the new image"},
 										"tagger_name": map[string]any{"type": "string", "description": "Optional auto-tagger name"},
+										"source":      map[string]any{"type": "string", "description": "Optional source identifier. Stored as images.origin and attached to each initial tag. Blank defaults images.origin to 'ingest' for JSON path-reference mode."},
 									},
 								},
 							},
@@ -235,6 +238,10 @@ func buildSpec(baseURL string) map[string]any {
 											"type":        "array",
 											"items":       map[string]any{"type": "string"},
 											"description": "Tag names to add",
+										},
+										"source": map[string]any{
+											"type":        "string",
+											"description": "Optional source identifier attached to each added tag (app name, URL…); stored in image_tags.tagger_name so the detail page can surface which third party contributed them",
 										},
 									},
 								},
@@ -570,7 +577,7 @@ var docsTemplate = template.Must(template.New("api-docs").Parse(`<!DOCTYPE html>
  h1 { font-size:20px; font-weight:bold; margin-bottom:4px; }
  h2 { font-size:16px; color:#c8c8c8; border-bottom:1px solid #2a2a2a; padding-bottom:4px; margin:24px 0 8px; }
  h3 { font-size:13px; color:#666; margin:12px 0 4px; font-weight:normal; text-transform:uppercase; letter-spacing:0.5px; }
- a { color:#3d90e3; text-decoration:none; }
+ a { color:#9d2235; text-decoration:none; }
  a:hover { text-decoration:underline; }
  code { font-family:inherit; }
  table { border-collapse:collapse; width:100%; margin:6px 0 10px; font-size:13px; }
@@ -579,7 +586,7 @@ var docsTemplate = template.Must(template.New("api-docs").Parse(`<!DOCTYPE html>
  .muted { color:#666; font-size:12px; }
  .method { display:inline-block; padding:1px 6px; border:1px solid; font-weight:bold; margin-right:8px; font-size:12px; min-width:52px; text-align:center; }
  .method-get    { color:#22aa44; border-color:#22aa44; }
- .method-post   { color:#3d90e3; border-color:#3d90e3; }
+ .method-post   { color:#9d2235; border-color:#9d2235; }
  .method-put    { color:#ffaa00; border-color:#ffaa00; }
  .method-patch  { color:#ffaa00; border-color:#ffaa00; }
  .method-delete { color:#cc3333; border-color:#cc3333; }

@@ -629,8 +629,11 @@ func addTagToImageTxReportingDup(tx *sql.Tx, imageID, tagID int64, isAuto bool, 
 	if isAuto {
 		isAutoInt = 1
 	}
+	// tagger_name doubles as a generic "source identifier": the tagger
+	// subfolder name for auto rows, any caller-supplied string (app name,
+	// URL…) for manual rows, NULL for UI-driven user adds.
 	var tname any
-	if isAuto && taggerName != "" {
+	if taggerName != "" {
 		tname = taggerName
 	}
 

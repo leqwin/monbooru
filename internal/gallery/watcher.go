@@ -202,7 +202,7 @@ func (w *Watcher) ingestFile(path string) {
 		}
 	}
 
-	_, isDup, err := Ingest(w.db, w.galleryPath, w.thumbnailsPath, path, ft)
+	_, isDup, err := Ingest(w.db, w.galleryPath, w.thumbnailsPath, path, ft, "")
 	if err != nil {
 		logx.Warnf("watcher ingest %q: %v", path, err)
 	} else if isDup {

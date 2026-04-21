@@ -147,6 +147,19 @@ document.addEventListener('click', function(e) {
   }
 });
 
+// Delete-from-ref walks history instead of server-redirecting so the chain
+// (A -> B -> C -> delete) lands back on B's original URL (with its own
+// ref=A intact), leaving Escape free to unwind the rest of the chain.
+// HX-Redirect would push a fresh history entry and silently drop the ref
+// chain. The event's detail.fallback carries the redirect URL the handler
+// would otherwise have set; we fall back to it when history has no
+// predecessor (direct link, fresh tab).
+document.body.addEventListener('delete-go-back', function(e) {
+  if (history.length > 1) { history.back(); return; }
+  var fallback = e.detail && e.detail.fallback;
+  if (fallback) window.location.href = fallback;
+});
+
 // ---------------------------------------------------------------------------
 // Gallery focus restore: when returning from a detail page via a back-link
 // carrying #img-N, focus the matching thumbnail so the arrow-key cursor

@@ -85,6 +85,37 @@ func TestSync_NewFile(t *testing.T) {
 	}
 }
 
+func TestIngest_RecordsOrigin(t *testing.T) {
+	database, env, galleryDir := setupSyncTest(t)
+
+	for i, tc := range []struct {
+		name   string
+		origin string
+		want   string
+	}{
+		{"default", "", "ingest"},
+		{"upload", "upload", "upload"},
+		{"url", "https://example.com/pic", "https://example.com/pic"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Distinct dimensions per subtest so each file has its own
+			// SHA-256 and the ingest insert branch runs every time.
+			path := createTestPNGFileSize(t, galleryDir, tc.name+".png", 10+i, 10+i)
+			rec, _, err := Ingest(database, galleryDir, env.thumbnailsPath, path, "png", tc.origin)
+			if err != nil {
+				t.Fatalf("Ingest: %v", err)
+			}
+			var got string
+			if err := database.Read.QueryRow(`SELECT origin FROM images WHERE id = ?`, rec.ID).Scan(&got); err != nil {
+				t.Fatalf("scan origin: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("origin = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSync_NoChange(t *testing.T) {
 	database, env, galleryDir := setupSyncTest(t)
 	createTestPNGFile(t, galleryDir, "test.png")

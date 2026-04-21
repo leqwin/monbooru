@@ -32,6 +32,10 @@
            hx-trigger="load, every 2s"
            hx-swap="outerHTML"></div>
       {{if not .Degraded}}
+      {{/* Sits before the form so its zero-width flex item doesn't push an
+           8px gap to the right of the sync button; the button ends up flush
+           with the topbar padding, matching the gallery grid's right edge. */}}
+      <span id="sync-flash"></span>
       <form hx-post="/internal/sync" hx-swap="none"
             hx-on:htmx:before-request="document.getElementById('job-status').innerHTML='<span class=&quot;job-running&quot;>syncing…</span>'"
             hx-on:sync-started="document.getElementById('job-status').setAttribute('hx-trigger','every 2s');htmx.process('#job-status')"
@@ -40,12 +44,7 @@
         <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
         <button type="submit" title="Sync gallery">⟳</button>
       </form>
-      <span id="sync-flash"></span>
       {{end}}
-      {{with .Galleries}}{{if gt (len .) 1}}
-      <button id="gallery-switch-btn" type="button" title="Switch gallery"
-              onclick="document.getElementById('gallery-switch-dialog').showModal()">[{{$.ActiveGallery}}]</button>
-      {{end}}{{end}}
       {{if .AuthEnabled}}
         <form method="POST" action="/logout" style="display:inline">
           <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
@@ -72,7 +71,24 @@
     </main>
   </div>
   <footer id="footer">
-    <a href="{{.RepoURL}}" target="_blank" rel="noopener">monbooru{{if .Variant}} ({{.Variant}}){{end}}</a> {{.Version}} · <a href="/api/v1/docs" target="_blank" rel="noopener">API</a>
+    <div id="footer-left">
+      {{with .Galleries}}{{if gt (len .) 1}}
+      <button id="gallery-switch-btn" class="footer-gallery" type="button" title="Switch gallery"
+              onclick="document.getElementById('gallery-switch-dialog').showModal()">[{{$.ActiveGallery}}]</button>
+      {{else}}
+      <span class="footer-gallery">[{{$.ActiveGallery}}]</span>
+      {{end}}{{end}}
+      <span class="footer-sep">·</span>
+      <span>{{.VisibleCount}} img</span>
+      <span class="footer-sep">·</span>
+      <span>{{.TagCount}} tags</span>
+      <span class="footer-sep">·</span>
+      <span>{{.SavedCount}} saved</span>
+      {{if .Degraded}}<span class="footer-sep">·</span><span class="footer-degraded">degraded</span>{{end}}
+    </div>
+    <div id="footer-right">
+      <a href="{{.RepoURL}}" target="_blank" rel="noopener">monbooru{{if .Variant}} ({{.Variant}}){{end}}</a> {{.Version}} · <a href="/api/v1/docs" target="_blank" rel="noopener">API</a>
+    </div>
   </footer>
   <dialog id="confirm-dialog">
     <p id="confirm-dialog-msg"></p>

@@ -137,7 +137,7 @@ func seedImage(t *testing.T, srv *Server, name string, w, h int) int64 {
 		t.Fatal(err)
 	}
 	f.Close()
-	rec, _, err := gallery.Ingest(cx.DB, cx.GalleryPath, cx.ThumbnailsPath, path, "png")
+	rec, _, err := gallery.Ingest(cx.DB, cx.GalleryPath, cx.ThumbnailsPath, path, "png", "")
 	if err != nil {
 		t.Fatalf("Ingest: %v", err)
 	}

@@ -15,6 +15,15 @@ const (
 	SourceTypeNone    = "none"
 	// SourceTypeBoth is used when an image has both A1111 and ComfyUI metadata.
 	SourceTypeBoth = "a1111,comfyui"
+
+	// OriginIngest is the origin recorded for files the watcher or a Sync
+	// picks up from disk - the historical "something dropped a file in the
+	// gallery root" path. The default for Ingest() when no explicit origin
+	// is supplied.
+	OriginIngest = "ingest"
+	// OriginUpload is the origin recorded for files the web UI upload form
+	// pushed in. Also used as the default for the multipart REST API mode.
+	OriginUpload = "upload"
 )
 
 type Image struct {
@@ -30,6 +39,7 @@ type Image struct {
 	IsFavorited   bool
 	AutoTaggedAt  *time.Time
 	SourceType    string // "a1111" | "comfyui" | "none" | "a1111,comfyui"
+	Origin        string // "ingest" | "upload" | caller-supplied string (app name, URL…)
 	IngestedAt    time.Time
 }
 

@@ -316,7 +316,7 @@ func Sync(ctx context.Context, database *db.DB, galleryPath, thumbnailsPath stri
 			// Not found - new file. Reuse the SHA computed in Phase 1 so the
 			// file isn't hashed a second time inside Ingest; on a fresh dump of
 			// 25k images that double-hash was the dominant cost of Phase 2.
-			img, _, ingestErr := ingestWithHash(database, galleryPath, thumbnailsPath, fi.path, fi.fileType, fi.sha256)
+			img, _, ingestErr := ingestWithHash(database, galleryPath, thumbnailsPath, fi.path, fi.fileType, fi.sha256, "")
 			if ingestErr != nil {
 				logx.Warnf("ingest failed for %q: %v", fi.path, ingestErr)
 				continue

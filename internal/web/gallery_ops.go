@@ -278,13 +278,18 @@ func (s *Server) gallerySwitchHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if isHTMXRequest(r) {
-		// Detail URLs are image-id-scoped and usually 404 in the target gallery.
-		// Send the browser home instead of refreshing the current URL.
+		// Detail URLs are image-id-scoped and usually 404 in the target gallery,
+		// and gallery URLs carrying a search/sort/folder query belong to the
+		// old gallery's namespace - re-running them in the new one just
+		// surfaces unrelated results. Send the browser home in both cases
+		// instead of refreshing the current URL.
 		if cur := r.Header.Get("HX-Current-URL"); cur != "" {
-			if u, err := url.Parse(cur); err == nil && strings.HasPrefix(u.Path, "/images/") {
-				w.Header().Set("HX-Redirect", "/")
-				w.WriteHeader(http.StatusOK)
-				return
+			if u, err := url.Parse(cur); err == nil {
+				if strings.HasPrefix(u.Path, "/images/") || (u.Path == "/" && u.RawQuery != "") {
+					w.Header().Set("HX-Redirect", "/")
+					w.WriteHeader(http.StatusOK)
+					return
+				}
 			}
 		}
 		w.Header().Set("HX-Refresh", "true")

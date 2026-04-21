@@ -4,6 +4,6 @@
 <div id="sidebar-inner" hx-swap-oob="true">
   {{template "partials/sidebar_content.html" .}}
 </div>
-{{/* OOB result count so "N images" in the header reflects the new search */}}
-<span id="result-count" class="result-count" hx-swap-oob="true">{{.Result.Total}} {{plural .Result.Total "image" "images"}}</span>
+{{/* OOB status line so the match count reflects the new search */}}
+<div id="gallery-status" class="status-bar" hx-swap-oob="true">match <span id="result-count" class="result-count">{{.Result.Total}}</span></div>
 {{end}}

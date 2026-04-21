@@ -1,5 +1,27 @@
 # Changelog
 
+## [v1.2.3] - 2026-04-21
+
+### Added
+- Status bar row under the gallery header and on the detail topbar.
+- Tmux-style footer with gallery / tags / saved-search counts;
+- Images: per-image `origin` recording how the file entered the gallery (`ingest` for watcher/sync pickups, `upload` for web and multipart-API uploads, or a caller-supplied string via a new `source` field on `POST /api/v1/images`). Surfaced on the detail metadata panel and in the API `Image` response.
+- API: `POST /api/v1/images` and `POST /images/{id}/tags` accept a `source` field for manual tags. The detail page splits the user section into "Tags added by the user" plus one bucket per third-party source.
+- Detail page action row: **Move image** and **Delete** are grouped together on the right of the Danger zone.
+- Some UI style changes
+
+### Changed
+- Destructive buttons (delete, delete-all, delete-selected, remove-all) now render as solid red.
+- Settings → Run Auto-Tagger: bulk run buttons relabeled to "Auto-tag all untagged images" / "Auto-tag all images"; the three Remove-all buttons move to a new "Bulk tag removal" subsection so destructive actions live apart from autotag-triggering ones.
+- Detail page tag chips drop the "auto" badge; chip names are colored by category instead.
+
+### Fixed
+- Deleting an image reached through a Similar-images chain walks browser history one hop back (so Escape on `A → B → C` returns to `B`, then `A`) instead of pushing a fresh history entry and dropping the chain. Deleting the chain's source falls back to the referring search, then the gallery.
+- Search and sort state is dropped when switching galleries, so the new gallery opens on a clean view instead of inheriting an irrelevant query.
+- Detail-page panels and header align with the gallery frame.
+- Detail-page tag chip names render in their category color.
+- Excessive margin on the topbar sync button.
+
 ## [v1.2.2] - 2026-04-20
 
 ### Added

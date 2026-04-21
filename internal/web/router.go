@@ -143,12 +143,30 @@ func NewServer(cfg *config.Config, configPath string, jobManager *jobs.Manager) 
 			return *p
 		},
 		"groupByImageSource": func(tagList []models.ImageTag) []imageTagSourceGroup {
+			// Manual tags split by source: plain UI adds (empty tagger_name)
+			// land in the "user" bucket; API-supplied sources each get their
+			// own "Tags added by <source>" subsection. Auto rows keep the
+			// existing per-tagger grouping with the "auto-tagger" suffix.
 			var userTags []models.ImageTag
+			byUserSource := map[string]*imageTagSourceGroup{}
+			var userSourceOrder []string
 			byTagger := map[string]*imageTagSourceGroup{}
 			var order []string
 			for _, t := range tagList {
 				if !t.IsAuto {
-					userTags = append(userTags, t)
+					if t.TaggerName == "" {
+						userTags = append(userTags, t)
+						continue
+					}
+					key := t.TaggerName
+					if _, ok := byUserSource[key]; !ok {
+						userSourceOrder = append(userSourceOrder, key)
+						byUserSource[key] = &imageTagSourceGroup{
+							Source: key,
+							Title:  "Tags added by " + key,
+						}
+					}
+					byUserSource[key].Tags = append(byUserSource[key].Tags, t)
 					continue
 				}
 				key := t.TaggerName
@@ -171,6 +189,9 @@ func NewServer(cfg *config.Config, configPath string, jobManager *jobs.Manager) 
 					Title:  "Tags added by the user",
 					Tags:   userTags,
 				})
+			}
+			for _, k := range userSourceOrder {
+				out = append(out, *byUserSource[k])
 			}
 			for _, k := range order {
 				g := byTagger[k]
@@ -575,14 +596,28 @@ type baseData struct {
 	Variant       string
 	ActiveGallery string
 	Galleries     []config.Gallery
+	// Counts surfaced on the footer status bar. Populated per-request;
+	// zero when the active gallery is missing or a query failed.
+	VisibleCount int
+	TagCount     int
+	SavedCount   int
 }
 
 func (s *Server) base(r *http.Request, nav, title string) baseData {
 	sessID := sessionFromContext(r.Context())
 	cx := s.contexts[s.activeName] // ctxMu RLocked by ContextMiddleware
 	degraded := false
+	visible, tagCount, savedCount := 0, 0, 0
 	if cx != nil {
 		degraded = cx.Degraded
+		visible, _ = cx.VisibleCount()
+		if cx.DB != nil {
+			// Both queries are covered by existing partial indexes and run
+			// in sub-millisecond time on realistic libraries. Errors are
+			// swallowed: the footer shows 0 rather than blocking the page.
+			cx.DB.Read.QueryRow(`SELECT COUNT(*) FROM tags WHERE is_alias = 0`).Scan(&tagCount) //nolint:errcheck
+			cx.DB.Read.QueryRow(`SELECT COUNT(*) FROM saved_searches`).Scan(&savedCount)       //nolint:errcheck
+		}
 	}
 	// Copy the gallery list so template rendering never dereferences the map
 	// under a concurrent mutation (the middleware lock is scoped to the
@@ -600,6 +635,9 @@ func (s *Server) base(r *http.Request, nav, title string) baseData {
 		Variant:       Variant,
 		ActiveGallery: s.activeName,
 		Galleries:     galleries,
+		VisibleCount:  visible,
+		TagCount:      tagCount,
+		SavedCount:    savedCount,
 	}
 }
 

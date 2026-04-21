@@ -37,10 +37,12 @@ func FolderPath(galleryPath, filePath string) string {
 }
 
 // Ingest processes a single file: hashes it, inserts into DB, extracts metadata, generates thumbnail.
-// Returns (image, isDuplicate, error).
+// Returns (image, isDuplicate, error). origin records how the file got into
+// the gallery ("ingest" for watcher/sync, "upload" for web UI, any caller
+// string for the API); empty defaults to "ingest".
 // galleryPath is the root used to compute folder_path; thumbnailsPath is the
 // target for the generated thumbnail.
-func Ingest(database *db.DB, galleryPath, thumbnailsPath, path, fileType string) (*models.Image, bool, error) {
+func Ingest(database *db.DB, galleryPath, thumbnailsPath, path, fileType, origin string) (*models.Image, bool, error) {
 	hash, err := HashFile(path)
 	if err != nil {
 		return nil, false, fmt.Errorf("hashing file: %w", err)
@@ -50,13 +52,16 @@ func Ingest(database *db.DB, galleryPath, thumbnailsPath, path, fileType string)
 	// EACCES when the file was originally written by another user.
 	ClaimOwnership(path)
 
-	return ingestWithHash(database, galleryPath, thumbnailsPath, path, fileType, hash)
+	return ingestWithHash(database, galleryPath, thumbnailsPath, path, fileType, hash, origin)
 }
 
 // ingestWithHash is the body of Ingest minus the HashFile + ClaimOwnership
 // preamble. Sync uses it directly so files don't get hashed twice (once during
 // the walk, once again inside Ingest) on large libraries.
-func ingestWithHash(database *db.DB, galleryPath, thumbnailsPath, path, fileType, hash string) (*models.Image, bool, error) {
+func ingestWithHash(database *db.DB, galleryPath, thumbnailsPath, path, fileType, hash, origin string) (*models.Image, bool, error) {
+	if origin == "" {
+		origin = models.OriginIngest
+	}
 	var existingID int64
 	err := database.Read.QueryRow(
 		`SELECT id FROM images WHERE sha256 = ?`, hash,
@@ -166,11 +171,11 @@ func ingestWithHash(database *db.DB, galleryPath, thumbnailsPath, path, fileType
 
 	var imgID int64
 	insertErr := tx.QueryRow(
-		`INSERT INTO images (sha256, canonical_path, folder_path, file_type, width, height, file_size, source_type)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO images (sha256, canonical_path, folder_path, file_type, width, height, file_size, source_type, origin)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(sha256) DO NOTHING
 		 RETURNING id`,
-		hash, path, folderPath, fileType, toNullInt(imgWidth), toNullInt(imgHeight), fi.Size(), sourceType,
+		hash, path, folderPath, fileType, toNullInt(imgWidth), toNullInt(imgHeight), fi.Size(), sourceType, origin,
 	).Scan(&imgID)
 
 	if insertErr == sql.ErrNoRows {
@@ -244,6 +249,7 @@ func ingestWithHash(database *db.DB, galleryPath, thumbnailsPath, path, fileType
 		Height:        imgHeight,
 		FileSize:      fi.Size(),
 		SourceType:    sourceType,
+		Origin:        origin,
 		IngestedAt:    time.Now().UTC(),
 	}
 	return img, false, nil

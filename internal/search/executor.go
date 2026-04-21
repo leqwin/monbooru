@@ -72,7 +72,7 @@ func Execute(database *db.DB, q Query) (*models.SearchResult, error) {
 	dataSQL := fmt.Sprintf(
 		`SELECT i.id, i.sha256, i.canonical_path, i.folder_path, i.file_type,
 		        i.width, i.height, i.file_size, i.is_missing, i.is_favorited,
-		        i.auto_tagged_at, i.source_type, i.ingested_at
+		        i.auto_tagged_at, i.source_type, i.origin, i.ingested_at
 		 FROM images i
 		 WHERE %s
 		 %s
@@ -100,7 +100,7 @@ func Execute(database *db.DB, q Query) (*models.SearchResult, error) {
 		if err := rows.Scan(
 			&img.ID, &img.SHA256, &img.CanonicalPath, &img.FolderPath, &img.FileType,
 			&width, &height, &img.FileSize, &isMissing, &isFav,
-			&autoTaggedAt, &img.SourceType, &ingestedAt,
+			&autoTaggedAt, &img.SourceType, &img.Origin, &ingestedAt,
 		); err != nil {
 			return nil, err
 		}

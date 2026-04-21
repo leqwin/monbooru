@@ -32,6 +32,7 @@ type imageResponse struct {
 	IsMissing     bool           `json:"is_missing"`
 	AutoTaggedAt  *time.Time     `json:"auto_tagged_at"`
 	SourceType    string         `json:"source_type"`
+	Origin        string         `json:"origin"`
 	IngestedAt    time.Time      `json:"ingested_at"`
 	ThumbnailURL  string         `json:"thumbnail_url"`
 	Tags          []imageTagJSON `json:"tags"`
@@ -54,10 +55,10 @@ func (h *Handler) buildImageResponse(g Gallery, imageID int64) (*imageResponse, 
 
 	err := g.DB.Read.QueryRow(`
 		SELECT id, sha256, canonical_path, file_type, width, height, file_size,
-		       is_missing, is_favorited, auto_tagged_at, source_type, ingested_at
+		       is_missing, is_favorited, auto_tagged_at, source_type, origin, ingested_at
 		FROM images WHERE id = ?`, imageID,
 	).Scan(&img.ID, &img.SHA256, &img.CanonicalPath, &img.FileType, &img.Width, &img.Height,
-		&img.FileSize, &isMissing, &isFavorited, &autoTaggedAt, &img.SourceType, &ingestedAt)
+		&img.FileSize, &isMissing, &isFavorited, &autoTaggedAt, &img.SourceType, &img.Origin, &ingestedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -120,6 +121,7 @@ func (h *Handler) buildImageResponse(g Gallery, imageID int64) (*imageResponse, 
 		IsMissing:     img.IsMissing,
 		AutoTaggedAt:  img.AutoTaggedAt,
 		SourceType:    img.SourceType,
+		Origin:        img.Origin,
 		IngestedAt:    img.IngestedAt,
 		ThumbnailURL:  "/thumbnails/" + g.Name + "/" + strconv.FormatInt(imageID, 10) + ".jpg",
 		Tags:          tags,
@@ -176,7 +178,8 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 		folder         string
 		autotag        bool
 		taggerName     string
-		uploadedToDisk bool // true when we wrote the file ourselves (multipart)
+		tagSource      string // caller-supplied source; stored on image.origin and inherited by initial tags
+		uploadedToDisk bool   // true when we wrote the file ourselves (multipart)
 	)
 
 	if isMultipart(ct) {
@@ -196,6 +199,7 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 		folder = strings.TrimSpace(r.FormValue("folder"))
 		autotag = isTrue(r.FormValue("autotag"))
 		taggerName = strings.TrimSpace(r.FormValue("tagger_name"))
+		tagSource = strings.TrimSpace(r.FormValue("source"))
 
 		destDir, destErr := gallery.ResolveSubdir(g.GalleryPath, folder)
 		if destErr != nil {
@@ -236,6 +240,7 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 			Folder     string   `json:"folder"`
 			Autotag    bool     `json:"autotag"`
 			TaggerName string   `json:"tagger_name"`
+			Source     string   `json:"source"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			apiError(w, http.StatusBadRequest, "invalid_request", "invalid JSON body")
@@ -250,6 +255,7 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 		folder = strings.TrimSpace(body.Folder)
 		autotag = body.Autotag
 		taggerName = strings.TrimSpace(body.TaggerName)
+		tagSource = strings.TrimSpace(body.Source)
 
 		// When the caller supplies a relative path plus a folder, resolve the
 		// file under <gallery>/<folder>/<path>. Absolute paths are used as-is.
@@ -289,7 +295,19 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	img, isDuplicate, err := gallery.Ingest(g.DB, g.GalleryPath, g.ThumbnailsPath, imgPath, fileType)
+	// Pick the image origin: caller-supplied source wins, otherwise the
+	// mode default ("upload" for multipart since the client pushed bytes,
+	// "ingest" for JSON since it references a pre-existing path on disk).
+	origin := tagSource
+	if origin == "" {
+		if uploadedToDisk {
+			origin = models.OriginUpload
+		} else {
+			origin = models.OriginIngest
+		}
+	}
+
+	img, isDuplicate, err := gallery.Ingest(g.DB, g.GalleryPath, g.ThumbnailsPath, imgPath, fileType, origin)
 	if err != nil {
 		if uploadedToDisk {
 			os.Remove(imgPath)
@@ -323,7 +341,7 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 			tagWarnings = append(tagWarnings, "tag "+tagName+": "+err.Error())
 			continue
 		}
-		if err := g.TagSvc.AddTagToImage(img.ID, tag.ID, false, nil); err != nil {
+		if err := g.TagSvc.AddTagToImageFromTagger(img.ID, tag.ID, false, nil, tagSource); err != nil {
 			tagWarnings = append(tagWarnings, "tag "+tagName+": "+err.Error())
 		}
 	}
@@ -492,6 +510,7 @@ func (h *Handler) searchImages(w http.ResponseWriter, r *http.Request) {
 			IsMissing:     img.IsMissing,
 			AutoTaggedAt:  img.AutoTaggedAt,
 			SourceType:    img.SourceType,
+			Origin:        img.Origin,
 			IngestedAt:    img.IngestedAt,
 			ThumbnailURL:  "/thumbnails/" + g.Name + "/" + strconv.FormatInt(img.ID, 10) + ".jpg",
 			Tags:          []imageTagJSON{},
@@ -525,12 +544,14 @@ func (h *Handler) addImageTags(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		Tags []string `json:"tags"`
+		Tags   []string `json:"tags"`
+		Source string   `json:"source"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		apiError(w, http.StatusBadRequest, "invalid_request", "invalid JSON body")
 		return
 	}
+	source := strings.TrimSpace(body.Source)
 
 	for _, tagName := range body.Tags {
 		catID, bareName, err := h.resolveCategoryTag(g, tagName)
@@ -543,7 +564,7 @@ func (h *Handler) addImageTags(w http.ResponseWriter, r *http.Request) {
 			logx.Warnf("api addImageTags GetOrCreate: %v", err)
 			continue
 		}
-		if err := g.TagSvc.AddTagToImage(id, tag.ID, false, nil); err != nil {
+		if err := g.TagSvc.AddTagToImageFromTagger(id, tag.ID, false, nil, source); err != nil {
 			logx.Warnf("api addImageTags AddTag: %v", err)
 		}
 	}

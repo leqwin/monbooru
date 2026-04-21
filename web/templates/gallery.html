@@ -5,7 +5,7 @@
 
 <div id="gallery-header">
   <form id="search-form" hx-get="/" hx-target="#gallery-grid" hx-push-url="true" hx-swap="innerHTML">
-    <div style="position:relative;flex:1;min-width:0;">
+    <div class="search-input-wrap">
       <input type="text" name="q" id="search-input" value="{{.Query}}" placeholder="Search tags…" autocomplete="off"
              hx-get="/internal/search/suggest"
              hx-trigger="input changed delay:200ms"
@@ -31,13 +31,14 @@
             onclick="toggleFavFilter()" title="Show favorites">★</button>
     <button type="button" id="random-sort-btn" class="{{if eq .Sort "random"}}active{{end}}"
             onclick="applyRandomSort()" title="{{if eq .Sort "random"}}Re-shuffle{{else}}Random order{{end}}">⇄</button>
-    <span id="result-count" class="result-count">{{.Result.Total}} {{plural .Result.Total "image" "images"}}</span>
   </form>
   <div id="save-search-area">
     {{if .Query}}<button id="save-search-btn" type="button" onclick="document.getElementById('save-search-dialog').showModal()">Save search</button>{{end}}
     {{if and (not .Degraded) (gt .Result.Total 0)}}<button id="delete-search-btn" type="button" class="btn-danger" onclick="openDeleteSearchDialog()" title="Delete all images in current search">Delete all</button>{{end}}
   </div>
 </div>
+
+<div id="gallery-status" class="status-bar">match <span id="result-count" class="result-count">{{.Result.Total}}</span></div>
 
 <div id="batch-bar" class="batch-bar hidden">
   <button onclick="selectAll()">Select all</button>

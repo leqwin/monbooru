@@ -14,7 +14,7 @@
        so applySearchSuggest and initSuggestDismiss work unchanged. */}}
   <div id="gallery-header">
     <form id="search-form" action="/" method="GET">
-      <div style="position:relative;flex:1;min-width:0;">
+      <div class="search-input-wrap">
         <input type="text" name="q" id="search-input" value="{{.BackQuery}}" placeholder="Search tags…" autocomplete="off"
                hx-get="/internal/search/suggest"
                hx-trigger="input changed delay:200ms"
@@ -165,7 +165,7 @@
 
       {{/* Danger zone: delete + remove all tags + remove auto-tagged. Rendered
            via a partial so HTMX tag-list updates can refresh it via OOB swap. */}}
-      {{template "partials/detail_danger_zone.html" (dict "ImageID" .Image.ID "ImageTags" .ImageTags "HasUserTags" .HasUserTags "ImageTaggers" .ImageTaggers "CSRFToken" .CSRFToken "BackQuery" .BackQuery "BackSort" .BackSort "BackOrder" .BackOrder "BackPage" .BackPage "BackSeed" .BackSeed "CurrentFolder" .Image.FolderPath)}}
+      {{template "partials/detail_danger_zone.html" (dict "ImageID" .Image.ID "ImageTags" .ImageTags "HasUserTags" .HasUserTags "ImageTaggers" .ImageTaggers "CSRFToken" .CSRFToken "BackQuery" .BackQuery "BackSort" .BackSort "BackOrder" .BackOrder "BackPage" .BackPage "BackSeed" .BackSeed "Ref" .Ref "CurrentFolder" .Image.FolderPath)}}
       <script>
       function openMoveImageDialog() {
         var dlg = document.getElementById('move-image-dialog');
@@ -217,6 +217,7 @@
             <tr><th>File size</th><td>{{humanBytes .Image.FileSize}}</td></tr>
             <tr><th>SHA-256</th><td class="mono-small sha-truncated" title="{{.Image.SHA256}}">{{.Image.SHA256}}</td></tr>
             <tr><th>Ingested</th><td>{{.Image.IngestedAt.Format "2006-01-02 15:04:05"}}</td></tr>
+            {{if .Image.Origin}}<tr><th>Source</th><td>{{.Image.Origin}}</td></tr>{{end}}
             {{if .Image.AutoTaggedAt}}
             <tr><th>Auto-tagged</th><td>{{.Image.AutoTaggedAt.Format "2006-01-02 15:04:05"}}</td></tr>
             {{end}}

@@ -92,6 +92,33 @@ func TestAddTagTwice_NoDouble(t *testing.T) {
 	}
 }
 
+func TestAddTagToImageFromTagger_ManualSource(t *testing.T) {
+	database, svc := setupTestDB(t)
+	catID := generalCategoryID(t, svc)
+	imgID := insertTestImage(t, database, "abc130")
+
+	tag, _ := svc.GetOrCreateTag("sourced", catID)
+	if err := svc.AddTagToImageFromTagger(imgID, tag.ID, false, nil, "my_app"); err != nil {
+		t.Fatalf("AddTagToImageFromTagger: %v", err)
+	}
+
+	var isAuto int
+	var taggerName *string
+	err := database.Read.QueryRow(
+		`SELECT is_auto, tagger_name FROM image_tags WHERE image_id = ? AND tag_id = ?`,
+		imgID, tag.ID,
+	).Scan(&isAuto, &taggerName)
+	if err != nil {
+		t.Fatalf("scan image_tags: %v", err)
+	}
+	if isAuto != 0 {
+		t.Errorf("is_auto = %d, want 0 for manual source-tagged add", isAuto)
+	}
+	if taggerName == nil || *taggerName != "my_app" {
+		t.Errorf("tagger_name = %v, want %q", taggerName, "my_app")
+	}
+}
+
 func TestRemoveTag_DecrementUsageCount(t *testing.T) {
 	database, svc := setupTestDB(t)
 	catID := generalCategoryID(t, svc)

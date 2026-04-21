@@ -1,6 +1,6 @@
 # Monbooru
 
-A self-hosted, lightweight, booru-style gallery for a personal image collection. Tag-based browsing inspired by Danbooru, running entirely on your own hardware.
+Your own self-hosted and lightweight booru.  
 
 <table>
   <tr>
@@ -83,6 +83,7 @@ Five built-in categories (General, Character, Artist, Copyright, Meta), each wit
 
 ## Auto-tagger
 
+You can use autotaggers to tag your images automatically.  
 Place a model in the `models/` volume. Each tagger lives in its own subfolder with two files:
 
 - `model.onnx`, the weights

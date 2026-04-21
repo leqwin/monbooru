@@ -111,7 +111,7 @@ func (e *testEnv) createTestImage(t *testing.T, name string, w, h int) int64 {
 		t.Fatal(err)
 	}
 
-	record, _, err := gallery.Ingest(e.database, e.galleryDir, e.thumbDir, path, "png")
+	record, _, err := gallery.Ingest(e.database, e.galleryDir, e.thumbDir, path, "png", "")
 	if err != nil {
 		t.Fatalf("ingest: %v", err)
 	}
@@ -460,6 +460,82 @@ func TestAddImageTags(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&tags)
 	if len(tags) < 2 {
 		t.Errorf("expected >= 2 tags in response, got %d", len(tags))
+	}
+}
+
+func TestCreateImage_JSONOriginRoundTrip(t *testing.T) {
+	env := newTestEnv(t)
+
+	// Pre-create a PNG on disk for JSON path-reference mode.
+	img := image.NewRGBA(image.Rect(0, 0, 8, 8))
+	path := filepath.Join(env.galleryDir, "ext_source.png")
+	f, _ := os.Create(path)
+	png.Encode(f, img)
+	f.Close()
+
+	body, _ := json.Marshal(map[string]any{
+		"path":   path,
+		"source": "https://danbooru/12345",
+	})
+	req := httptest.NewRequest("POST", "/api/v1/images", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["origin"] != "https://danbooru/12345" {
+		t.Errorf("origin = %v, want %q", resp["origin"], "https://danbooru/12345")
+	}
+
+	id := int64(resp["id"].(float64))
+	getReq := httptest.NewRequest("GET", fmt.Sprintf("/api/v1/images/%d", id), nil)
+	gw := httptest.NewRecorder()
+	env.mux.ServeHTTP(gw, getReq)
+	if gw.Code != http.StatusOK {
+		t.Fatalf("get: expected 200, got %d", gw.Code)
+	}
+	var got map[string]any
+	json.NewDecoder(gw.Body).Decode(&got)
+	if got["origin"] != "https://danbooru/12345" {
+		t.Errorf("origin on GET = %v, want %q", got["origin"], "https://danbooru/12345")
+	}
+}
+
+func TestAddImageTags_CarriesSource(t *testing.T) {
+	env := newTestEnv(t)
+	id := env.createTestImage(t, "tag_source.png", 10, 10)
+
+	body, _ := json.Marshal(map[string]any{
+		"tags":   []string{"from_app"},
+		"source": "my_app",
+	})
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/images/%d/tags", id), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	env.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var taggerName *string
+	var isAuto int
+	err := env.database.Read.QueryRow(`
+		SELECT it.is_auto, it.tagger_name FROM image_tags it
+		JOIN tags t ON t.id = it.tag_id
+		WHERE it.image_id = ? AND t.name = 'from_app'`, id).Scan(&isAuto, &taggerName)
+	if err != nil {
+		t.Fatalf("scan image_tags: %v", err)
+	}
+	if isAuto != 0 {
+		t.Errorf("is_auto = %d, want 0", isAuto)
+	}
+	if taggerName == nil || *taggerName != "my_app" {
+		t.Errorf("tagger_name = %v, want %q", taggerName, "my_app")
 	}
 }
 
@@ -1011,7 +1087,7 @@ func TestDeleteImage_DeleteEmptyFolder(t *testing.T) {
 	}
 	f.Close()
 
-	record, _, err := gallery.Ingest(env.database, env.galleryDir, env.thumbDir, imgPath, "png")
+	record, _, err := gallery.Ingest(env.database, env.galleryDir, env.thumbDir, imgPath, "png", "")
 	if err != nil {
 		t.Fatal(err)
 	}

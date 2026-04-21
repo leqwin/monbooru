@@ -10,7 +10,7 @@ func TestMoveImage_IntoSubfolder(t *testing.T) {
 	database, env, galleryDir := setupSyncTest(t)
 	srcPath := createTestPNGFile(t, galleryDir, "original.png")
 
-	_, _, err := Ingest(database, galleryDir, env.thumbnailsPath, srcPath, "png")
+	_, _, err := Ingest(database, galleryDir, env.thumbnailsPath, srcPath, "png", "")
 	if err != nil {
 		t.Fatalf("ingest: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestMoveImage_IntoSubfolder(t *testing.T) {
 func TestMoveImage_FilenameCollisionAutosuffixes(t *testing.T) {
 	database, env, galleryDir := setupSyncTest(t)
 	srcPath := createTestPNGFileSize(t, galleryDir, "pic.png", 10, 10)
-	if _, _, err := Ingest(database, galleryDir, env.thumbnailsPath, srcPath, "png"); err != nil {
+	if _, _, err := Ingest(database, galleryDir, env.thumbnailsPath, srcPath, "png", ""); err != nil {
 		t.Fatalf("ingest src: %v", err)
 	}
 	// Pre-seed an existing distinct file at the destination with the same
@@ -93,7 +93,7 @@ func TestMoveImage_SameFolderIsNoop(t *testing.T) {
 	sub := filepath.Join(galleryDir, "here")
 	os.MkdirAll(sub, 0o755)
 	srcPath := createTestPNGFile(t, sub, "x.png")
-	if _, _, err := Ingest(database, galleryDir, env.thumbnailsPath, srcPath, "png"); err != nil {
+	if _, _, err := Ingest(database, galleryDir, env.thumbnailsPath, srcPath, "png", ""); err != nil {
 		t.Fatalf("ingest: %v", err)
 	}
 	var id int64

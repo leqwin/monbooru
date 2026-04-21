@@ -741,7 +741,7 @@ func TestGallerySwitcherButtonShownWithMultipleGalleries(t *testing.T) {
 
 		body := w.Body.String()
 		if !strings.Contains(body, `id="gallery-switch-btn"`) {
-			t.Errorf("%s: topbar should show the gallery switcher button with 2+ galleries", path)
+			t.Errorf("%s: layout should render the gallery switcher button with 2+ galleries", path)
 		}
 		if !strings.Contains(body, `id="gallery-switch-dialog"`) {
 			t.Errorf("%s: layout should render the gallery switch dialog with 2+ galleries", path)
@@ -772,6 +772,30 @@ func TestGallerySwitchChangesActive(t *testing.T) {
 	}
 }
 
+func TestGallerySwitch_RedirectsHomeFromSearch(t *testing.T) {
+	srv := newMultiGalleryServer(t)
+	h := srv.Handler()
+
+	body := "_csrf=" + srv.csrfToken("anon") + "&name=stock"
+	req := httptest.NewRequest("POST", "/internal/gallery/switch", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-CSRF-Token", srv.csrfToken("anon"))
+	req.Header.Set("HX-Request", "true")
+	req.Header.Set("HX-Current-URL", "http://localhost/?q=cat")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("switch expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("HX-Redirect"); got != "/" {
+		t.Errorf("HX-Redirect = %q, want /", got)
+	}
+	if w.Header().Get("HX-Refresh") != "" {
+		t.Error("search-bearing URL should redirect, not refresh in place")
+	}
+}
+
 func TestGallerySwitcherHiddenWithSingleGallery(t *testing.T) {
 	srv := newTestServer(t)
 	h := srv.Handler()
@@ -780,6 +804,6 @@ func TestGallerySwitcherHiddenWithSingleGallery(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	if strings.Contains(w.Body.String(), `id="gallery-switch-btn"`) {
-		t.Error("topbar switcher button should be hidden when only one gallery is configured")
+		t.Error("gallery switcher button should be hidden when only one gallery is configured")
 	}
 }

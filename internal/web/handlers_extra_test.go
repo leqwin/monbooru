@@ -111,7 +111,7 @@ func TestFoldersSuggest_PrefixFilter(t *testing.T) {
 		f, _ := os.Create(p)
 		_ = png.Encode(f, img)
 		f.Close()
-		if _, _, err := gallery.Ingest(cx.DB, cx.GalleryPath, cx.ThumbnailsPath, p, "png"); err != nil {
+		if _, _, err := gallery.Ingest(cx.DB, cx.GalleryPath, cx.ThumbnailsPath, p, "png", ""); err != nil {
 			t.Fatal(err)
 		}
 	}

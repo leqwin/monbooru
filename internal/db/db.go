@@ -61,11 +61,35 @@ func Open(path string) (*DB, error) {
 	return db, nil
 }
 
-// Bootstrap runs the embedded schema.sql on the write pool.
-// It is idempotent: all statements use IF NOT EXISTS / INSERT OR IGNORE.
+// Bootstrap runs the embedded schema.sql on the write pool, then applies
+// the small set of idempotent column-add migrations needed for DBs that
+// predate a new column. SQLite does not support ADD COLUMN IF NOT EXISTS,
+// so each migration gates itself on pragma_table_info.
 func Bootstrap(db *DB) error {
 	if _, err := db.Write.Exec(schemaSQL); err != nil {
 		return fmt.Errorf("bootstrapping schema: %w", err)
+	}
+	if err := ensureColumn(db, "images", "origin", `ALTER TABLE images ADD COLUMN origin TEXT NOT NULL DEFAULT 'ingest'`); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ensureColumn adds a column on the named table when it is absent. The
+// caller supplies the full ALTER TABLE statement so the default and type
+// stay adjacent to the original schema definition.
+func ensureColumn(db *DB, table, column, alterSQL string) error {
+	var count int
+	if err := db.Write.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, table, column,
+	).Scan(&count); err != nil {
+		return fmt.Errorf("inspect %s.%s: %w", table, column, err)
+	}
+	if count > 0 {
+		return nil
+	}
+	if _, err := db.Write.Exec(alterSQL); err != nil {
+		return fmt.Errorf("add column %s.%s: %w", table, column, err)
 	}
 	return nil
 }

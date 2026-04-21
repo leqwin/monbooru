@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS images (
     is_favorited   INTEGER NOT NULL DEFAULT 0,
     auto_tagged_at TEXT,
     source_type    TEXT    NOT NULL DEFAULT 'none',
+    origin         TEXT    NOT NULL DEFAULT 'ingest',
     ingested_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 

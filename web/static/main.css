@@ -6,10 +6,11 @@
   --border:     #2a2a2a;
   --fg:         #c8c8c8;
   --fg-dim:     #666666;
-  --accent:     #3d90e3;
+  --accent:     #9d2235;
   --success:    #22aa44;
   --warning:    #ffaa00;
   --error:      #cc3333;
+  --indigo:     #5c6bc0;
 
   /* Tag category colors */
   --cat-general:   #3d90e3;
@@ -98,19 +99,46 @@ button:hover { border-color: var(--accent); }
   padding: 4px 16px;
   font-size: 11px;
   color: var(--fg-dim);
-  text-align: right;
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
 }
+#footer-left, #footer-right { display: flex; gap: 8px; align-items: center; }
 #footer a { color: var(--fg-dim); }
 #footer a:hover { color: var(--fg); }
+.footer-gallery { color: var(--accent); }
+/* The gallery name doubles as the switcher when more than one gallery is
+   configured; strip the browser's <button> chrome so it reads as status
+   text, not a chunky toolbar button. */
+button.footer-gallery {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+}
+button.footer-gallery:hover { color: var(--fg); }
+.footer-sep { color: var(--border); }
+.footer-degraded { color: var(--warning); }
 
 #nav {
   display: flex;
   gap: 12px;
   margin-left: 16px;
 }
-#nav a { color: var(--fg-dim); font-size: 13px; }
+/* Symmetric vertical padding + a transparent border-bottom keep every nav
+   item the same height, so recoloring the border on .active highlights the
+   current page without shifting the baseline text up or down. */
+#nav a {
+  color: var(--fg-dim);
+  font-size: 13px;
+  padding: 10px 0;
+  border-bottom: 2px solid transparent;
+}
 #nav a:hover, #nav a.active { color: var(--fg); text-decoration: none; }
+#nav a.active { border-bottom-color: var(--accent); }
 
 #topbar-right {
   margin-left: auto;
@@ -351,9 +379,27 @@ button:hover { border-color: var(--accent); }
   flex: 1;
   min-width: 0;
 }
+.search-input-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+/* A ">" command-prompt glyph anchored inside the search input reinforces
+   that the field takes a query expression, not a free-text filter. */
+.search-input-wrap::before {
+  content: ">";
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--accent);
+  font-weight: bold;
+  line-height: 1;
+  pointer-events: none;
+}
 #search-input {
   width: 100%;
-  padding: 6px 10px;
+  padding: 6px 10px 6px 26px;
   background: var(--bg-input);
   border: 1px solid var(--border);
 }
@@ -371,8 +417,25 @@ button:hover { border-color: var(--accent); }
   line-height: 1;
   box-sizing: border-box;
 }
-.result-count { font-size: 12px; color: var(--fg-dim); white-space: nowrap; }
+/* Restore the prompt glyph's reserved left padding after the row-level
+   reset above. */
+#gallery-header #search-input { padding-left: 26px; }
+.result-count { color: var(--fg); }
 #save-search-area { flex-shrink: 0; }
+
+/* Status bar: a single-line context strip under the gallery header and a
+   matching treatment on the detail topbar. Dashed bottom border is the
+   shared signature. */
+.status-bar {
+  font-size: 12px;
+  color: var(--fg-dim);
+  padding-bottom: 6px;
+  border-bottom: 1px dashed var(--border);
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
 
 .thumb-card.focused { border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: -1px; }
 
@@ -512,6 +575,49 @@ button:hover { border-color: var(--accent); }
   overflow-wrap: break-word;
 }
 .meta-table th { color: var(--fg-dim); width: 100px; word-break: normal; }
+
+/* Dotted-leader layout for key-value rows (label + value separated by a
+   dotted fill, BIOS/manpage style). Scoped to rows with a <th> so the
+   aliases table (two <td> cells per row, no <th>) keeps its bordered
+   tabular layout. The <th> and <td> sit on an opaque --bg background that
+   hides the absolutely-positioned dots where the label and value sit. */
+.meta-table tr:has(> th) {
+  display: flex;
+  align-items: baseline;
+  padding: 3px 0;
+  position: relative;
+  overflow: hidden;
+}
+.meta-table tr:has(> th) th,
+.meta-table tr:has(> th) td {
+  border: none;
+  padding: 2px 0;
+  background: var(--bg);
+  position: relative;
+  z-index: 1;
+}
+.meta-table tr:has(> th) th {
+  width: auto;
+  min-width: 90px;
+  font-weight: normal;
+  padding-right: 6px;
+}
+.meta-table tr:has(> th) td {
+  color: var(--fg);
+  padding-left: 6px;
+}
+.meta-table tr:has(> th)::before {
+  content: "................................................................................................................................";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 5px;
+  color: var(--border);
+  white-space: nowrap;
+  overflow: hidden;
+  font-size: 12px;
+  pointer-events: none;
+}
 
 details summary {
   cursor: pointer;
@@ -711,9 +817,12 @@ dialog .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
 }
 .source-badge-sub { color: var(--fg-dim); border-color: var(--border); }
 
-/* Detail page - two-column layout */
+/* Detail page - two-column layout. Padding is deliberately omitted: the
+   surrounding #content already supplies 16px, so the search bar, topbar, and
+   right-column meta panel line up with the gallery frame (search bar left
+   edge matches the gallery's; meta panel right edge matches the topbar sync
+   button's). */
 #detail-page {
-  padding: 16px;
 }
 
 .detail-body {
@@ -763,6 +872,8 @@ dialog .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
 .detail-topbar {
   display: flex;
   align-items: center;
+  padding-bottom: 6px;
+  border-bottom: 1px dashed var(--border);
   margin-bottom: 12px;
   gap: 24px; /* mirrors .detail-body gap so columns align */
 }
@@ -800,16 +911,16 @@ dialog .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
   min-width: 0;
 }
 .btn-autotag {
-  color: var(--accent);
-  border: 1px solid var(--accent);
+  color: var(--indigo);
+  border: 1px solid var(--indigo);
   background: var(--bg-surface);
   padding: 2px 8px;
   font-size: 13px;
   line-height: 1.4;
   cursor: pointer;
 }
-.btn-autotag:hover { color: var(--bg); background: var(--accent); }
-.danger-zone-delete { margin-left: auto; }
+.btn-autotag:hover { color: var(--bg); background: var(--indigo); border-color: var(--indigo); }
+.danger-zone-trailing { margin-left: auto; }
 
 .btn-fav {
   background: none;
@@ -904,18 +1015,21 @@ dialog .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
   cursor: pointer;
 }
 .btn-sm:hover { color: var(--fg); border-color: var(--fg-dim); }
+/* Destructive actions (.btn-danger) are solid-filled so they stand out
+   from the dark-surface borders of every other button. Hover inverts
+   back to the transparent/red-text form for a visible affordance. */
 .btn-danger {
-  color: var(--error);
+  color: var(--bg);
   border-color: var(--error);
-  background: var(--bg);
+  background: var(--error);
 }
-.btn-danger:hover { background: var(--error); color: var(--bg); }
+.btn-danger:hover { background: var(--bg); color: var(--error); }
 .btn-warning {
   color: var(--warning);
   border-color: var(--warning);
   background: var(--bg);
 }
-.btn-warning:hover { background: var(--warning); color: var(--bg); }
+.btn-warning:hover { background: var(--warning); color: var(--bg); border-color: var(--warning); }
 .btn-success {
   color: var(--success);
   border-color: var(--success);
@@ -924,16 +1038,19 @@ dialog .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
 .btn-success:hover { background: var(--success); color: var(--bg); }
 
 /* Tag list partial */
-.tag-list { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px; }
+.tag-list { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 10px; }
+/* Tag chip: [name×] with brackets colored by the li's inherited category
+   color. .auto-conf/.tag-remove-btn keep their explicit dim color so only
+   the link text + brackets carry the category hue. */
 .tag-item {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  border: 1px solid var(--border);
-  padding: 2px 6px;
   font-size: 12px;
 }
-.tag-chip-name { text-decoration: none; }
+.tag-item::before { content: "["; }
+.tag-item::after  { content: "]"; }
+.tag-chip-name { color: inherit; text-decoration: none; }
 .tag-chip-name:hover { text-decoration: underline; }
 .auto-badge { font-size: 10px; color: var(--fg-dim); border: 1px solid var(--border); padding: 0 2px; margin-left: 2px; }
 .auto-conf { font-size: 10px; color: var(--fg-dim); margin-left: 2px; }

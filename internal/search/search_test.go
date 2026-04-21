@@ -331,7 +331,7 @@ func ingestTestImage(t *testing.T, database *db.DB, env *searchEnv, name string)
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := gallery.Ingest(database, env.galleryDir, env.thumbnailsDir, path, "png"); err != nil {
+	if _, _, err := gallery.Ingest(database, env.galleryDir, env.thumbnailsDir, path, "png", ""); err != nil {
 		t.Fatalf("ingest %q: %v", name, err)
 	}
 }
@@ -368,7 +368,7 @@ func TestExecute_FolderFilter(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.Close()
-	if _, _, err := gallery.Ingest(database, env.galleryDir, env.thumbnailsDir, path, "png"); err != nil {
+	if _, _, err := gallery.Ingest(database, env.galleryDir, env.thumbnailsDir, path, "png", ""); err != nil {
 		t.Fatalf("ingest sub.png: %v", err)
 	}
 

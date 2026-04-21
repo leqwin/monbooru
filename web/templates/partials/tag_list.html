@@ -8,9 +8,9 @@
       <h4 class="tag-source-title">{{.Title}}</h4>
       <ul class="tag-list" data-source="{{.Source}}">
         {{range .Tags}}
-        <li class="tag-item" data-tag-id="{{.TagID}}" data-source="{{if .IsAuto}}auto{{else}}user{{end}}">
-          <a href="/?q={{.Category}}:{{.TagName}}" class="tag-chip-name" style="color:{{.Color}}">{{.TagName}}</a>
-          {{if .IsAuto}}<span class="auto-badge" title="auto-tagged">auto</span>{{with autoConfPct .Confidence}}<span class="auto-conf">{{.}}%</span>{{end}}{{end}}
+        <li class="tag-item" data-tag-id="{{.TagID}}" data-source="{{if .IsAuto}}auto{{else}}user{{end}}" style="color:{{.Color}}">
+          <a href="/?q={{.Category}}:{{.TagName}}" class="tag-chip-name">{{.TagName}}</a>
+          {{if .IsAuto}}{{with autoConfPct .Confidence}}<span class="auto-conf">{{.}}%</span>{{end}}{{end}}
           <button class="tag-remove-btn"
                   hx-delete="/images/{{$.ImageID}}/tags/{{.TagID}}"
                   hx-target="#image-tags"
@@ -38,6 +38,6 @@
 </div>
 {{end}}
 {{if .DangerZone}}
-{{template "partials/detail_danger_zone.html" (dict "ImageID" .ImageID "ImageTags" .ImageTags "HasUserTags" .HasUserTags "ImageTaggers" .ImageTaggers "CSRFToken" .CSRFToken "BackQuery" .BackQuery "BackSort" .BackSort "BackOrder" .BackOrder "BackPage" .BackPage "BackSeed" .BackSeed "CurrentFolder" .CurrentFolder "OOB" true)}}
+{{template "partials/detail_danger_zone.html" (dict "ImageID" .ImageID "ImageTags" .ImageTags "HasUserTags" .HasUserTags "ImageTaggers" .ImageTaggers "CSRFToken" .CSRFToken "BackQuery" .BackQuery "BackSort" .BackSort "BackOrder" .BackOrder "BackPage" .BackPage "BackSeed" .BackSeed "Ref" .Ref "CurrentFolder" .CurrentFolder "OOB" true)}}
 {{end}}
 {{end}}

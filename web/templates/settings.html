@@ -249,16 +249,16 @@
       </div>
     </form>
     {{$enabledCount := index . "EnabledCount"}}
+    {{if $enabledCount}}
     <div class="settings-sub">
       <h4>Run Auto-Tagger</h4>
       <p class="field-hint">Runs every enabled tagger on the selected images.</p>
       <div class="tagger-bulk-actions">
-        {{if $enabledCount}}
         <form hx-post="/internal/autotag" hx-target="#flash-tagger" hx-swap="innerHTML"
               hx-on::after-request="if(event.detail.successful){document.getElementById('job-status').setAttribute('hx-trigger','load');htmx.trigger('#job-status','load')}">
           <input type="hidden" name="_csrf" value="{{$csrf}}">
           <input type="hidden" name="mode" value="never">
-          <button type="submit" class="btn-autotag">Run on untagged images</button>
+          <button type="submit" class="btn-autotag">Auto-tag all untagged images</button>
         </form>
         <form hx-post="/internal/autotag" hx-target="#flash-tagger" hx-swap="innerHTML"
               hx-on::after-request="if(event.detail.successful){document.getElementById('job-status').setAttribute('hx-trigger','load');htmx.trigger('#job-status','load')}"
@@ -266,9 +266,14 @@
               data-confirm-ok="Re-tag">
           <input type="hidden" name="_csrf" value="{{$csrf}}">
           <input type="hidden" name="mode" value="all">
-          <button type="submit" class="btn-autotag">Run on all images</button>
+          <button type="submit" class="btn-autotag">Auto-tag all images</button>
         </form>
-        {{end}}
+      </div>
+    </div>
+    {{end}}
+    <div class="settings-sub">
+      <h4>Bulk tag removal</h4>
+      <div class="tagger-bulk-actions">
         <form hx-post="/settings/tagger/remove-autotagged" hx-target="#flash-tagger" hx-swap="innerHTML"
               hx-confirm="Remove every auto-tag from every image? Manual tags are kept."
               data-confirm-ok="Remove">
