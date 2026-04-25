@@ -1,9 +1,18 @@
 services:
   monbooru:
     container_name: monbooru
+    # you can use monbooru:latest-cuda if you have a CUDA compatible GPU for faster auto-tagging
     image: ghcr.io/leqwin/monbooru:latest
     ports:
       - "127.0.0.1:8080:8080"
+    # if using CUDA, pass the GPU to the container
+    #deploy:
+    #  resources:
+    #    reservations:
+    #      devices:
+    #        - driver: nvidia
+    #          count: all     
+    #          capabilities: [gpu]
     security_opt:
       - no-new-privileges:true
     cap_drop:
