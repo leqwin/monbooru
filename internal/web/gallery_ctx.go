@@ -143,12 +143,16 @@ func openGalleryCtx(g config.Gallery) (*galleryCtx, error) {
 	}, nil
 }
 
-// close stops the watcher and closes the DB.
+// close stops the watcher and closes the DB. Keeps cx.DB non-nil afterwards:
+// a concurrent warmCaches goroutine (spawned by StartWatchers, not joined)
+// can still race against close at shutdown or gallery removal. A closed pool
+// returns "database is closed" on subsequent calls, which the accessors
+// discard; a nil pool would panic on the field deref. sql.DB.Close is
+// idempotent so a later close still behaves.
 func (cx *galleryCtx) close() {
 	cx.stopWatcher()
 	if cx.DB != nil {
 		cx.DB.Close()
-		cx.DB = nil
 	}
 }
 

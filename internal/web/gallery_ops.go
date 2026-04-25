@@ -161,7 +161,17 @@ func (s *Server) RemoveGallery(name string, removeFolder bool) error {
 		logx.Warnf("remove gallery data dir %q: %v", dataDir, err)
 	}
 	if removeFolder {
-		if err := os.RemoveAll(galleryPath); err != nil {
+		// Refuse to follow a symlink: the target sitting behind the
+		// gallery_path config field could point anywhere, and os.RemoveAll
+		// would happily wipe whatever directory the link resolves to.
+		// On a LAN single-operator setup this guard is "foot-shot
+		// prevention" rather than a security boundary, but the
+		// destructive blast radius warrants it.
+		if info, err := os.Lstat(galleryPath); err != nil {
+			logx.Warnf("remove gallery folder %q: stat: %v", galleryPath, err)
+		} else if info.Mode()&os.ModeSymlink != 0 {
+			logx.Warnf("remove gallery folder %q: refusing to follow symlink", galleryPath)
+		} else if err := os.RemoveAll(galleryPath); err != nil {
 			logx.Warnf("remove gallery folder %q: %v", galleryPath, err)
 		}
 	}
@@ -299,6 +309,9 @@ func (s *Server) gallerySwitchHandler(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
+// settingsGallery*Post handlers write a flash on error and fire HX-Refresh on
+// success. The refresh reloads the whole page, so a success-path flash would
+// never render; the page itself is the confirmation.
 func (s *Server) settingsGalleriesPost(w http.ResponseWriter, r *http.Request) {
 	if !parseFormOK(w, r) {
 		return
@@ -310,7 +323,6 @@ func (s *Server) settingsGalleriesPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("HX-Refresh", "true")
-	writeFlash(w, "ok", "Gallery "+name+" added.")
 }
 
 func (s *Server) settingsGalleryRenamePost(w http.ResponseWriter, r *http.Request) {
@@ -324,7 +336,6 @@ func (s *Server) settingsGalleryRenamePost(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	w.Header().Set("HX-Refresh", "true")
-	writeFlash(w, "ok", "Gallery renamed.")
 }
 
 func (s *Server) settingsGalleryDeletePost(w http.ResponseWriter, r *http.Request) {
@@ -332,13 +343,17 @@ func (s *Server) settingsGalleryDeletePost(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	name := r.PathValue("name")
+	confirm := strings.TrimSpace(r.FormValue("confirm_name"))
+	if confirm != name {
+		writeFlash(w, "err", "type-to-confirm name does not match")
+		return
+	}
 	removeFolder := r.FormValue("remove_folder") == "on"
 	if err := s.RemoveGallery(name, removeFolder); err != nil {
 		writeFlash(w, "err", err.Error())
 		return
 	}
 	w.Header().Set("HX-Refresh", "true")
-	writeFlash(w, "ok", "Gallery "+name+" removed.")
 }
 
 func (s *Server) settingsGalleryDefaultPost(w http.ResponseWriter, r *http.Request) {
@@ -348,5 +363,4 @@ func (s *Server) settingsGalleryDefaultPost(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	w.Header().Set("HX-Refresh", "true")
-	writeFlash(w, "ok", "Default gallery set to "+name+".")
 }

@@ -33,8 +33,8 @@ type Watcher struct {
 }
 
 // NewWatcher creates and initializes a filesystem watcher for one gallery.
-// galleryName is used to prefix status messages so the user can tell which
-// gallery a watcher notification came from when several are running at once.
+// galleryName prefixes status messages so multi-gallery setups can tell
+// which gallery an event came from.
 func NewWatcher(galleryName, galleryPath, thumbnailsPath string, maxFileSizeMB int, database *db.DB, jobManager *jobs.Manager) (*Watcher, error) {
 	fsw, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -58,7 +58,7 @@ func NewWatcher(galleryName, galleryPath, thumbnailsPath string, maxFileSizeMB i
 	}
 	logx.Infof("watcher: watching %s", galleryPath)
 
-	// Walk and watch all existing subdirectories, stopping gracefully on inotify limits.
+	// Walk and watch every subdirectory, stopping gracefully on inotify limits.
 	watchCount := 1
 	limitHit := false
 	filepath.WalkDir(galleryPath, func(path string, d os.DirEntry, err error) error {
@@ -100,13 +100,10 @@ func (w *Watcher) Run(ctx context.Context) error {
 				return nil
 			}
 
-			// Drop events while a manual sync is running; sync walks the
-			// tree itself and ingests via its own transaction, so a
-			// concurrent watcher Ingest would race on the image_paths
-			// UNIQUE and fail with "constraint failed: UNIQUE ... (2067)".
-			// Move jobs are suppressed for the same reason: every rename
-			// fires a CREATE + REMOVE pair that would otherwise trip
-			// markFileMissing on the source.
+			// Drop events while a manual sync or move job is running;
+			// each one already touches image_paths under its own
+			// transaction, so a concurrent watcher ingest would race on
+			// the UNIQUE constraint or trip markFileMissing on the source.
 			if w.jobs != nil {
 				if st := w.jobs.Get(); st != nil && st.Running && (st.JobType == "sync" || st.JobType == "move") {
 					continue
@@ -130,7 +127,6 @@ func (w *Watcher) Run(ctx context.Context) error {
 			}
 
 			if event.Has(fsnotify.Remove) {
-				// fsw.Remove may no-op if the target was already gone (e.g. a file remove).
 				w.fsw.Remove(event.Name)
 				w.markFileMissing(event.Name)
 			}
@@ -144,10 +140,9 @@ func (w *Watcher) Run(ctx context.Context) error {
 	}
 }
 
-// eventPrefix returns `watcher: ` by default, or `watcher [name]: ` when the
-// watcher was opened with a non-empty gallery name. The bracketed name lets
-// the user tell which gallery a status-bar event came from when several
-// galleries are watched at once.
+// eventPrefix returns `watcher: ` by default, or `watcher [name]: ` when
+// the watcher has a non-empty gallery name. The bracketed form lets users
+// tell multi-gallery events apart in the status bar.
 func (w *Watcher) eventPrefix() string {
 	if w.galleryName == "" {
 		return "watcher: "
@@ -188,10 +183,9 @@ func (w *Watcher) ingestFile(path string) {
 		return
 	}
 
-	// Mirror the size filter Sync applies in Phase 1. Without it the
-	// watcher silently ingests any file the user drops into the gallery,
-	// however large - including multi-GB videos that would fail to
-	// thumbnail and hold a write transaction for minutes.
+	// Mirror Sync's per-file size cap. Without it, dropping a multi-GB
+	// video into the gallery would hang thumbnail generation and hold a
+	// write transaction for minutes.
 	if maxMB := w.maxFileSizeMB; maxMB > 0 {
 		if info, statErr := os.Stat(path); statErr == nil {
 			if info.Size() > int64(maxMB)*1024*1024 {
@@ -220,12 +214,22 @@ func (w *Watcher) ingestFile(path string) {
 
 // markFileMissing marks a file as is_missing=true in the DB if it exists.
 func (w *Watcher) markFileMissing(path string) {
-	if !strings.HasPrefix(path, w.galleryPath) {
+	// filepath.Rel containment so a sibling directory sharing a prefix
+	// (/data/gallery vs /data/gallery_backup) is correctly rejected.
+	rootAbs, err := filepath.Abs(w.galleryPath)
+	if err != nil {
+		return
+	}
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return
+	}
+	if !PathInside(rootAbs, pathAbs) {
 		return
 	}
 
 	var imgID int64
-	err := w.db.Read.QueryRow(
+	err = w.db.Read.QueryRow(
 		`SELECT id FROM images WHERE canonical_path = ? AND is_missing = 0`, path,
 	).Scan(&imgID)
 	if err != nil {

@@ -6,12 +6,12 @@ Works fully offline and with no telemetry. Supports ONNX models for local auto-t
 
 <table>
   <tr>
-    <td><img src="/.github/assets/gallery.png" width="400"/></td>
-    <td><img src="/.github/assets/image.png" width="400"/></td>
+    <td><img src="/.github/assets/gallery.webp" width="400"/></td>
+    <td><img src="/.github/assets/image.webp" width="400"/></td>
   </tr>
   <tr>
-    <td><img src="/.github/assets/sd.png" width="400"/></td>
-    <td><img src="/.github/assets/tags.png" width="400"/></td>
+    <td><img src="/.github/assets/sd.webp" width="400"/></td>
+    <td><img src="/.github/assets/tags.webp" width="400"/></td>
   </tr>
 </table>
 
@@ -28,6 +28,7 @@ Works fully offline and with no telemetry. Supports ONNX models for local auto-t
 - Batch operations: bulk delete, bulk move (with folder autocomplete), bulk auto-tag, delete-all-search-results
 - Daily maintenance schedule: scheduled sync, auto-tag, recompute counts, merge general tags, and vacuum databases...
 - Create multiple galleries with their own filesystem and switch between them
+- Per-gallery export and import: full backup (.db, .json, .zip with images), or a light format (.json or .zip with images) with only images<->tags map; imports can replace or merge
 - REST API for third-party integrations (e.g. adding images to the gallery from an external app)
 - Fully offline, no telemetry
 
@@ -188,7 +189,7 @@ CGO_ENABLED=1 go build -tags tagger -o monbooru ./cmd/monbooru
 
 ## Inotify limit (Docker)
 
-If the watcher reports an inotify limit error, raise `fs.inotify.max_user_instances` on the host (not inside the container) and restart. Alternatively, disable the watcher in Settings and use the manual Sync button when adding new files.
+If the watcher reports an inotify limit error (logged as `no space left on device` from `inotify_add_watch`), raise `fs.inotify.max_user_watches` on the host (not inside the container) and restart. If you see `too many open files`, raise `fs.inotify.max_user_instances`. Alternatively, disable the watcher in Settings and use the manual Sync button when adding new files.
 
 ---
 

@@ -18,17 +18,16 @@ import (
 const thumbMaxDim = 300
 const thumbQuality = 85
 
-// ThumbnailPath returns the path for a static image thumbnail.
 func ThumbnailPath(dir string, imageID int64) string {
 	return filepath.Join(dir, fmt.Sprintf("%d.jpg", imageID))
 }
 
-// HoverPath returns the path for a video hover preview.
 func HoverPath(dir string, imageID int64) string {
 	return filepath.Join(dir, fmt.Sprintf("%d_hover.webp", imageID))
 }
 
-// Generate creates the thumbnail for the given file at dstDir/{imageID}.jpg.
+// Generate writes the static thumbnail (and animated hover for videos
+// and GIFs when ffmpeg is available) for the given file under dstDir.
 func Generate(srcPath, dstDir string, imageID int64, fileType string) error {
 	if err := os.MkdirAll(dstDir, 0755); err != nil {
 		return fmt.Errorf("creating thumbnail dir: %w", err)
@@ -40,7 +39,6 @@ func Generate(srcPath, dstDir string, imageID int64, fileType string) error {
 		if err := generateVideoThumb(srcPath, dstPath); err != nil {
 			return err
 		}
-		// Also generate animated hover preview for videos
 		hoverDst := HoverPath(dstDir, imageID)
 		if err := generateVideoHover(srcPath, hoverDst); err != nil {
 			logx.Warnf("hover preview for %q: %v", srcPath, err)
@@ -86,7 +84,7 @@ func generateImageThumb(srcPath, dstPath, fileType string) error {
 	return writeJPEGAtomic(thumb, dstPath, thumbQuality)
 }
 
-// scaleImage scales an image so its longest dimension is <= maxDim.
+// scaleImage scales src so its longest side is at most maxDim.
 func scaleImage(src image.Image, maxDim int) image.Image {
 	bounds := src.Bounds()
 	w, h := bounds.Dx(), bounds.Dy()
@@ -115,7 +113,7 @@ func scaleImage(src image.Image, maxDim int) image.Image {
 	return dst
 }
 
-// writeJPEGAtomic writes an image as JPEG to path atomically (temp + rename).
+// writeJPEGAtomic encodes img as JPEG at path via a temp file + rename.
 func writeJPEGAtomic(img image.Image, path string, quality int) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".thumb.*")

@@ -1,5 +1,30 @@
 # Changelog
 
+## [v1.3.0] - 2026-04-25
+
+### Added
+- Per-gallery import/export controls in Settings → Galleries. Imports can replace current gallery or merge with it. You can export/import only the database (as full .db or .json or as a minimal .json) or the database+images as .zip.
+- Tag aliases: adding or searching a tag under any of its alias names resolves to the canonical tag. Auto-tagger output goes through the same alias resolution before it lands on a row.
+- Gallery delete/replace dialog requires typing the gallery name before it confirms.
+- Rebuild-thumbs is auto-queued after a gallery import.
+- New `tools/blombooru-to-light.py` exporter that converts a blombooru install into a Monbooru light archive ready for the import flow.
+
+### Changed
+- Gallery thumbnail focus outline thickened so keyboard focus is easier to spot.
+- Aliases now live in the main tags table instead of a separate one, so they share the tag pipeline end to end.
+
+### Fixed
+- Gallery: scan errors from Ingest's duplicate-path lookup surface to the caller instead of being swallowed. Re-extract per-image work runs in a transaction.
+- Web: per-file size cap is enforced on uploads. Archive entries are checked for path containment with `filepath.Rel`, and the watcher uses the same approach for gallery-path containment. Removing a gallery folder refuses to follow a symlink.
+- Search/UI: the favorites filter button stays active across composed queries. The login-rate-limiter shift is clamped to a non-negative range. `warmCaches` nil-deref race and dead `HX-Refresh` flashes resolved.
+- Tags: errors from `RecalcAndPruneIDs` propagate and are logged at callers. `folderonly`, `tagged`, and `autotagged` are reserved as category names. Remaining `rows.Scan` and mark-missing loops surface their errors.
+- Gallery video probe: ffmpeg invocations terminate option parsing with `--` before output paths so filenames with leading dashes can't be parsed as flags.
+- Filter-keyword set is hoisted to a single canonical source shared between search and web.
+- Docker Compose example image path on GitHub points at the right repository.
+
+### Internal
+- Cleanup pass on stale comments and dead notes; readme updates; assets recompressed.
+
 ## [v1.2.3] - 2026-04-21
 
 ### Added

@@ -30,15 +30,15 @@ type ServerConfig struct {
 	BaseURL     string `toml:"base_url"`
 }
 
-// PathsConfig holds process-wide paths. Per-gallery DB and thumbnails paths
-// are derived from DataPath + the gallery name.
+// PathsConfig holds process-wide paths. Per-gallery DB and thumbnails
+// paths are derived from DataPath + the gallery name.
 type PathsConfig struct {
 	DataPath  string `toml:"data_path"`
 	ModelPath string `toml:"model_path"`
 }
 
-// Gallery is one named gallery. Only Name and GalleryPath are persisted; the
-// rest are derived at Load time.
+// Gallery is one named gallery. Only Name and GalleryPath persist;
+// DBPath and ThumbnailsPath are derived at Load time.
 type Gallery struct {
 	Name           string `toml:"name"`
 	GalleryPath    string `toml:"gallery_path"`
@@ -81,8 +81,8 @@ type LogConfig struct {
 	Level string `toml:"level"`
 }
 
-// ScheduleConfig runs selected maintenance actions once per day at the
-// configured HH:MM on every configured gallery.
+// ScheduleConfig drives the once-per-day maintenance run at HH:MM on
+// every configured gallery.
 type ScheduleConfig struct {
 	Time             string `toml:"time"` // "HH:MM" 24h, default "01:00"
 	SyncGallery      bool   `toml:"sync_gallery"`
@@ -300,8 +300,9 @@ func validate(cfg *Config) error {
 	if !strings.Contains(cfg.Server.BindAddress, ":") {
 		return fmt.Errorf("server.bind_address %q is not a valid host:port", cfg.Server.BindAddress)
 	}
-	// enable_password=true with an empty hash would let the password-update handler
-	// bypass the current-password check (that guard only runs when PasswordHash != "").
+	// enable_password=true with an empty hash would let the password-update
+	// handler bypass the current-password check (that guard only runs when
+	// PasswordHash != "").
 	if cfg.Auth.EnablePassword && strings.TrimSpace(cfg.Auth.PasswordHash) == "" {
 		return fmt.Errorf("auth.enable_password is true but auth.password_hash is empty - " +
 			"run `monbooru -hash-password 'your-password'` and paste the result into monbooru.toml")

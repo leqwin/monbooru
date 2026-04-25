@@ -12,9 +12,8 @@ import (
 var schemaSQL string
 
 // DB holds read and write connection pools for the SQLite database.
-// SQLite in WAL mode supports concurrent readers but serializes writers.
-// Read pool: multiple connections for concurrent reads.
-// Write pool: single connection for all writes and migrations.
+// WAL mode allows concurrent readers but serialises writers, so the read
+// pool has many connections and the write pool has one.
 type DB struct {
 	Read  *sql.DB
 	Write *sql.DB
@@ -48,7 +47,6 @@ func Open(path string) (*DB, error) {
 
 	db := &DB{Read: rd, Write: wr}
 
-	// Verify connectivity
 	if err := rd.Ping(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("pinging read pool: %w", err)
@@ -62,9 +60,9 @@ func Open(path string) (*DB, error) {
 }
 
 // Bootstrap runs the embedded schema.sql on the write pool, then applies
-// the small set of idempotent column-add migrations needed for DBs that
-// predate a new column. SQLite does not support ADD COLUMN IF NOT EXISTS,
-// so each migration gates itself on pragma_table_info.
+// idempotent column-add migrations for databases that predate a column.
+// SQLite has no ADD COLUMN IF NOT EXISTS, so each migration gates itself
+// on pragma_table_info.
 func Bootstrap(db *DB) error {
 	if _, err := db.Write.Exec(schemaSQL); err != nil {
 		return fmt.Errorf("bootstrapping schema: %w", err)
@@ -76,8 +74,8 @@ func Bootstrap(db *DB) error {
 }
 
 // ensureColumn adds a column on the named table when it is absent. The
-// caller supplies the full ALTER TABLE statement so the default and type
-// stay adjacent to the original schema definition.
+// caller supplies the full ALTER TABLE so the default and type stay
+// adjacent to the original schema definition.
 func ensureColumn(db *DB, table, column, alterSQL string) error {
 	var count int
 	if err := db.Write.QueryRow(

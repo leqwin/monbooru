@@ -19,12 +19,10 @@ type MoveImageResult struct {
 }
 
 // MoveImage relocates the canonical file of image id into targetFolder
-// (relative to galleryPath). On a filename collision within the target folder
-// the file is renamed with `_1`, `_2`, … via UniqueDestPath, mirroring the
-// upload and API create paths so two callers don't drift on collision rules.
-// Callers that hold a watcher for galleryPath should gate this under a job
-// whose type is in the watcher's suppression list, otherwise the resulting
-// CREATE/REMOVE events race with the DB update.
+// (relative to galleryPath). Filename collisions auto-suffix via
+// UniqueDestPath, matching the upload and API paths. Callers that hold a
+// watcher should gate this under a job type the watcher suppresses,
+// otherwise the resulting CREATE/REMOVE events race with the DB update.
 func MoveImage(database *db.DB, galleryPath string, id int64, targetFolder string) (*MoveImageResult, error) {
 	var oldCanonical, oldFolder string
 	var isMissing int
@@ -50,7 +48,6 @@ func MoveImage(database *db.DB, galleryPath string, id int64, targetFolder strin
 	}
 
 	if newFolder == oldFolder {
-		// No-op: image already lives in the target folder.
 		return &MoveImageResult{
 			OldCanonicalPath: oldCanonical,
 			OldFolderPath:    oldFolder,
@@ -65,12 +62,10 @@ func MoveImage(database *db.DB, galleryPath string, id int64, targetFolder strin
 
 	newPath := UniqueDestPath(destDir, filepath.Base(oldCanonical))
 
-	// DB first: once the row's canonical_path and image_paths entry point at
-	// newPath, the subsequent REMOVE event the watcher sees on oldCanonical
-	// won't match any row, and the CREATE event on newPath collapses into a
-	// duplicate INSERT OR IGNORE against an already-canonical row. Watcher
-	// suppression during a `move` job belt-and-braces this, but the ordering
-	// stands on its own too.
+	// DB first: once the row points at newPath the watcher's REMOVE on
+	// oldCanonical matches no row, and its CREATE on newPath collapses
+	// into an INSERT OR IGNORE against the already-canonical row. Move-job
+	// suppression in the watcher is belt-and-braces on top of that.
 	tx, err := database.Write.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("begin move tx: %w", err)
@@ -94,9 +89,8 @@ func MoveImage(database *db.DB, galleryPath string, id int64, targetFolder strin
 	}
 
 	if err := os.Rename(oldCanonical, newPath); err != nil {
-		// Revert the DB rows so a retry sees consistent state. Errors on the
-		// revert itself are rare (same rows, same connection) but worth a
-		// loud log because the library is now inconsistent.
+		// Revert the DB rows so a retry sees consistent state. A revert
+		// failure leaves the library inconsistent, hence the loud log.
 		if _, rbErr := database.Write.Exec(
 			`UPDATE images SET canonical_path = ?, folder_path = ? WHERE id = ?`,
 			oldCanonical, oldFolder, id,

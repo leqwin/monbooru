@@ -46,7 +46,8 @@ type imageTagJSON struct {
 	TaggerName *string  `json:"tagger_name"`
 }
 
-// buildImageResponse fetches an image and its tags and returns the response struct.
+// buildImageResponse fetches an image plus its tags and assembles the
+// JSON response struct.
 func (h *Handler) buildImageResponse(g Gallery, imageID int64) (*imageResponse, error) {
 	var img models.Image
 	var isMissing, isFavorited int
@@ -70,8 +71,8 @@ func (h *Handler) buildImageResponse(g Gallery, imageID int64) (*imageResponse, 
 		img.AutoTaggedAt = &t
 	}
 
-	// Fetch aliases. Close rows immediately after iterating instead of deferring,
-	// so the read connection is released before the subsequent tag query.
+	// Close the alias rows immediately rather than deferring, so the
+	// read connection is freed before the tag query.
 	aliases := []string{}
 	aliasRows, err := g.DB.Read.Query(`SELECT path FROM image_paths WHERE image_id = ? AND is_canonical = 0`, imageID)
 	if err != nil {
@@ -129,7 +130,6 @@ func (h *Handler) buildImageResponse(g Gallery, imageID int64) (*imageResponse, 
 	return resp, nil
 }
 
-// getImage returns metadata for a single image.
 func (h *Handler) getImage(w http.ResponseWriter, r *http.Request) {
 	g, ok := h.resolveGallery(w, r)
 	if !ok {
@@ -150,21 +150,11 @@ func (h *Handler) getImage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// createImage handles POST /api/v1/images.
-//
-// Multipart form fields:
-//   - file          (required): the uploaded file
-//   - tags          (optional): JSON-encoded array of tag names
-//   - folder        (optional): destination subfolder under gallery_path;
-//     missing parents are created
-//   - autotag       (optional): "true"/"1" kicks off an auto-tag job on
-//     the newly-ingested image
-//   - tagger_name   (optional): when set with autotag, restricts the job
-//     to that single enabled auto-tagger
-//
-// JSON mode accepts the same folder/autotag/tagger_name fields alongside
-// the existing path/tags fields. In JSON mode the folder only takes
-// effect for relative paths (absolute paths are used verbatim).
+// createImage handles POST /api/v1/images. Accepts either multipart
+// (with `file`, `tags`, `folder`, `autotag`, `tagger_name`, `source`)
+// or JSON (with `path`, `tags`, `folder`, `autotag`, `tagger_name`,
+// `source`). In JSON mode `folder` only applies to relative paths;
+// absolute paths are used verbatim.
 func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 	g, ok := h.resolveGallery(w, r)
 	if !ok {
@@ -211,9 +201,9 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Write the upload to its final destination using the original
-		// filename. A temp filename would be picked up by the watcher and
-		// then marked missing as soon as the request handler removed it.
+		// Write directly to the final destination so the watcher sees
+		// the real filename rather than a temp one (which would get
+		// marked missing as soon as we renamed it).
 		dstPath := gallery.UniqueDestPath(destDir, fh.Filename)
 		dst, err := os.Create(dstPath)
 		if err != nil {
@@ -257,8 +247,8 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 		taggerName = strings.TrimSpace(body.TaggerName)
 		tagSource = strings.TrimSpace(body.Source)
 
-		// When the caller supplies a relative path plus a folder, resolve the
-		// file under <gallery>/<folder>/<path>. Absolute paths are used as-is.
+		// Relative path + folder: resolve under <gallery>/<folder>/<path>.
+		// Absolute paths go through unchanged.
 		if folder != "" && !filepath.IsAbs(imgPath) {
 			destDir, destErr := gallery.ResolveSubdir(g.GalleryPath, folder)
 			if destErr != nil {
@@ -269,9 +259,9 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Enforce gallery.max_file_size_mb for both upload modes. The multipart
-	// path also passes through MaxBytesReader, so this mainly guards the
-	// JSON path-reference mode where the caller supplies an absolute path.
+	// Enforce gallery.max_file_size_mb for both modes. Multipart also
+	// has MaxBytesReader; this mainly guards the JSON path-reference
+	// mode where the caller supplies an absolute path.
 	if maxMB := h.cfg.Gallery.MaxFileSizeMB; maxMB > 0 {
 		if info, err := os.Stat(imgPath); err == nil {
 			if info.Size() > int64(maxMB)*1024*1024 {
@@ -285,7 +275,6 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Determine file type via extension + magic-byte detection.
 	fileType, ftErr := gallery.DetectFileType(imgPath)
 	if ftErr != nil {
 		if uploadedToDisk {
@@ -295,9 +284,8 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Pick the image origin: caller-supplied source wins, otherwise the
-	// mode default ("upload" for multipart since the client pushed bytes,
-	// "ingest" for JSON since it references a pre-existing path on disk).
+	// Caller-supplied source wins; otherwise multipart defaults to
+	// "upload" and JSON path-reference defaults to "ingest".
 	origin := tagSource
 	if origin == "" {
 		if uploadedToDisk {
@@ -317,8 +305,8 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if isDuplicate {
-		// Ingest already recorded the new file as an alias path; leave it on
-		// disk so the alias remains valid.
+		// Ingest already recorded the new file as an alias path; leave
+		// it on disk so the alias remains valid.
 		apiError(w, http.StatusConflict, "conflict", "image with this SHA-256 already exists")
 		return
 	}
@@ -326,9 +314,9 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 		g.InvalidateCaches()
 	}
 
-	// Apply initial tags, collecting any warnings. Each tag may be a plain
-	// name (added to the general category) or `category:name` which adds it
-	// to the named category, matching the web UI's parser.
+	// Each initial tag is either a plain name (general category) or
+	// "category:name". Failures are collected as warnings rather than
+	// aborting the whole request.
 	var tagWarnings []string
 	for _, tagName := range initialTags {
 		catID, bareName, err := h.resolveCategoryTag(g, tagName)
@@ -377,7 +365,7 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Wrap the response when there is any side-channel info to report.
+	// Wrap the response when we have side-channel info to attach.
 	if len(tagWarnings) > 0 || autotagNote != "" {
 		envelope := map[string]any{"image": resp}
 		if len(tagWarnings) > 0 {
@@ -392,8 +380,8 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, resp)
 }
 
-// selectedTaggers resolves a caller-supplied tagger_name to the concrete
-// list of enabled+available taggers to run; empty name means all of them.
+// selectedTaggers resolves a caller-supplied tagger_name to a concrete
+// list of taggers; empty name means every enabled+available tagger.
 func (h *Handler) selectedTaggers(name string) ([]tagger.TaggerStatus, error) {
 	enabled := tagger.EnabledTaggers(h.cfg)
 	if name == "" {
@@ -415,7 +403,6 @@ func isTrue(v string) bool {
 	return false
 }
 
-// deleteImage handles DELETE /api/v1/images/:id.
 func (h *Handler) deleteImage(w http.ResponseWriter, r *http.Request) {
 	g, ok := h.resolveGallery(w, r)
 	if !ok {
@@ -457,7 +444,6 @@ func (h *Handler) deleteImage(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// searchImages handles GET /api/v1/images/search.
 func (h *Handler) searchImages(w http.ResponseWriter, r *http.Request) {
 	g, ok := h.resolveGallery(w, r)
 	if !ok {
@@ -525,12 +511,9 @@ func (h *Handler) searchImages(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// addImageTags handles POST /api/v1/images/:id/tags.
-//
-// Each tag in the body may be a plain name (added to the general category)
-// or `category:name` which targets the named category - mirroring the web
-// UI's tag input so API callers can add artist/character/etc. tags without
-// pre-creating them from the UI.
+// addImageTags handles POST /api/v1/images/:id/tags. Each entry can
+// be a plain name (general category) or "category:name", matching the
+// web UI's tag input.
 func (h *Handler) addImageTags(w http.ResponseWriter, r *http.Request) {
 	g, ok := h.resolveGallery(w, r)
 	if !ok {
@@ -577,11 +560,10 @@ func (h *Handler) addImageTags(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp.Tags)
 }
 
-// resolveCategoryTag splits an input like "artist:foo" into (artist_id, "foo"),
-// or returns (general_id, "tagname") for a bare name. When the prefix before
-// the first colon is not a real category the whole input is kept as a
-// general-category tag (e.g. "nier:automata", ":3") so tag names containing
-// colons round-trip through the API without a tag_warnings entry.
+// resolveCategoryTag splits "artist:foo" into (artist_id, "foo") when
+// "artist" names a real category, otherwise returns (general_id, input)
+// so colon-bearing tag names like "nier:automata" or ":3" round-trip
+// without a warning.
 func (h *Handler) resolveCategoryTag(g Gallery, input string) (int64, string, error) {
 	input = strings.TrimSpace(input)
 	catName := "general"
@@ -603,12 +585,10 @@ func (h *Handler) resolveCategoryTag(g Gallery, input string) (int64, string, er
 	return catID, tagName, nil
 }
 
-// removeImageTags handles DELETE /api/v1/images/:id/tags.
-//
-// Each tag name may be plain (matches the general category) or `category:name`
-// (matches that specific category). A plain name that exists on the image in
-// more than one category is ambiguous and returns a 409 so the caller can
-// disambiguate - otherwise the handler would silently remove an arbitrary row.
+// removeImageTags handles DELETE /api/v1/images/:id/tags. Each entry
+// is plain (any single match) or "category:name" (exact category). A
+// plain name matching more than one category on the image returns 409
+// so the caller can disambiguate.
 func (h *Handler) removeImageTags(w http.ResponseWriter, r *http.Request) {
 	g, ok := h.resolveGallery(w, r)
 	if !ok {
@@ -636,7 +616,8 @@ func (h *Handler) removeImageTags(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if tagID == 0 {
-			continue // tag not on this image; silently ignored (matches docs)
+			// Tag not on this image; silently ignored per the docs.
+			continue
 		}
 		g.TagSvc.RemoveTagFromImage(id, tagID)
 	}
@@ -649,16 +630,14 @@ func (h *Handler) removeImageTags(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp.Tags)
 }
 
-// resolveImageTagID finds the single tag_id attached to imageID that matches
-// tagName. A `category:name` input targets that category exactly when the
-// prefix is a real category; otherwise the whole string is matched as a
-// literal tag name (so colon-bearing names like "nier:automata" resolve
-// without disambiguation). When the prefix IS a real category but the
-// image has no such (category, name) pair, resolution falls through to a
-// literal-name lookup so a general-category tag whose name collides with
-// a real category prefix (e.g. "artist:foo" stored whole) is still
-// removable. A plain name is accepted only when it resolves to exactly
-// one tag on the image. Returns (0, nil) when the tag is not present.
+// resolveImageTagID returns the tag_id attached to imageID that matches
+// tagName. A "category:name" input targets that exact category when
+// the prefix is a real category; otherwise the whole string is matched
+// as a literal tag name. A real-category prefix that misses on the
+// image falls through to the literal-name branch so an oddly-stored
+// general tag like "artist:foo" is still removable. A plain name is
+// accepted only when it resolves to exactly one tag on the image.
+// (0, nil) means the tag isn't present.
 func (h *Handler) resolveImageTagID(g Gallery, imageID int64, tagName string) (int64, error) {
 	tagName = strings.TrimSpace(tagName)
 	if idx := strings.Index(tagName, ":"); idx > 0 {
@@ -678,10 +657,7 @@ func (h *Handler) resolveImageTagID(g Gallery, imageID int64, tagName string) (i
 			).Scan(&tagID); err == nil {
 				return tagID, nil
 			}
-			// Category-qualified miss: fall through to the literal-name
-			// branch so a tag whose name happens to contain `:` and whose
-			// prefix matches a real category (e.g. a general-category
-			// "artist:foo") still resolves on the image.
+			// Category-qualified miss: fall through.
 		}
 	}
 

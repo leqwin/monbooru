@@ -16,9 +16,10 @@
         {{end}}
       </select>
       <select name="origin">
-        <option value=""     {{if eq (.Origin) ""}}selected{{end}}>All origins</option>
-        <option value="user" {{if eq (.Origin) "user"}}selected{{end}}>User</option>
-        <option value="auto" {{if eq (.Origin) "auto"}}selected{{end}}>Auto</option>
+        <option value=""      {{if eq (.Origin) ""}}selected{{end}}>All origins</option>
+        <option value="user"  {{if eq (.Origin) "user"}}selected{{end}}>User</option>
+        <option value="auto"  {{if eq (.Origin) "auto"}}selected{{end}}>Auto</option>
+        <option value="alias" {{if eq (.Origin) "alias"}}selected{{end}}>Alias</option>
       </select>
       <button type="submit">Filter</button>
     </form>
@@ -43,10 +44,18 @@
       <tr class="tag-row" id="tag-row-{{.ID}}">
         <td class="tag-id">{{.ID}}</td>
         <td class="tag-name-cell">
+          {{if .IsAlias}}
+          <span style="color:{{.CategoryColor}}">{{.Name}}</span>
+          <span class="merge-arrow">→</span>
+          <a href="/?q={{.CanonicalCategoryName}}:{{.CanonicalName}}" style="color:{{.CanonicalCategoryColor}}">{{.CanonicalName}}</a>
+          {{else}}
           <a href="/?q={{.CategoryName}}:{{.Name}}" style="color:{{.CategoryColor}}">{{.Name}}</a>
-          {{if .IsAlias}}<span class="alias-badge">alias</span>{{end}}
+          {{end}}
         </td>
         <td>
+          {{if .IsAlias}}
+          <span style="color:{{.CategoryColor}}">{{.CategoryName}}</span>
+          {{else}}
           <select class="cat-select"
                   name="category_id"
                   hx-patch="/tags/{{.ID}}/category"
@@ -60,17 +69,24 @@
             <option value="{{.ID}}" data-color="{{.Color}}" {{if eq .ID $tag.CategoryID}}selected{{end}}>{{.Name}}</option>
             {{end}}
           </select>
+          {{end}}
         </td>
         <td>{{.UsageCount}}</td>
-        <td>{{if .IsAutoOnly}}<span class="auto-badge">auto</span>{{else}}user{{end}}</td>
+        <td>
+          {{if .IsAlias}}<span class="alias-badge">alias</span>
+          {{else if .IsAutoOnly}}<span class="auto-badge">auto</span>
+          {{else}}user{{end}}
+        </td>
         <td>
           <div class="tag-actions">
+            {{if not .IsAlias}}
             <button class="btn-sm btn-rename-trigger"
                     title="Rename this tag"
                     data-id="{{.ID}}" data-name="{{.Name}}">Rename</button>
             <button class="btn-sm btn-merge-trigger"
                     title="Merge this tag into another"
                     data-id="{{.ID}}" data-name="{{.Name}}">Merge→</button>
+            {{end}}
             <button class="btn-sm btn-danger btn-delete-tag"
                     title="Delete this tag from every image"
                     data-id="{{.ID}}" data-name="{{.Name}}">Delete</button>
@@ -109,7 +125,7 @@
 <dialog id="rename-dialog">
   <form id="rename-form"
         hx-post=""
-        hx-target="#tag-flash"
+        hx-target="#rename-error"
         hx-swap="innerHTML"
         hx-on::after-request="if(event.detail.successful){window.location.reload()}">
     <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
@@ -118,6 +134,7 @@
       <label>New name</label>
       <input type="text" name="name" id="rename-new-name" required autocomplete="off">
     </div>
+    <div id="rename-error"></div>
     <div class="dialog-actions">
       <button type="submit">Rename</button>
       <button type="button" onclick="document.getElementById('rename-dialog').close()">Cancel</button>
@@ -165,6 +182,7 @@ document.querySelectorAll('.btn-rename-trigger').forEach(function(btn) {
     form.setAttribute('hx-post', '/tags/' + id + '/rename');
     if (window.htmx) window.htmx.process(form);
     document.getElementById('rename-src-name').textContent = name;
+    document.getElementById('rename-error').innerHTML = '';
     var input = document.getElementById('rename-new-name');
     input.value = name;
     document.getElementById('rename-dialog').showModal();

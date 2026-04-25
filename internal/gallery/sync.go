@@ -32,8 +32,8 @@ type FolderNode struct {
 	Children []FolderNode
 }
 
-// SourceCounts holds the non-missing image counts for each source_type
-// branch surfaced in the gallery sidebar's Source tree.
+// SourceCounts holds the non-missing image counts feeding the sidebar's
+// Source tree.
 type SourceCounts struct {
 	AI      int // a1111 + comfyui + combined
 	A1111   int // standalone or combined
@@ -42,7 +42,6 @@ type SourceCounts struct {
 }
 
 // SourceCountsQuery returns the source-tree counts for the given database.
-// Used by the sidebar to surface `(N)` next to each Source entry.
 func SourceCountsQuery(database *db.DB) (SourceCounts, error) {
 	var out SourceCounts
 	rows, err := database.Read.Query(
@@ -76,19 +75,16 @@ func SourceCountsQuery(database *db.DB) (SourceCounts, error) {
 	return out, rows.Err()
 }
 
-// Sync performs a full 3-phase gallery sync.
-// progress is called with (processed, total, message) tuples, matching
+// Sync runs the three-phase gallery sync (walk, reconcile, mark-missing).
+// progress receives (processed, total, message) tuples shaped to match
 // jobs.Manager.Update so the handler can forward the call verbatim.
-// Processed advances during Phase 2 so clients polling /internal/job/status
-// can surface reconcile progress and refresh the gallery mid-run.
-// galleryPath and thumbnailsPath target one gallery; maxFileSizeMB is the
-// shared per-install cap (<= 0 disables the cap).
+// maxFileSizeMB <= 0 disables the per-file cap.
 func Sync(ctx context.Context, database *db.DB, galleryPath, thumbnailsPath string, maxFileSizeMB int, progress func(processed, total int, message string)) (SyncResult, error) {
 	var result SyncResult
 
 	maxBytes := int64(maxFileSizeMB) * 1024 * 1024
 
-	// Phase 1: Walk filesystem, build map of path → sha256
+	// Phase 1: walk filesystem and build path → sha256.
 	progress(0, 0, "Phase 1: scanning filesystem…")
 	type fileInfo struct {
 		path     string
@@ -98,9 +94,9 @@ func Sync(ctx context.Context, database *db.DB, galleryPath, thumbnailsPath stri
 	}
 	var found []fileInfo
 
-	// Preload known (path, size, sha256) so the walk can skip hashing files
-	// whose size hasn't changed since the last sync. Hashing every file on a
-	// 10k+ image library dominates sync time even when nothing has changed.
+	// Preload (path, size, sha256) so the walk skips hashing files whose
+	// size hasn't changed since the last sync. Re-hashing every file
+	// dominates idle-sync time on 10k+ libraries.
 	type knownEntry struct {
 		size   int64
 		sha256 string
@@ -145,9 +141,9 @@ func Sync(ctx context.Context, database *db.DB, galleryPath, thumbnailsPath stri
 
 		var hash string
 		if k, ok := known[path]; ok && k.size == info.Size() {
-			// Same path and size - assume unchanged content. A same-size
-			// in-place replacement will be missed here; run manually with a
-			// DB reset to force re-hashing if you suspect one.
+			// Same path and size: assume unchanged content. A same-size
+			// in-place edit is missed here; force a re-hash by removing
+			// the DB row.
 			hash = k.sha256
 		} else {
 			h, hashErr := HashFile(path)
@@ -156,10 +152,8 @@ func Sync(ctx context.Context, database *db.DB, galleryPath, thumbnailsPath stri
 				return nil
 			}
 			hash = h
-			// Only claim ownership when we just hashed (new file or its size
-			// changed). Files reused from `known` were already chowned by a
-			// previous sync, so skipping the syscall here saves N chowns per
-			// idle re-sync - the dominant Phase-1 cost on large libraries.
+			// Only chown when we just hashed; files reused from `known`
+			// were already claimed by a previous sync.
 			ClaimOwnership(path)
 		}
 
@@ -173,19 +167,18 @@ func Sync(ctx context.Context, database *db.DB, galleryPath, thumbnailsPath stri
 		return result, fmt.Errorf("walking gallery: %w", err)
 	}
 
-	// Phase 2: Reconcile
+	// Phase 2: reconcile.
 	total := len(found)
 	progress(0, total, "Phase 2: reconciling…")
 
-	// Build set of all found paths and SHAs
 	foundPaths := map[string]struct{}{}
 	for _, fi := range found {
 		foundPaths[fi.path] = struct{}{}
 	}
 
 	// Pre-load every (sha256 → id, canonical_path, is_missing) row so the
-	// per-file lookup below is a map hit instead of N indexed SELECTs through
-	// the read pool. One full scan beats 25k single-row queries.
+	// per-file lookup below is a map hit instead of N indexed SELECTs.
+	// One full scan beats 25k single-row queries.
 	type bySHARow struct {
 		id            int64
 		canonicalPath string
@@ -207,7 +200,7 @@ func Sync(ctx context.Context, database *db.DB, galleryPath, thumbnailsPath stri
 
 	// reactivated counts silent is_missing=0 updates that don't bump any
 	// SyncResult counter. Needed to decide whether tag counts must be
-	// recalculated at the end of the sync.
+	// recomputed at the end of the sync.
 	reactivated := 0
 
 	for i, fi := range found {
@@ -215,10 +208,8 @@ func Sync(ctx context.Context, database *db.DB, galleryPath, thumbnailsPath stri
 			return result, ctx.Err()
 		}
 
-		// Throttle progress emissions so Update's lock traffic stays bounded
-		// on large libraries while still letting the client poll see a live
-		// X/Y counter advance once per tick. The message keeps no count -
-		// the status bar's progress span already renders Processed/Total.
+		// Throttle progress emissions so Update's lock traffic stays
+		// bounded on large libraries.
 		if i%50 == 0 || i == total-1 {
 			progress(i, total, "Phase 2: reconciling…")
 		}
@@ -239,15 +230,12 @@ func Sync(ctx context.Context, database *db.DB, galleryPath, thumbnailsPath stri
 				continue
 			}
 
-			// image_paths.path is UNIQUE, so a path belongs to at most one
-			// image; `known` was preloaded from image_paths JOIN images at
-			// the top of Phase 1, so a matching sha here is equivalent to
-			// the per-file SELECT COUNT this replaces.
+			// image_paths.path is UNIQUE, so a known-path entry with a
+			// matching SHA is unambiguously this image's alias.
 			if k, knownAlias := known[fi.path]; knownAlias && k.sha256 == fi.sha256 {
-				// Known alias path - check if canonical is still present
 				_, canonErr := os.Stat(canonPath)
 				if canonErr != nil {
-					// Canonical is gone - promote this alias to canonical
+					// Canonical is gone; promote this alias to canonical.
 					newFolder := FolderPath(galleryPath, fi.path)
 					if _, wErr := database.Write.Exec(
 						`UPDATE images SET canonical_path = ?, folder_path = ?, is_missing = 0 WHERE id = ?`,
@@ -277,11 +265,10 @@ func Sync(ctx context.Context, database *db.DB, galleryPath, thumbnailsPath stri
 				continue
 			}
 
-			// New path for an existing SHA: if the canonical file is gone it's a move,
-			// otherwise it's another copy/alias.
+			// New path for an existing SHA: a move if the canonical file
+			// is gone, otherwise another copy/alias.
 			_, canonErr := os.Stat(canonPath)
 			if canonErr != nil {
-				// Canonical missing - this is a move
 				newFolder := FolderPath(galleryPath, fi.path)
 				if _, wErr := database.Write.Exec(
 					`UPDATE images SET canonical_path = ?, folder_path = ?, is_missing = 0 WHERE id = ?`,
@@ -303,7 +290,7 @@ func Sync(ctx context.Context, database *db.DB, galleryPath, thumbnailsPath stri
 				}
 				result.Moved++
 			} else {
-				// Canonical still exists - this is a duplicate/alias
+				// Canonical still exists; record this path as a duplicate.
 				if _, wErr := database.Write.Exec(
 					`INSERT OR IGNORE INTO image_paths (image_id, path, is_canonical) VALUES (?, ?, 0)`,
 					imgID, fi.path,
@@ -313,18 +300,16 @@ func Sync(ctx context.Context, database *db.DB, galleryPath, thumbnailsPath stri
 				result.Duplicates++
 			}
 		} else {
-			// Not found - new file. Reuse the SHA computed in Phase 1 so the
-			// file isn't hashed a second time inside Ingest; on a fresh dump of
-			// 25k images that double-hash was the dominant cost of Phase 2.
+			// New file; reuse the Phase-1 hash so Ingest doesn't hash
+			// twice on a fresh dump of 25k images.
 			img, _, ingestErr := ingestWithHash(database, galleryPath, thumbnailsPath, fi.path, fi.fileType, fi.sha256, "")
 			if ingestErr != nil {
 				logx.Warnf("ingest failed for %q: %v", fi.path, ingestErr)
 				continue
 			}
 			result.Added++
-			// Surface the new row in bySHA so a later file in the same walk
-			// that shares this SHA falls into the existing-SHA branch and is
-			// counted as a Duplicate, matching the original per-file SELECT.
+			// Record the new row in bySHA so a later same-SHA file in the
+			// same walk falls into the duplicate branch.
 			if img != nil {
 				bySHA[fi.sha256] = bySHARow{id: img.ID, canonicalPath: fi.path, isMissing: 0}
 			}
@@ -332,13 +317,12 @@ func Sync(ctx context.Context, database *db.DB, galleryPath, thumbnailsPath stri
 	}
 
 	// Honour cancellation between phases so the watcher's "sync running"
-	// pause (see internal/gallery/watcher.go) releases promptly on cancel
-	// instead of waiting for Phase 3 to finish on large libraries.
+	// pause releases promptly on cancel.
 	if ctx.Err() != nil {
 		return result, ctx.Err()
 	}
 
-	// Mark missing: DB entries whose canonical path was not found
+	// Mark missing: DB entries whose canonical path is gone from disk.
 	rows, err := database.Read.Query(
 		`SELECT id, canonical_path FROM images WHERE is_missing = 0`,
 	)
@@ -349,7 +333,13 @@ func Sync(ctx context.Context, database *db.DB, galleryPath, thumbnailsPath stri
 	for rows.Next() {
 		var id int64
 		var path string
-		rows.Scan(&id, &path)
+		// Skip rows that fail to scan rather than silently appending a zero id.
+		// A zero id never matches a real row but the Removed count would still
+		// drift up by one per scan failure, hiding driver issues.
+		if err := rows.Scan(&id, &path); err != nil {
+			logx.Warnf("sync: scan existing image row: %v", err)
+			continue
+		}
 		if _, seen := foundPaths[path]; !seen {
 			toMark = append(toMark, id)
 		}
@@ -359,8 +349,8 @@ func Sync(ctx context.Context, database *db.DB, galleryPath, thumbnailsPath stri
 		return result, fmt.Errorf("iterating existing images: %w", err)
 	}
 
-	// Chunked IN-list UPDATE: per-id UPDATEs through the single-writer pool
-	// dominated Phase 3 on large libraries where many files had gone away.
+	// Chunked IN-list UPDATE: per-id UPDATEs through the single-writer
+	// pool dominated Phase 3 on libraries where many files had gone away.
 	const chunkSize = 500
 	for start := 0; start < len(toMark); start += chunkSize {
 		if ctx.Err() != nil {
@@ -390,30 +380,28 @@ func Sync(ctx context.Context, database *db.DB, galleryPath, thumbnailsPath stri
 		return result, ctx.Err()
 	}
 
-	// Recalculate tag usage counts only when the reconcile touched something
-	// that could have changed them (Duplicates alone never do - adding an
-	// alias doesn't change image membership). Idle syncs on large libraries
-	// spent the bulk of their time in this step even though nothing had
-	// changed.
+	// Recompute tag usage counts only when the reconcile touched something
+	// that could change them. Duplicates alone never do, so an idle sync on
+	// a large library skips this step.
 	if result.Added > 0 || result.Removed > 0 || result.Moved > 0 || reactivated > 0 {
 		progress(0, 0, "Recalculating tag counts…")
 		tags.RecalcAndPruneDB(database)
 	}
 
-	// Phase 3: Report. "missing" rather than "removed" because Sync marks
-	// gone-from-disk rows as is_missing=1 — it does not delete them.
+	// Phase 3: report. Files gone from disk are flagged is_missing rather
+	// than deleted, so "missing" reflects what sync actually did.
 	progress(0, 0, fmt.Sprintf("Done: %d added, %d missing, %d moved, %d duplicates",
 		result.Added, result.Removed, result.Moved, result.Duplicates))
 
 	return result, nil
 }
 
-// DeleteEmptyFolderIfEmpty deletes the folder at folderPath (relative to gallery root)
-// if it is empty, then walks up the parent chain removing any ancestors that become
-// empty as a result. Stops at the gallery root.
+// DeleteEmptyFolderIfEmpty removes folderPath (relative to gallery root)
+// when it's empty, then walks up the parent chain and removes any ancestors
+// that become empty too. Stops at the gallery root.
 func DeleteEmptyFolderIfEmpty(galleryPath, folderPath string) {
 	if folderPath == "" {
-		return // never delete gallery root
+		return
 	}
 	root := galleryPath
 	cur := folderPath
@@ -424,7 +412,7 @@ func DeleteEmptyFolderIfEmpty(galleryPath, folderPath string) {
 			return
 		}
 		if len(entries) != 0 {
-			return // not empty, stop climbing
+			return
 		}
 		if removeErr := os.Remove(absPath); removeErr != nil {
 			logx.Warnf("removing empty folder %q: %v", absPath, removeErr)
@@ -437,11 +425,10 @@ func DeleteEmptyFolderIfEmpty(galleryPath, folderPath string) {
 	}
 }
 
-// FolderTree returns the folder tree from DB image records. Each node's Count
-// includes images in the folder itself plus every descendant folder, so a
-// parent with only subfolder content still shows a non-zero figure in the
-// sidebar. Parent folders with no direct images are included so the full
-// arborescence is visible.
+// FolderTree builds the folder tree from images. Each node's Count rolls
+// up its own images plus every descendant's, so a parent with only
+// subfolder content still shows a non-zero figure. Empty intermediate
+// folders are included so the arborescence is complete.
 func FolderTree(database *db.DB) ([]FolderNode, error) {
 	rows, err := database.Read.Query(
 		`SELECT COALESCE(folder_path, ''), COUNT(*) FROM images WHERE is_missing=0 GROUP BY folder_path ORDER BY folder_path`,
@@ -465,8 +452,7 @@ func FolderTree(database *db.DB) ([]FolderNode, error) {
 		flat = append(flat, fc)
 	}
 
-	// Add intermediate ancestor paths that have no direct images so the
-	// full folder arborescence is visible in the sidebar.
+	// Add intermediate ancestor paths so the full arborescence shows.
 	known := map[string]bool{"": true}
 	for _, fc := range flat {
 		known[fc.path] = true
@@ -487,7 +473,7 @@ func FolderTree(database *db.DB) ([]FolderNode, error) {
 	}
 	flat = append(flat, toAdd...)
 
-	// Build folder tree using pointer map so parent-child wiring works across mutations.
+	// Pointer-tree intermediate so parent-child wiring survives mutations.
 	type pnode struct {
 		FolderNode
 		children []*pnode
@@ -496,7 +482,7 @@ func FolderTree(database *db.DB) ([]FolderNode, error) {
 	rootP := &pnode{FolderNode: FolderNode{Path: "", Name: "(root)", Depth: 0}}
 	pnodeMap := map[string]*pnode{"": rootP}
 
-	// Process paths in lexicographic order so parents are always created before children.
+	// Sort lexicographically so parents always exist before children.
 	slices.SortFunc(flat, func(a, b folderCount) int {
 		return cmp.Compare(a.path, b.path)
 	})
@@ -525,8 +511,7 @@ func FolderTree(database *db.DB) ([]FolderNode, error) {
 		parent.children = append(parent.children, n)
 	}
 
-	// Post-order: roll descendant counts into each ancestor so the sidebar
-	// shows "images here or in any subfolder" rather than direct-only.
+	// Post-order: roll descendant counts into each ancestor.
 	var rollup func(p *pnode)
 	rollup = func(p *pnode) {
 		for _, c := range p.children {
@@ -536,7 +521,7 @@ func FolderTree(database *db.DB) ([]FolderNode, error) {
 	}
 	rollup(rootP)
 
-	// Convert pointer tree → value tree (deep copy).
+	// Pointer tree to value tree (deep copy).
 	var toValue func(p *pnode) FolderNode
 	toValue = func(p *pnode) FolderNode {
 		n := p.FolderNode

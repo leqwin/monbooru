@@ -258,7 +258,6 @@ button.footer-gallery:hover { color: var(--fg); }
 }
 .folder-only-btn:hover { color: var(--accent); }
 .folder-only-btn.active { color: var(--accent); }
-.folder-children { list-style: none; margin: 0; padding: 0 0 0 12px; }
 
 /* Tag group headers in sidebar */
 .tag-group { margin-bottom: 2px; }
@@ -437,7 +436,7 @@ button.footer-gallery:hover { color: var(--fg); }
   gap: 16px;
 }
 
-.thumb-card.focused { border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: -1px; }
+.thumb-card.focused { border-color: var(--accent); outline: 4px solid var(--accent); outline-offset: -2px; }
 
 .thumb-grid {
   display: grid;

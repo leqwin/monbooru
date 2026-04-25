@@ -15,15 +15,15 @@ import (
 
 // ResolveSubdir validates a user-supplied folder path and returns the
 // absolute destination directory under galleryPath. An empty folder
-// yields the gallery root itself. Paths containing ".." or absolute
-// paths are rejected so callers cannot escape the gallery root.
+// yields the gallery root. Paths containing ".." or absolute paths are
+// rejected so callers cannot escape the root.
 func ResolveSubdir(galleryPath, folder string) (string, error) {
 	folder = strings.TrimSpace(folder)
 	if folder == "" {
 		return galleryPath, nil
 	}
-	// Reject absolute paths before the slash trim - otherwise "/tmp/x"
-	// is trimmed to "tmp/x" and looks relative by the time IsAbs runs.
+	// Reject absolute paths before the slash trim, otherwise "/tmp/x"
+	// becomes "tmp/x" and looks relative by the time IsAbs runs.
 	if filepath.IsAbs(folder) {
 		return "", fmt.Errorf("folder must be relative to the gallery root")
 	}
@@ -47,10 +47,9 @@ func ResolveSubdir(galleryPath, folder string) (string, error) {
 }
 
 // PathInside reports whether target resolves inside root. Both arguments
-// should be cleaned and absolute; the function uses filepath.Rel so a
-// sibling directory that shares a literal prefix with root (e.g.
-// `/data/gallery` vs `/data/gallery_backup`) is correctly rejected.
-// A target that equals root is considered inside.
+// should be cleaned and absolute. Uses filepath.Rel so a sibling directory
+// sharing a literal prefix (`/data/gallery` vs `/data/gallery_backup`) is
+// correctly rejected. A target equal to root counts as inside.
 func PathInside(root, target string) bool {
 	rel, err := filepath.Rel(root, target)
 	if err != nil {
@@ -70,13 +69,10 @@ var ErrUnsupportedType = errors.New("unsupported file type")
 const SupportedMIMETypes = "image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm"
 
 // UniqueDestPath returns a path under destDir that does not currently
-// exist, starting from filename and appending `_1`, `_2`, … to the
-// stem on collision until a free slot is found. Mirrors the
-// auto-suffix behaviour used by both the web upload form and the API
-// createImage handler so two callers don't drift on rename rules.
-// The first-collision check is racy (TOCTOU) but the gallery is a
-// single-process write target - callers that need stronger
-// guarantees should `O_CREATE|O_EXCL` themselves.
+// exist, appending `_1`, `_2`, … to the stem on collision. Shared by
+// the upload form, API createImage, and merge-extract paths so the
+// rename rule is consistent. The stat check is racy (TOCTOU); callers
+// needing stronger guarantees should O_CREATE|O_EXCL themselves.
 func UniqueDestPath(destDir, filename string) string {
 	dst := filepath.Join(destDir, filename)
 	if _, err := os.Stat(dst); os.IsNotExist(err) {
@@ -109,10 +105,9 @@ func HashFile(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// DetectFileType returns the file type constant for the given path.
-// It first tries extension matching, then magic bytes.
+// DetectFileType returns the file type constant for the given path,
+// trying extension matching first and falling back to magic bytes.
 func DetectFileType(path string) (string, error) {
-	// Primary: extension match (case-insensitive)
 	dot := strings.LastIndex(path, ".")
 	if dot >= 0 {
 		ext := strings.ToLower(path[dot:])
@@ -132,7 +127,6 @@ func DetectFileType(path string) (string, error) {
 		}
 	}
 
-	// Fallback: magic bytes
 	f, err := os.Open(path)
 	if err != nil {
 		return "", ErrUnsupportedType

@@ -5,17 +5,32 @@ import (
 	"fmt"
 )
 
-// MergeTags makes aliasID an alias of canonicalID.
-// It moves all image_tags from alias to canonical and marks the alias.
+// MergeTags makes aliasID an alias of canonicalID, moving all
+// image_tags rows from alias to canonical and marking the alias row.
 func (s *Service) MergeTags(aliasID, canonicalID int64) error {
+	if aliasID == canonicalID {
+		return fmt.Errorf("cannot merge a tag into itself")
+	}
+
 	tx, err := s.db.Write.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
-	// a. Move image_tags from aliasID to canonicalID (handle conflicts).
-	//    Find images that have aliasID but not canonicalID - insert canonical.
+	// Refuse merge-into-alias: the alias resolver only follows one hop
+	// (COALESCE(canonical_tag_id, id) and GetOrCreateTag's single lookup),
+	// so a two-hop chain would silently drop rows.
+	var targetIsAlias int
+	if err := tx.QueryRow(`SELECT is_alias FROM tags WHERE id = ?`, canonicalID).Scan(&targetIsAlias); err != nil {
+		return fmt.Errorf("target tag not found")
+	}
+	if targetIsAlias == 1 {
+		return fmt.Errorf("cannot merge into a tag that is itself an alias")
+	}
+
+	// (a) Move image_tags from alias to canonical, skipping images that
+	// already carry the canonical.
 	rows, err := tx.Query(
 		`SELECT image_id, is_auto, confidence, tagger_name FROM image_tags WHERE tag_id = ?`, aliasID,
 	)
@@ -40,7 +55,6 @@ func (s *Service) MergeTags(aliasID, canonicalID int64) error {
 	rows.Close()
 
 	for _, at := range aliasTags {
-		// Check if canonical tag already on this image
 		var existingIsAuto int
 		err := tx.QueryRow(
 			`SELECT is_auto FROM image_tags WHERE image_id = ? AND tag_id = ?`,
@@ -48,7 +62,6 @@ func (s *Service) MergeTags(aliasID, canonicalID int64) error {
 		).Scan(&existingIsAuto)
 
 		if err == sql.ErrNoRows {
-			// Not there yet - insert canonical tag, carrying auto-tagger attribution over.
 			if _, err := tx.Exec(
 				`INSERT INTO image_tags (image_id, tag_id, is_auto, confidence, tagger_name)
 				 VALUES (?, ?, ?, ?, ?)`,
@@ -59,9 +72,7 @@ func (s *Service) MergeTags(aliasID, canonicalID int64) error {
 		} else if err != nil {
 			return err
 		}
-		// If canonical already there, nothing to do (keep the existing canonical row)
 
-		// Remove the alias tag from this image
 		if _, err := tx.Exec(
 			`DELETE FROM image_tags WHERE image_id = ? AND tag_id = ?`,
 			at.imageID, aliasID,
@@ -70,7 +81,7 @@ func (s *Service) MergeTags(aliasID, canonicalID int64) error {
 		}
 	}
 
-	// b. Mark aliasID as alias
+	// (b) Mark aliasID as an alias of canonicalID.
 	if _, err := tx.Exec(
 		`UPDATE tags SET is_alias = 1, canonical_tag_id = ?, usage_count = 0 WHERE id = ?`,
 		canonicalID, aliasID,
@@ -78,10 +89,9 @@ func (s *Service) MergeTags(aliasID, canonicalID int64) error {
 		return err
 	}
 
-	// c. Recompute usage_count for canonicalID. Match the convention
-	// RecalcAndPruneDB enforces (count only non-missing images) so a
-	// merge doesn't temporarily inflate the count above what the next
-	// recalc will report.
+	// (c) Recount canonical's usage_count from non-missing images, the
+	// same convention RecalcAndPruneDB enforces, so a merge doesn't
+	// inflate the count past what the next recalc would emit.
 	if _, err := tx.Exec(
 		`UPDATE tags SET usage_count = (
 			SELECT COUNT(*) FROM image_tags it

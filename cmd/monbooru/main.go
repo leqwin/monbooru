@@ -49,18 +49,15 @@ func main() {
 	}
 	defer srv.Close()
 
-	// Start a watcher per configured gallery. All of them run for the lifetime
-	// of the process so file drops into any gallery are picked up in real time.
 	srv.StartWatchers()
 
 	httpSrv := &http.Server{
 		Addr:        cfg.Server.BindAddress,
 		Handler:     srv.Handler(),
 		ReadTimeout: 30 * time.Second,
-		// WriteTimeout is intentionally unset: bulk operations like "delete all search
-		// results" or re-extracting metadata across tens of thousands of images can
-		// run far longer than any fixed budget. Slow handlers are bounded by DB and
-		// filesystem latency, not the HTTP server.
+		// WriteTimeout is intentionally unset: bulk operations like delete-all
+		// or re-extract can run for many minutes on large libraries. Slow
+		// handlers are bounded by DB and filesystem latency.
 		IdleTimeout: 120 * time.Second,
 	}
 

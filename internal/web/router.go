@@ -301,6 +301,18 @@ func NewServer(cfg *config.Config, configPath string, jobManager *jobs.Manager) 
 			}
 			return string(r[:n])
 		},
+		// hasFavFilter reports whether the search query contains a `fav:true`
+		// token, regardless of position or surrounding tags. Drives the gallery
+		// header's ★ toggle's active class so the button doesn't go inactive
+		// the moment the user combines `fav:true` with any other tag.
+		"hasFavFilter": func(query string) bool {
+			for _, tok := range strings.Fields(query) {
+				if strings.EqualFold(tok, "fav:true") {
+					return true
+				}
+			}
+			return false
+		},
 	}).ParseFS(webFS.FS, "templates/*.html", "templates/partials/*.html")
 	if err != nil {
 		return nil, err
@@ -516,6 +528,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /settings/galleries/{name}/rename", s.settingsGalleryRenamePost)
 	mux.HandleFunc("POST /settings/galleries/{name}/delete", s.settingsGalleryDeletePost)
 	mux.HandleFunc("POST /settings/galleries/{name}/default", s.settingsGalleryDefaultPost)
+	mux.HandleFunc("GET /settings/galleries/{name}/export", s.settingsGalleryExport)
+	mux.HandleFunc("POST /settings/galleries/{name}/import", s.settingsGalleryImport)
 
 	api.New(s.cfg, s.jobs, s.apiResolver).Mount(mux)
 

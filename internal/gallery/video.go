@@ -15,7 +15,7 @@ var (
 	ffmpegOK   bool
 )
 
-// ffmpegAvailable checks if ffmpeg is on PATH. Result is cached.
+// ffmpegAvailable reports whether ffmpeg is on PATH (cached).
 func ffmpegAvailable() bool {
 	ffmpegOnce.Do(func() {
 		_, err := exec.LookPath("ffmpeg")
@@ -24,7 +24,7 @@ func ffmpegAvailable() bool {
 	return ffmpegOK
 }
 
-// generateVideoThumb extracts a thumbnail frame from a video at ~10% duration.
+// generateVideoThumb extracts a frame at ~10% of the video's duration.
 func generateVideoThumb(srcPath, dstPath string) error {
 	if !ffmpegAvailable() {
 		return fmt.Errorf("ffmpeg not available")
@@ -47,6 +47,8 @@ func generateVideoThumb(srcPath, dstPath string) error {
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
 
+	// `--` terminates option parsing so a tmpName beginning with `-`
+	// stays a positional output path.
 	args := []string{
 		"-y",
 		"-ss", offsetStr,
@@ -54,6 +56,7 @@ func generateVideoThumb(srcPath, dstPath string) error {
 		"-frames:v", "1",
 		"-vf", fmt.Sprintf("scale=%d:-1", thumbMaxDim),
 		"-q:v", "2",
+		"--",
 		tmpName,
 	}
 	cmd := exec.Command("ffmpeg", args...)
@@ -64,7 +67,7 @@ func generateVideoThumb(srcPath, dstPath string) error {
 	return os.Rename(tmpName, dstPath)
 }
 
-// generateVideoHover generates a 3-5 second animated WebP hover preview.
+// generateVideoHover writes a ~4-second animated WebP hover preview.
 func generateVideoHover(srcPath, dstPath string) error {
 	if !ffmpegAvailable() {
 		return fmt.Errorf("ffmpeg not available")
@@ -94,6 +97,7 @@ func generateVideoHover(srcPath, dstPath string) error {
 		"-vf", fmt.Sprintf("scale=%d:-1", thumbMaxDim),
 		"-an",        // no audio
 		"-loop", "0", // infinite loop
+		"--",
 		tmpName,
 	}
 	cmd := exec.Command("ffmpeg", args...)
@@ -104,9 +108,9 @@ func generateVideoHover(srcPath, dstPath string) error {
 	return os.Rename(tmpName, dstPath)
 }
 
-// generateGIFHover converts an animated GIF into a scaled animated WebP
-// preview reused by the gallery hover swap. Silently skipped when ffmpeg
-// is missing - the static first-frame thumbnail remains in place.
+// generateGIFHover converts an animated GIF into a scaled WebP preview.
+// Silently skipped without ffmpeg; the static first-frame thumbnail
+// stays in place.
 func generateGIFHover(srcPath, dstPath string) error {
 	if !ffmpegAvailable() {
 		return fmt.Errorf("ffmpeg not available")
@@ -126,6 +130,7 @@ func generateGIFHover(srcPath, dstPath string) error {
 		"-i", srcPath,
 		"-vf", fmt.Sprintf("scale=%d:-1", thumbMaxDim),
 		"-loop", "0",
+		"--",
 		tmpName,
 	}
 	cmd := exec.Command("ffmpeg", args...)
@@ -136,10 +141,9 @@ func generateGIFHover(srcPath, dstPath string) error {
 	return os.Rename(tmpName, dstPath)
 }
 
-// ExtractVideoFrames writes one frame per relative offset (0.0–1.0) from
-// the video at srcPath into tmpDir, returning the paths of the JPEGs
-// written. Frames whose extraction fails are skipped; callers treat a
-// shorter-than-requested slice as partial success.
+// ExtractVideoFrames writes one JPEG per relative offset (0.0..1.0) from
+// the video into tmpDir. Frames whose extraction fails are skipped, so a
+// shorter-than-requested return slice means partial success.
 func ExtractVideoFrames(srcPath, tmpDir string, positions []float64) ([]string, error) {
 	if !ffmpegAvailable() {
 		return nil, fmt.Errorf("ffmpeg not available")
@@ -167,6 +171,7 @@ func ExtractVideoFrames(srcPath, tmpDir string, positions []float64) ([]string, 
 			"-i", srcPath,
 			"-frames:v", "1",
 			"-q:v", "2",
+			"--",
 			tmp.Name(),
 		}
 		cmd := exec.Command("ffmpeg", args...)
@@ -179,10 +184,10 @@ func ExtractVideoFrames(srcPath, tmpDir string, positions []float64) ([]string, 
 	return out, nil
 }
 
-// probeDuration uses ffprobe to get video duration in seconds.
+// probeDuration returns the video's duration in seconds via ffprobe.
 func probeDuration(srcPath string) (float64, error) {
-	// `--` terminates option parsing so a filename starting with `-` is
-	// treated as a positional argument instead of a flag.
+	// `--` terminates option parsing so a filename beginning with `-`
+	// is treated as positional rather than a flag.
 	cmd := exec.Command("ffprobe",
 		"-v", "quiet",
 		"-print_format", "csv=p=0",

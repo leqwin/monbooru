@@ -15,9 +15,9 @@ type DeleteImageResult struct {
 	IsMissing     bool
 }
 
-// DeleteImage removes an image from the database in a single transaction,
-// then cleans up files on disk. removeAllTags is called within the transaction
-// to handle tag/co-occurrence cleanup (injected to avoid circular dependency on tags package).
+// DeleteImage removes one image from the database, then cleans up files
+// on disk. removeAllTags is injected (rather than called directly via the
+// tags package) to avoid an internal/gallery → internal/tags import cycle.
 func DeleteImage(database *db.DB, thumbnailsPath string, id int64, removeAllTags func(int64) error) (*DeleteImageResult, error) {
 	var canonPath, folderPath string
 	var isMissing int
@@ -27,13 +27,9 @@ func DeleteImage(database *db.DB, thumbnailsPath string, id int64, removeAllTags
 		return nil, fmt.Errorf("image not found: %w", err)
 	}
 
-	// Remove all tags (co-occurrence cleanup) before deleting the row.
-	// removeAllTags already prunes zero-usage tags scoped to the image's
-	// own tag set, so deleting the image row afterwards no longer needs a
-	// follow-up unscoped `DELETE FROM tags WHERE usage_count <= 0`. The
-	// previous implementation scanned the whole tag table on every single
-	// delete and could prune unrelated rows that happened to be at zero
-	// usage from prior batch operations.
+	// removeAllTags prunes zero-usage tags scoped to this image's own tag
+	// set, so we don't need a follow-up unscoped prune that could touch
+	// unrelated rows.
 	if err := removeAllTags(id); err != nil {
 		logx.Warnf("remove tags for image %d: %v", id, err)
 	}
@@ -42,7 +38,6 @@ func DeleteImage(database *db.DB, thumbnailsPath string, id int64, removeAllTags
 		return nil, fmt.Errorf("delete image row: %w", err)
 	}
 
-	// File cleanup (after successful DB commit).
 	os.Remove(ThumbnailPath(thumbnailsPath, id))
 	os.Remove(HoverPath(thumbnailsPath, id))
 

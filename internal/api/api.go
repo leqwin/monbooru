@@ -15,13 +15,14 @@ import (
 )
 
 // Gallery is what API handlers need to act on a single gallery.
+// InvalidateCaches is called after every image add/delete; may be nil.
 type Gallery struct {
-	Name              string
-	GalleryPath       string
-	ThumbnailsPath    string
-	DB                *db.DB
-	TagSvc            *tags.Service
-	InvalidateCaches  func() // called after any image add/delete (may be nil)
+	Name             string
+	GalleryPath      string
+	ThumbnailsPath   string
+	DB               *db.DB
+	TagSvc           *tags.Service
+	InvalidateCaches func()
 }
 
 // ResolverFunc resolves a gallery by name. Empty name = active gallery.
@@ -39,8 +40,8 @@ func New(cfg *config.Config, jobManager *jobs.Manager, resolver ResolverFunc) *H
 	return &Handler{cfg: cfg, jobs: jobManager, resolver: resolver}
 }
 
-// resolveGallery picks the target gallery from ?gallery=... or the
-// X-Monbooru-Gallery header; empty falls back to the active gallery.
+// resolveGallery picks the target gallery from ?gallery=... (preferred)
+// or the X-Monbooru-Gallery header; empty falls back to the active one.
 func (h *Handler) resolveGallery(w http.ResponseWriter, r *http.Request) (Gallery, bool) {
 	name := strings.TrimSpace(r.URL.Query().Get("gallery"))
 	if name == "" {
@@ -58,9 +59,8 @@ func (h *Handler) resolveGallery(w http.ResponseWriter, r *http.Request) (Galler
 	return g, true
 }
 
-// Mount registers all API routes on mux under /api/v1/.
+// Mount registers every API route on mux under /api/v1/.
 func (h *Handler) Mount(mux *http.ServeMux) {
-	// Images
 	mux.HandleFunc("POST /api/v1/images", h.auth(h.createImage))
 	mux.HandleFunc("GET /api/v1/images/search", h.auth(h.searchImages))
 	mux.HandleFunc("GET /api/v1/images/{id}", h.auth(h.getImage))
@@ -68,14 +68,11 @@ func (h *Handler) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/images/{id}/tags", h.auth(h.addImageTags))
 	mux.HandleFunc("DELETE /api/v1/images/{id}/tags", h.auth(h.removeImageTags))
 
-	// Tags
 	mux.HandleFunc("GET /api/v1/tags", h.auth(h.listTags))
 
-	// OpenAPI
 	mux.HandleFunc("GET /api/v1/openapi.json", h.openAPIJSON)
 	mux.HandleFunc("GET /api/v1/docs", h.openAPIDocs)
 
-	// Root: return API info
 	mux.HandleFunc("GET /api/v1/", h.auth(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/" {
 			apiError(w, http.StatusNotFound, "not_found", "endpoint not found: "+r.URL.Path)
@@ -89,10 +86,10 @@ func (h *Handler) Mount(mux *http.ServeMux) {
 	}))
 }
 
-// auth wraps a handler with optional bearer token authentication.
+// auth wraps a handler with bearer-token authentication and the
+// configured-base-URL CORS check.
 func (h *Handler) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// CORS: only allow requests from the configured base URL.
 		origin := r.Header.Get("Origin")
 		if origin != "" && h.cfg.Server.BaseURL != "" {
 			if origin != h.cfg.Server.BaseURL {
@@ -102,8 +99,7 @@ func (h *Handler) auth(next http.HandlerFunc) http.HandlerFunc {
 			w.Header().Set("Access-Control-Allow-Origin", h.cfg.Server.BaseURL)
 		}
 
-		// Bearer token auth. The API is disabled until an API token is generated
-		// from the Settings page; an empty token means no one can use the API.
+		// An empty API token means the API is disabled.
 		if h.cfg.Auth.APIToken == "" {
 			apiError(w, http.StatusServiceUnavailable, "api_disabled",
 				"API is disabled: generate an API token in Settings to enable it")
@@ -125,21 +121,20 @@ func (h *Handler) auth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// apiError writes a JSON error response.
 func apiError(w http.ResponseWriter, status int, code, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg, "code": code})
 }
 
-// writeJSON encodes v as JSON and writes it with status.
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
 }
 
-// parsePage parses page and limit from query params.
+// parsePage reads page + limit from the query string and clamps limit
+// to maxLimit.
 func parsePage(r *http.Request, defaultLimit, maxLimit int) (offset, limit int) {
 	page := 1
 	limit = defaultLimit

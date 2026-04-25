@@ -324,8 +324,8 @@ func queryParam(name, desc string) map[string]any {
 	}
 }
 
-// galleryParam is the shared ?gallery=<name> selector. Omitted means the
-// request targets the active gallery.
+// galleryParam is the shared ?gallery=<name> selector. Omitted means
+// the active gallery.
 func galleryParam() map[string]any {
 	return queryParam("gallery", "Target gallery name; omit for the active gallery (also accepted as X-Monbooru-Gallery header)")
 }
@@ -337,10 +337,9 @@ func (h *Handler) openAPIJSON(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(spec)
 }
 
-// openAPIDocs serves a self-contained HTML documentation page rendered
-// from the same OpenAPI spec served at /api/v1/openapi.json. No external
-// assets are loaded at runtime - the page stays usable offline and the
-// content updates automatically whenever buildSpec changes.
+// openAPIDocs serves a self-contained HTML page rendered from the
+// OpenAPI spec served at /api/v1/openapi.json. No external assets are
+// loaded at runtime, so the page works offline.
 func (h *Handler) openAPIDocs(w http.ResponseWriter, r *http.Request) {
 	view := extractDocsView(buildSpec(h.cfg.Server.BaseURL))
 	view.APIEnabled = h.cfg.Auth.APIToken != ""
@@ -354,7 +353,7 @@ type docsView struct {
 	Title      string
 	Version    string
 	BaseURL    string
-	APIEnabled bool // true when an API token is configured
+	APIEnabled bool
 	Endpoints  []endpointView
 	Schemas    []schemaView
 }
@@ -402,12 +401,11 @@ type schemaView struct {
 	Properties []propertyView
 }
 
-// methodOrder controls the display order of HTTP methods at each path.
+// methodOrder controls how HTTP methods are ordered for each path.
 var methodOrder = []string{"get", "post", "put", "patch", "delete"}
 
-// extractDocsView flattens the OpenAPI spec map into a template-friendly
-// structure. It assumes the shape produced by buildSpec; unknown keys
-// are ignored.
+// extractDocsView flattens the OpenAPI spec into the template view.
+// It assumes the shape buildSpec produces; unknown keys are ignored.
 func extractDocsView(spec map[string]any) docsView {
 	view := docsView{}
 	if info, ok := spec["info"].(map[string]any); ok {
@@ -564,8 +562,8 @@ func anchorize(s string) string {
 	return r
 }
 
-// docsTemplate renders the API documentation with inline CSS matching the
-// rest of the UI (dark background, monospace, no rounded corners).
+// docsTemplate renders the API documentation with inline CSS matching
+// the rest of the UI.
 var docsTemplate = template.Must(template.New("api-docs").Parse(`<!DOCTYPE html>
 <html lang="en">
 <head>

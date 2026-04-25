@@ -11,11 +11,10 @@ import (
 	"github.com/rwcarlsen/goexif/exif"
 )
 
-// extractSDFromWebP reads A1111 metadata from a WebP file's EXIF chunk.
-// WebP is a RIFF container; we walk the chunks to find "EXIF", then hand
-// the payload to goexif (after re-prefixing the "Exif\x00\x00" magic so
-// exif.Decode's scanner finds it regardless of whether the chunk already
-// includes the prefix).
+// extractSDFromWebP reads A1111 metadata from a WebP's EXIF chunk.
+// WebP is a RIFF container; we walk the chunks to find "EXIF", then
+// re-prefix the "Exif\x00\x00" magic so exif.Decode finds it whether
+// or not the chunk already includes the prefix.
 func extractSDFromWebP(path string) (*models.SDMetadata, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -45,13 +44,12 @@ func extractSDFromWebP(path string) (*models.SDMetadata, error) {
 	return parseA1111Parameters(text), nil
 }
 
-// maxWebPChunkBytes bounds any individual RIFF chunk we will buffer. EXIF
-// payloads that carry A1111 parameters are a few KB; a forged size field
-// would otherwise trigger a ~4 GiB allocation before ReadFull failed.
+// maxWebPChunkBytes caps any single RIFF chunk we'll buffer. A forged
+// size field could otherwise trigger a ~4 GiB allocation.
 const maxWebPChunkBytes = 16 * 1024 * 1024
 
-// readWebPEXIF returns the raw EXIF chunk bytes from a WebP RIFF stream,
-// or nil if the file is not a valid WebP or has no EXIF chunk.
+// readWebPEXIF returns the raw EXIF chunk bytes from a WebP RIFF
+// stream, or nil for non-WebP or no EXIF chunk.
 func readWebPEXIF(r io.Reader) ([]byte, error) {
 	header := make([]byte, 12)
 	if _, err := io.ReadFull(r, header); err != nil {
@@ -68,7 +66,7 @@ func readWebPEXIF(r io.Reader) ([]byte, error) {
 		chunkType := string(chunk[0:4])
 		size := binary.LittleEndian.Uint32(chunk[4:8])
 		if size > maxWebPChunkBytes {
-			// Skip oversize chunks wholesale - advance over the payload and
+			// Skip oversize chunks wholesale, advancing past payload +
 			// padding so subsequent chunks still line up.
 			toSkip := int64(size)
 			if size%2 == 1 {
@@ -84,13 +82,13 @@ func readWebPEXIF(r io.Reader) ([]byte, error) {
 			return nil, nil
 		}
 		if size%2 == 1 {
-			// RIFF chunks are word-aligned; skip the 1-byte padding.
+			// RIFF chunks are word-aligned; skip the pad byte.
 			pad := make([]byte, 1)
 			io.ReadFull(r, pad)
 		}
 		if chunkType == "EXIF" {
-			// Some encoders prepend the JPEG-style "Exif\x00\x00" magic; strip it
-			// so the caller can prepend a known-good copy unconditionally.
+			// Some encoders prepend the JPEG-style "Exif\x00\x00" magic;
+			// strip it so the caller can re-prepend a known-good copy.
 			data = bytes.TrimPrefix(data, []byte("Exif\x00\x00"))
 			return data, nil
 		}

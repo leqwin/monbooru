@@ -53,19 +53,17 @@ type tagLabel struct {
 	categoryID int // WD14 category ID
 }
 
-// IsAvailable returns true when at least one enabled tagger has its files.
+// IsAvailable reports whether at least one enabled tagger has its files.
 func IsAvailable(cfg *config.Config) bool {
 	return len(EnabledTaggers(cfg)) > 0
 }
 
-// buildSupportsInference reports whether this build can run inference at
-// all. Always true in the tagger build; false in the noop build.
+// buildSupportsInference is true in the tagger build, false in the noop
+// build.
 func buildSupportsInference() bool { return true }
 
-// UnavailableReason explains why auto-tagging cannot run given the current
-// config. Returns "" when IsAvailable(cfg) is true. The returned string
-// mirrors the Reason shown in Settings → Auto-Tagger so flashes on the
-// detail page stay consistent with the settings page.
+// UnavailableReason explains why auto-tagging can't run, mirroring the
+// reason shown in Settings → Auto-Tagger. Returns "" when IsAvailable.
 func UnavailableReason(cfg *config.Config) string {
 	if IsAvailable(cfg) {
 		return ""
@@ -82,10 +80,10 @@ func UnavailableReason(cfg *config.Config) string {
 	return "no enabled tagger"
 }
 
-// CheckCUDAAvailable probes the ONNX Runtime shared library for CUDA support
-// and verifies that an NVIDIA GPU device file is present inside the container.
-// Called from the settings handler before persisting use_cuda=true so the user
-// gets an immediate error instead of a surprise at tagger-job time.
+// CheckCUDAAvailable probes the ONNX Runtime for CUDA support and
+// verifies an NVIDIA GPU device file exists. The settings handler calls
+// it before persisting use_cuda=true so the user gets an immediate
+// error rather than a surprise at tagger-job time.
 func CheckCUDAAvailable() error {
 	ort.SetSharedLibraryPath(sharedLibPath())
 	if err := ort.InitializeEnvironment(); err != nil {
@@ -105,30 +103,30 @@ func CheckCUDAAvailable() error {
 	return nil
 }
 
-// AvailableTaggers returns every known tagger with runtime availability set.
+// AvailableTaggers returns every known tagger with availability set.
 func AvailableTaggers(cfg *config.Config) []TaggerStatus {
 	return DiscoverTaggers(cfg)
 }
 
-// tagKey uniquely identifies a (name, category_id) pair so multiple taggers
+// tagKey identifies one (name, category_id) pair so multi-tagger merges
 // never insert the same tag twice on the same image.
 type tagKey struct {
 	name  string
 	catID int64
 }
 
-// scored records the highest confidence seen across taggers for one tag key,
-// along with the tagger that produced that score so attribution survives
-// multi-tagger merges.
+// scored carries the highest confidence seen across taggers for one
+// tagKey plus the tagger that produced that score, so attribution
+// survives multi-tagger merges.
 type scored struct {
 	score      float32
 	taggerName string
 }
 
-// loadedTagger holds one tagger's ORT session and the preprocessing choice
-// derived from its tags-file extension. joytagLayout toggles NCHW + RGB +
-// CLIP-normalized input and sigmoid output; WD14 stays on NHWC + BGR +
-// 0..255 raw with probability output.
+// loadedTagger holds one tagger's ORT session and a preprocessing flag
+// derived from the tags-file extension. joytagLayout selects
+// NCHW + RGB + CLIP-normalised input and sigmoid output; WD14 stays on
+// NHWC + BGR + 0..255 with probability output.
 type loadedTagger struct {
 	cfg          config.TaggerInstance
 	session      *ort.DynamicAdvancedSession
@@ -136,13 +134,11 @@ type loadedTagger struct {
 	joytagLayout bool
 }
 
-// RunWithTaggers processes the given image IDs through the supplied taggers
-// and merges the results so each image ends up with one row per unique tag.
-// Handlers may restrict a job to a single auto-tagger without altering config.
-// Only taggers that are both enabled and available on disk should be passed;
-// this function does not re-filter the list. useCUDA takes precedence over
-// cfg.Tagger.UseCUDA so per-request callers (single-image detail runs) can
-// keep inference on the CPU even when the global toggle is on.
+// RunWithTaggers tags ids through the supplied taggers, merging results
+// so each image ends up with one row per unique tag. Callers must pass
+// only enabled+available taggers; this function does not re-filter.
+// useCUDA overrides cfg.Tagger.UseCUDA so per-request callers can keep
+// single-image runs on the CPU.
 func RunWithTaggers(ctx context.Context, database *db.DB, cfg *config.Config, ids []int64, taggers []TaggerStatus, mgr *jobs.Manager, useCUDA bool) error {
 	if len(taggers) == 0 {
 		return fmt.Errorf("no tagger is enabled or available")
@@ -154,8 +150,8 @@ func RunWithTaggers(ctx context.Context, database *db.DB, cfg *config.Config, id
 	}
 	defer ort.DestroyEnvironment()
 
-	// Build session options once; when GPU is enabled we attach the CUDA
-	// execution provider so every tagger session runs on the GPU.
+	// Build session options once; on GPU we attach the CUDA execution
+	// provider so every session shares it.
 	var sessionOpts *ort.SessionOptions
 	if useCUDA {
 		opts, err := ort.NewSessionOptions()
@@ -174,7 +170,7 @@ func RunWithTaggers(ctx context.Context, database *db.DB, cfg *config.Config, id
 		sessionOpts = opts
 	}
 
-	// Open one ORT session per enabled tagger, reused for all images.
+	// One ORT session per enabled tagger, reused across images.
 	loaded := make([]loadedTagger, 0, len(taggers))
 	for _, t := range taggers {
 		onnxPath := filepath.Join(cfg.Paths.ModelPath, t.Name, t.ModelFile)
@@ -208,21 +204,23 @@ func RunWithTaggers(ctx context.Context, database *db.DB, cfg *config.Config, id
 		}
 	}()
 
-	// Names of the taggers actually running this job; used to scope the
-	// replace step so one tagger never wipes another tagger's output.
+	// Names of the taggers running this job; used so the replace step
+	// only wipes rows produced by these taggers.
 	taggerNames := make([]string, 0, len(loaded))
 	for _, lt := range loaded {
 		taggerNames = append(taggerNames, lt.cfg.Name)
 	}
 
-	// Resolve category IDs from DB.
 	catIDs := map[string]int64{}
 	catRows, err := database.Read.QueryContext(ctx, `SELECT id, name FROM tag_categories`)
 	if err == nil {
 		for catRows.Next() {
 			var id int64
 			var name string
-			catRows.Scan(&id, &name)
+			if scanErr := catRows.Scan(&id, &name); scanErr != nil {
+				logx.Warnf("tagger: scan tag_categories: %v", scanErr)
+				continue
+			}
 			catIDs[name] = id
 		}
 		catRows.Close()
@@ -230,12 +228,11 @@ func RunWithTaggers(ctx context.Context, database *db.DB, cfg *config.Config, id
 	metaCatID := catIDs["meta"]
 	generalCatID := catIDs["general"]
 
-	// Inference map for label-only (.txt) taggers: tag name → catID for
-	// existing non-general non-meta categorized tags. Names with multiple
-	// categorized variants are dropped (ambiguous → fall back to general).
-	// A .txt tagger emits no category info, so this lets `hakurei_reimu`
-	// from joytag attach to a pre-existing `character:hakurei_reimu`
-	// instead of being filed under general.
+	// Inference map for label-only (.txt) taggers: tag name → catID
+	// for an existing non-general non-meta categorised tag. Ambiguous
+	// names (multiple categorised variants) are dropped and fall back
+	// to general. Lets joytag's `hakurei_reimu` attach to a pre-existing
+	// `character:hakurei_reimu` instead of going under general.
 	inferredCats := map[string]int64{}
 	hasTxt := false
 	for _, lt := range loaded {
@@ -245,9 +242,8 @@ func RunWithTaggers(ctx context.Context, database *db.DB, cfg *config.Config, id
 		}
 	}
 	if hasTxt && generalCatID != 0 {
-		// Exclude names where the user has manually used the general
-		// counterpart - that's an explicit signal the user wants the
-		// general version, not the inferred categorized one.
+		// Skip names whose general counterpart already carries a manual
+		// image_tag - that's an explicit user choice.
 		infRows, err := database.Read.QueryContext(ctx, `
 			SELECT t.name, t.category_id
 			FROM tags t
@@ -284,10 +280,9 @@ func RunWithTaggers(ctx context.Context, database *db.DB, cfg *config.Config, id
 		}
 	}
 
-	// processOne runs the full per-image tagging pipeline. It is called from
-	// one or more worker goroutines; ORT sessions are safe for concurrent Run
-	// calls (each call allocates its own input/output tensors) and the DB
-	// write pool serialises storeResults naturally.
+	// processOne runs the per-image tagging pipeline. Called from one
+	// or more worker goroutines; ORT sessions are safe for concurrent
+	// Run calls and the DB write pool serialises storeResults.
 	processOne := func(imageID int64) {
 		var canonPath, fileType string
 		if err := database.Read.QueryRowContext(ctx,
@@ -304,7 +299,7 @@ func RunWithTaggers(ctx context.Context, database *db.DB, cfg *config.Config, id
 
 		merged := map[tagKey]scored{}
 		for _, lt := range loaded {
-			// For videos we keep the best score per tag across all sampled frames.
+			// Videos keep the highest score per label across the sampled frames.
 			best := map[int]float32{}
 			for _, fp := range framePaths {
 				scores, err := inferImage(lt, fp)
@@ -336,9 +331,9 @@ func RunWithTaggers(ctx context.Context, database *db.DB, cfg *config.Config, id
 					}
 					catID = catIDs[monbooruCat]
 				}
-				// .txt taggers have no category info; if a unique categorized
-				// tag with this name already exists, attach to it instead of
-				// the default general bucket.
+				// .txt taggers have no category info; if a unique
+				// categorised tag with this name already exists, attach
+				// to it instead of dropping into general.
 				if lt.joytagLayout && catID == generalCatID {
 					if inferred, ok := inferredCats[label.name]; ok {
 						catID = inferred
@@ -395,11 +390,10 @@ func RunWithTaggers(ctx context.Context, database *db.DB, cfg *config.Config, id
 	return ctx.Err()
 }
 
-// framesForTagging returns the list of image file paths to feed the tagger
-// for one asset, plus a cleanup function that removes any temp frames.
-// For static images it returns [canonPath]; for videos it samples up to
-// five frames via ffmpeg. When ffmpeg is missing or fails, videos yield
-// no frames and the caller should skip the asset.
+// framesForTagging returns the file paths to feed the tagger plus a
+// cleanup func. Static images return [canonPath]; videos sample up to
+// five frames via ffmpeg. With ffmpeg missing or failing, videos
+// yield no frames and the caller skips the asset.
 func framesForTagging(canonPath, fileType string) ([]string, func()) {
 	if fileType != "mp4" && fileType != "webm" {
 		return []string{canonPath}, func() {}
@@ -418,9 +412,9 @@ func framesForTagging(canonPath, fileType string) ([]string, func()) {
 }
 
 // inferImage loads, preprocesses, and runs inference on a single image.
-// WD14 models want NHWC float32 BGR in 0-255 and emit sigmoid probabilities;
-// joytag models want NCHW float32 RGB normalized with CLIP mean/std and emit
-// raw logits, so we sigmoid the output ourselves before thresholding.
+// WD14 wants NHWC f32 BGR 0..255 and emits sigmoid probabilities;
+// joytag wants NCHW f32 RGB CLIP-normalised and emits raw logits, so we
+// sigmoid the output ourselves.
 func inferImage(lt loadedTagger, path string) ([]float32, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -441,7 +435,7 @@ func inferImage(lt loadedTagger, path string) ([]float32, error) {
 	}
 	defer inputTensor.Destroy()
 
-	// Output is nil; DynamicAdvancedSession will allocate it.
+	// nil output lets DynamicAdvancedSession allocate it.
 	outputs := []ort.Value{nil}
 	if err := lt.session.Run([]ort.Value{inputTensor}, outputs); err != nil {
 		return nil, err
@@ -463,11 +457,10 @@ func inferImage(lt loadedTagger, path string) ([]float32, error) {
 	return data, nil
 }
 
-// buildTensor fills the ORT input buffer from the resized RGBA image. The two
-// branches diverge on layout, channel order, and value range; padAndResize
-// always returns *image.RGBA, so we read Pix directly to skip the per-pixel
-// image.Image interface dispatch and RGBA() alpha math that would otherwise
-// dominate this loop and keep the GPU waiting between inferences.
+// buildTensor fills the ORT input buffer from the resized RGBA image.
+// The two branches diverge on layout, channel order, and value range.
+// Reading Pix directly skips the per-pixel image.Image interface
+// dispatch that would otherwise keep the GPU idle between inferences.
 func buildTensor(img *image.RGBA, joytag bool) ([]float32, ort.Shape) {
 	pix := img.Pix
 	stride := img.Stride
@@ -486,7 +479,7 @@ func buildTensor(img *image.RGBA, joytag bool) ([]float32, ort.Shape) {
 		return tensor, ort.NewShape(1, modelSize, modelSize, 3)
 	}
 
-	// CLIP mean/std as used by joytag's preprocess step.
+	// CLIP mean/std from joytag's preprocess step.
 	mean := [3]float32{0.48145466, 0.4578275, 0.40821073}
 	std := [3]float32{0.26862954, 0.26130258, 0.27577711}
 	plane := modelSize * modelSize
@@ -504,7 +497,7 @@ func buildTensor(img *image.RGBA, joytag bool) ([]float32, ort.Shape) {
 	return tensor, ort.NewShape(1, 3, modelSize, modelSize)
 }
 
-// padAndResize pads img to square with white then resizes to size×size.
+// padAndResize pads src to a white square then resizes to size×size.
 // Returns *image.RGBA so the caller can read .Pix directly.
 func padAndResize(src image.Image, size int) *image.RGBA {
 	b := src.Bounds()
@@ -515,7 +508,6 @@ func padAndResize(src image.Image, size int) *image.RGBA {
 	}
 
 	square := image.NewRGBA(image.Rect(0, 0, maxDim, maxDim))
-	// Fill white background.
 	for i := range square.Pix {
 		square.Pix[i] = 0xFF
 	}
@@ -525,7 +517,7 @@ func padAndResize(src image.Image, size int) *image.RGBA {
 
 	dst := image.NewRGBA(image.Rect(0, 0, size, size))
 	draw.ApproxBiLinear.Scale(dst, dst.Bounds(), square, square.Bounds(), draw.Src, nil)
-	// Ensure white where alpha is 0.
+	// Force white where alpha is 0 (e.g. transparent PNG corners).
 	for i := 3; i < len(dst.Pix); i += 4 {
 		if dst.Pix[i] == 0 {
 			dst.Pix[i-3] = 0xFF
@@ -537,9 +529,9 @@ func padAndResize(src image.Image, size int) *image.RGBA {
 	return dst
 }
 
-// storeResults writes the merged auto-tag rows for one image within a
-// transaction and keeps usage_count in sync. The replace step only removes
-// rows produced by the taggers in taggerNames so other taggers' tags survive.
+// storeResults commits the merged auto-tag set for one image and keeps
+// usage_count in sync. The replace step is scoped to taggerNames so
+// other taggers' rows survive.
 func storeResults(
 	ctx context.Context, database *db.DB,
 	imageID int64, merged map[tagKey]scored, taggerNames []string,
@@ -550,7 +542,10 @@ func storeResults(
 	}
 	defer tx.Rollback()
 
-	// Resolve each desired tag to a tag_id, creating new rows as needed.
+	// Resolve each desired tag to a tag_id, creating new rows as
+	// needed. Alias rows redirect to their canonical so we never
+	// attach an alias to an image (matches GetOrCreateTag). Two labels
+	// that collapse onto the same canonical keep the higher score.
 	type target struct {
 		score      float32
 		taggerName string
@@ -558,9 +553,11 @@ func storeResults(
 	targets := make(map[int64]target, len(merged))
 	for k, s := range merged {
 		var tagID int64
+		var isAlias int
+		var canonicalID sql.NullInt64
 		err := tx.QueryRowContext(ctx,
-			`SELECT id FROM tags WHERE name = ? AND category_id = ?`, k.name, k.catID,
-		).Scan(&tagID)
+			`SELECT id, is_alias, canonical_tag_id FROM tags WHERE name = ? AND category_id = ?`, k.name, k.catID,
+		).Scan(&tagID, &isAlias, &canonicalID)
 		if err == sql.ErrNoRows {
 			res, err2 := tx.ExecContext(ctx,
 				`INSERT INTO tags (name, category_id, usage_count) VALUES (?, ?, 0)`, k.name, k.catID)
@@ -570,11 +567,15 @@ func storeResults(
 			tagID, _ = res.LastInsertId()
 		} else if err != nil {
 			return fmt.Errorf("lookup tag %q (cat=%d): %w", k.name, k.catID, err)
+		} else if isAlias == 1 && canonicalID.Valid {
+			tagID = canonicalID.Int64
 		}
-		targets[tagID] = target{score: s.score, taggerName: s.taggerName}
+		if prev, ok := targets[tagID]; !ok || s.score > prev.score {
+			targets[tagID] = target{score: s.score, taggerName: s.taggerName}
+		}
 	}
 
-	// Snapshot tags currently on the image along with attribution.
+	// Snapshot tags currently on the image, with attribution.
 	type rowInfo struct {
 		isAuto     bool
 		taggerName string
@@ -597,7 +598,6 @@ func storeResults(
 	}
 	rows.Close()
 
-	// Figure out the diff.
 	toRemove := map[int64]struct{}{}
 	if len(taggerNames) > 0 {
 		scope := make(map[string]struct{}, len(taggerNames))
@@ -624,9 +624,8 @@ func storeResults(
 		}
 	}
 
-	// Apply removals. Failing here would leave an old auto-tag attached
-	// to the image with the wrong attribution; roll back instead of
-	// committing a partial state.
+	// Apply removals. Roll back on failure rather than committing a
+	// half-replaced state.
 	for tid := range toRemove {
 		if _, err := tx.ExecContext(ctx,
 			`DELETE FROM image_tags WHERE image_id = ? AND tag_id = ? AND is_auto = 1`, imageID, tid); err != nil {
@@ -638,7 +637,7 @@ func storeResults(
 		}
 	}
 
-	// Refresh confidence and tagger attribution for tags that stay.
+	// Refresh confidence and attribution for tags that stay.
 	for tid, t := range targets {
 		info, exists := current[tid]
 		if !exists || !info.isAuto {
@@ -655,7 +654,6 @@ func storeResults(
 		}
 	}
 
-	// Insert new tags.
 	for tid, t := range toAdd {
 		var tname any
 		if t.taggerName != "" {
@@ -683,13 +681,12 @@ func storeResults(
 	return tx.Commit()
 }
 
-// loadLabels parses the tagger's label file. `.csv` files follow the WD14
-// schema (id, name, category_id). Any other extension (joytag ships a plain
-// `tags.txt` / `top_tags.txt` with one label per line) is read line-by-line
-// with every label mapped to WD14 category 0 (→ monbooru `general`). Label
-// names are normalised to fit the documented tag allowlist before they
-// become tag rows; the slice index still maps 1:1 to the model's output
-// channels even when individual labels are placeholders.
+// loadLabels parses the tagger's label file. `.csv` follows the WD14
+// schema (id, name, category_id); any other extension is read one
+// label per line with every label mapped to WD14 category 0
+// (`general`). Names are sanitised for the tag allowlist; the slice
+// index always lines up 1:1 with the model's output channels, even for
+// placeholder labels.
 func loadLabels(path string) ([]tagLabel, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -705,7 +702,7 @@ func loadLabels(path string) ([]tagLabel, error) {
 
 func loadLabelsCSV(f io.Reader) ([]tagLabel, error) {
 	r := csv.NewReader(f)
-	if _, err := r.Read(); err != nil { // skip header
+	if _, err := r.Read(); err != nil {
 		return nil, err
 	}
 	var labels []tagLabel
@@ -750,16 +747,12 @@ func loadLabelsText(f io.Reader) ([]tagLabel, error) {
 }
 
 // sanitizeLabel coerces a label-file name into the documented tag
-// allowlist (`[a-z0-9_()!@#$.~+:-]`, length 1-200, must contain a
-// letter or digit). Spaces collapse to underscores; out-of-set runes
-// drop. The colon is preserved so tagger-emitted labels like `:3` or
-// `rating:general` round-trip into `tags` unchanged - stripping it
-// would make the rating-map lookup below miss and would render a
-// ":3" label indistinguishable from "3". A label that empties out
-// (or stays all-punctuation) is replaced by an `_unsupported_<idx>`
-// placeholder so the slice position still aligns with the model's
-// output channel - dropping the entry would shift every later label
-// by one and corrupt every downstream tag attribution.
+// allowlist. Spaces collapse to underscores; out-of-set runes drop.
+// The colon is preserved so labels like `:3` and `rating:general` round
+// trip unchanged. A label that empties out becomes
+// `_unsupported_<idx>` so the slice index keeps its 1:1 mapping with
+// the model's output channels - dropping the entry would shift every
+// later label and corrupt downstream attribution.
 func sanitizeLabel(raw string, idx int) string {
 	s := strings.ToLower(strings.TrimSpace(raw))
 	var b strings.Builder
@@ -793,7 +786,8 @@ func sanitizeLabel(raw string, idx int) string {
 	return out
 }
 
-// sharedLibPath returns the path to the ONNX Runtime shared library.
+// sharedLibPath finds the ONNX Runtime shared library. ORT_LIB_PATH
+// overrides; otherwise we try the usual install locations.
 func sharedLibPath() string {
 	if p := os.Getenv("ORT_LIB_PATH"); p != "" {
 		return p

@@ -9,9 +9,9 @@ import (
 	"github.com/leqwin/monbooru/internal/models"
 )
 
-// Extract extracts SD and ComfyUI metadata from a file.
-// Returns at most one of the two structs (the other will be nil).
-// Failures are returned as nil structs (not errors); parsing is best-effort.
+// Extract reads SD and/or ComfyUI metadata from a file. Either return
+// can be nil; parsing is best-effort and failures surface as nil rather
+// than errors.
 func Extract(path, fileType string) (*models.SDMetadata, *models.ComfyUIMetadata, error) {
 	switch fileType {
 	case "png":
@@ -28,9 +28,9 @@ func Extract(path, fileType string) (*models.SDMetadata, *models.ComfyUIMetadata
 	}
 }
 
-// ExtractGeneric returns image metadata key-value pairs that the SD and
-// ComfyUI parsers do not consume (extra PNG text chunks, EXIF tags, …).
-// Best-effort: file read errors return an empty slice.
+// ExtractGeneric returns key-value pairs the SD and ComfyUI parsers
+// don't consume (extra PNG text chunks, EXIF tags). Best-effort; file
+// errors return an empty slice.
 func ExtractGeneric(path, fileType string) []models.SDParam {
 	switch fileType {
 	case "png":
@@ -83,8 +83,8 @@ func genericFromEXIF(path string) []models.SDParam {
 	return collectEXIFTags(x)
 }
 
-// collectEXIFTags walks every EXIF tag (across all IFDs) and returns them as
-// key/value pairs, skipping the SD-source UserComment field.
+// collectEXIFTags walks every EXIF tag across all IFDs and returns them
+// as key/value pairs. UserComment is skipped because it's the SD source.
 func collectEXIFTags(x *exif.Exif) []models.SDParam {
 	type kv struct{ k, v string }
 	var pairs []kv

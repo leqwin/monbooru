@@ -626,6 +626,99 @@ func TestGetOrCreateTag_ValidatesName(t *testing.T) {
 	}
 }
 
+func TestMergeThenAddAliasName_LandsOnCanonical(t *testing.T) {
+	// After A is merged into B, typing A on a new image should create an
+	// image_tag pointing at B - i.e. the alias is a live redirect, not a
+	// one-shot move that later adds resurrect.
+	database, svc := setupTestDB(t)
+	catID := generalCategoryID(t, svc)
+	alias, _ := svc.GetOrCreateTag("cat", catID)
+	canon, _ := svc.GetOrCreateTag("feline", catID)
+	if err := svc.MergeTags(alias.ID, canon.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	imgID := insertTestImage(t, database, "alias_redirect")
+	tag, err := svc.GetOrCreateTag("cat", catID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tag.ID != canon.ID {
+		t.Fatalf("GetOrCreateTag(alias) = %d, want canonical %d", tag.ID, canon.ID)
+	}
+	if err := svc.AddTagToImage(imgID, tag.ID, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	imgTags, _ := svc.GetImageTags(imgID)
+	if len(imgTags) != 1 || imgTags[0].TagID != canon.ID {
+		t.Errorf("image tags = %+v, want single canonical tag %d", imgTags, canon.ID)
+	}
+}
+
+func TestMergeIntoAlias_Rejected(t *testing.T) {
+	// Merging B→A where A is already an alias would install a two-hop
+	// chain the resolver does not follow. Reject up front.
+	_, svc := setupTestDB(t)
+	catID := generalCategoryID(t, svc)
+	a, _ := svc.GetOrCreateTag("aaa", catID)
+	b, _ := svc.GetOrCreateTag("bbb", catID)
+	c, _ := svc.GetOrCreateTag("ccc", catID)
+	if err := svc.MergeTags(a.ID, b.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.MergeTags(c.ID, a.ID); err == nil {
+		t.Fatal("expected error when merging into an alias, got nil")
+	}
+}
+
+func TestListTags_AliasFilterReturnsAliasesWithCanonicalJoin(t *testing.T) {
+	_, svc := setupTestDB(t)
+	catID := generalCategoryID(t, svc)
+	alias, _ := svc.GetOrCreateTag("cat", catID)
+	canon, _ := svc.GetOrCreateTag("feline", catID)
+	if err := svc.MergeTags(alias.ID, canon.ID); err != nil {
+		t.Fatal(err)
+	}
+	list, total, err := svc.ListTags(TagFilter{Origin: "alias", Limit: 40})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || len(list) != 1 {
+		t.Fatalf("alias filter: total=%d len=%d, want 1/1", total, len(list))
+	}
+	got := list[0]
+	if got.Name != "cat" || !got.IsAlias || got.CanonicalName != "feline" {
+		t.Errorf("alias row = %+v, want cat → feline", got)
+	}
+}
+
+func TestListTags_AllIncludesAliasesAndCanonicals(t *testing.T) {
+	_, svc := setupTestDB(t)
+	catID := generalCategoryID(t, svc)
+	alias, _ := svc.GetOrCreateTag("cat", catID)
+	canon, _ := svc.GetOrCreateTag("feline", catID)
+	svc.GetOrCreateTag("dog", catID) // extra canonical with no alias relationship
+	if err := svc.MergeTags(alias.ID, canon.ID); err != nil {
+		t.Fatal(err)
+	}
+	list, _, err := svc.ListTags(TagFilter{Limit: 40})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var aliasSeen, canonSeen bool
+	for _, t := range list {
+		if t.Name == "cat" && t.IsAlias {
+			aliasSeen = true
+		}
+		if t.Name == "feline" && !t.IsAlias {
+			canonSeen = true
+		}
+	}
+	if !aliasSeen || !canonSeen {
+		t.Errorf("expected both the alias (cat) and canonical (feline) in default listing; got %+v", list)
+	}
+}
+
 func TestMergeTags_CanonicalAlreadyOnImage(t *testing.T) {
 	// Tests branch where canonical tag is already on the same image as alias
 	database, svc := setupTestDB(t)

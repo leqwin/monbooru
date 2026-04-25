@@ -9,11 +9,11 @@ import (
 	"github.com/leqwin/monbooru/internal/models"
 )
 
-// extractSDFromJPEG reads A1111 metadata from JPEG EXIF UserComment.
+// extractSDFromJPEG reads A1111 metadata from a JPEG's EXIF UserComment.
 func extractSDFromJPEG(path string) (*models.SDMetadata, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, nil // silently skip
+		return nil, nil
 	}
 	defer f.Close()
 
@@ -27,30 +27,28 @@ func extractSDFromJPEG(path string) (*models.SDMetadata, error) {
 		return nil, nil
 	}
 
-	// UserComment may be prefixed with charset identifier (e.g. "ASCII\x00\x00\x00")
 	raw, err := tag.StringVal()
 	if err != nil {
 		return nil, nil
 	}
 
+	// EXIF UserComment may carry a charset prefix like "ASCII\x00\x00\x00".
 	text := strings.TrimPrefix(raw, "ASCII\x00\x00\x00")
 	text = strings.TrimLeft(text, "\x00")
 
-	sd := parseA1111Parameters(text)
-	return sd, nil
+	return parseA1111Parameters(text), nil
 }
 
-// parseA1111Parameters parses the A1111 parameter string format.
+// parseA1111Parameters parses A1111's parameter-string format. Returns
+// nil when the blob lacks the "Negative prompt:" / "Steps:" markers
+// that distinguish A1111 from random EXIF UserComment writers (GIMP,
+// Paint Tool SAI, etc.).
 func parseA1111Parameters(text string) *models.SDMetadata {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return nil
 	}
 
-	// Require at least one A1111 marker (Negative prompt: or a Steps: line).
-	// Third-party writers (GIMP, Paint Tool SAI, LEAD Technologies, …) drop
-	// short identifiers into the same EXIF UserComment slot, so a non-empty
-	// blob alone is not enough evidence that the image came from A1111.
 	negIdx := strings.Index(text, "\nNegative prompt:")
 	paramIdx := findParamLineIndex(text)
 	if negIdx < 0 && paramIdx < 0 {
@@ -63,7 +61,6 @@ func parseA1111Parameters(text string) *models.SDMetadata {
 		sd.Prompt = strings.TrimSpace(text[:negIdx])
 		afterNeg := text[negIdx+len("\nNegative prompt:"):]
 		if paramIdx > negIdx {
-			// negative prompt runs until param line
 			relIdx := paramIdx - negIdx - len("\nNegative prompt:")
 			if relIdx > 0 && relIdx <= len(afterNeg) {
 				sd.NegativePrompt = strings.TrimSpace(afterNeg[:relIdx])
@@ -79,7 +76,6 @@ func parseA1111Parameters(text string) *models.SDMetadata {
 		parseA1111Params(rawParams, sd)
 	}
 
-	// Store the raw params line and parse all key-value pairs for display
 	sd.RawParams = rawParams
 	if rawParams != "" {
 		sd.ParsedParams = parseAllA1111Params(rawParams)
@@ -90,7 +86,8 @@ func parseA1111Parameters(text string) *models.SDMetadata {
 	return sd
 }
 
-// findParamLineIndex finds the index of the first line starting with "Steps:" or known params.
+// findParamLineIndex returns the byte index of the first line starting
+// with "Steps:" (the A1111 parameter line marker), or -1.
 func findParamLineIndex(text string) int {
 	lines := strings.Split(text, "\n")
 	pos := 0
@@ -109,15 +106,13 @@ func ParseAllSDParams(rawParams string) []models.SDParam {
 	return parseAllA1111Params(rawParams)
 }
 
-// parseAllA1111Params extracts all key-value pairs from the A1111 parameter line,
-// preserving order. Values with braces are kept intact.
+// parseAllA1111Params extracts every "Key: Value" pair from an A1111
+// parameter line. Order is preserved; values with braces are kept whole.
 func parseAllA1111Params(paramLine string) []models.SDParam {
 	paramLine = strings.ReplaceAll(paramLine, "\n", " ")
 	var result []models.SDParam
 	seen := map[string]bool{}
 
-	// A1111 params are comma-separated "Key: Value" pairs.
-	// Values can contain commas if they're inside braces, so we split carefully.
 	parts := splitA1111Params(paramLine)
 	for _, part := range parts {
 		kv := strings.SplitN(strings.TrimSpace(part), ":", 2)
@@ -137,7 +132,8 @@ func parseAllA1111Params(paramLine string) []models.SDParam {
 	return result
 }
 
-// splitA1111Params splits A1111 parameter text by commas, respecting brace nesting.
+// splitA1111Params splits an A1111 parameter line on commas while
+// respecting nested braces.
 func splitA1111Params(s string) []string {
 	var parts []string
 	depth := 0
@@ -164,11 +160,7 @@ func splitA1111Params(s string) []string {
 }
 
 func parseA1111Params(paramLine string, sd *models.SDMetadata) {
-	// paramLine may span multiple lines if wrapped; join them
 	paramLine = strings.ReplaceAll(paramLine, "\n", " ")
-
-	// Use splitA1111Params for consistency with parseAllA1111Params,
-	// so values containing commas inside braces are kept intact.
 	parts := splitA1111Params(paramLine)
 	for _, part := range parts {
 		kv := strings.SplitN(strings.TrimSpace(part), ":", 2)
@@ -200,7 +192,6 @@ func parseA1111Params(paramLine string, sd *models.SDMetadata) {
 				sd.Model += ", " + val
 			}
 		case "Lora hashes":
-			// Append LoRA info to model string so it's visible in the UI
 			loraVal := strings.TrimSpace(val)
 			if loraVal != "" && loraVal != "{}" {
 				if sd.Model != "" {

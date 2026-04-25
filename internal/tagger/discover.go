@@ -8,9 +8,9 @@ import (
 	"github.com/leqwin/monbooru/internal/config"
 )
 
-// Default filenames for a tagger subfolder. Either can be overridden per
-// tagger via its TOML entry. When a subfolder has neither default, a lone
-// .onnx / .csv / .txt is picked automatically.
+// Default filenames for a tagger subfolder. Each can be overridden in
+// the TOML entry. When neither default is present, a lone .onnx / .csv
+// / .txt in the folder is auto-picked.
 const (
 	DefaultModelFile    = "model.onnx"
 	DefaultTagsFile     = "tags.csv"
@@ -21,27 +21,25 @@ const (
 )
 
 // TaggerStatus pairs a configured tagger with its runtime availability
-// so the settings UI can show why a tagger is active or inactive.
+// so the settings UI can show why each row is active or inactive.
 type TaggerStatus struct {
 	config.TaggerInstance
 	Available bool
-	Reason    string // populated when Available is false
+	Reason    string
 }
 
-// DiscoverTaggers lists the tagger subfolders under paths.model_path and
-// merges them with the configured list from cfg.Tagger.Taggers. An entry
-// exists in the result for every subfolder present on disk OR every
-// configured tagger (so users can see leftover config even if the folder
-// is gone). Results are sorted by Name.
+// DiscoverTaggers merges tagger subfolders under paths.model_path with
+// the configured list. The result has an entry for every on-disk folder
+// AND every configured tagger (so leftover config is still visible
+// after the folder vanishes). Sorted by Name.
 func DiscoverTaggers(cfg *config.Config) []TaggerStatus {
 	byName := map[string]config.TaggerInstance{}
 	order := []string{}
 
-	// Start from disk so untouched subfolders appear even without config.
-	// Discovered subfolders are enabled by default; explicit TOML entries
-	// below override (Disable actions persist Enabled=false). Completely
-	// empty subdirectories (no .onnx / .csv / .txt) are skipped so they
-	// don't show up in the settings table as permanently-broken rows.
+	// Start from disk so untouched subfolders show up even without
+	// config. TOML overlays override below. Completely empty
+	// subdirectories are skipped so they don't appear as permanently
+	// broken rows.
 	if entries, err := os.ReadDir(cfg.Paths.ModelPath); err == nil {
 		for _, e := range entries {
 			if !e.IsDir() {
@@ -60,7 +58,7 @@ func DiscoverTaggers(cfg *config.Config) []TaggerStatus {
 		}
 	}
 
-	// Overlay configured entries so enabled/threshold/file overrides win.
+	// Overlay TOML entries so enable/threshold/file overrides win.
 	for _, t := range cfg.Tagger.Taggers {
 		if _, seen := byName[t.Name]; !seen {
 			order = append(order, t.Name)
@@ -89,10 +87,9 @@ func DiscoverTaggers(cfg *config.Config) []TaggerStatus {
 	return out
 }
 
-// EnabledTaggers returns the taggers that are both enabled in config and
-// have their files present on disk. Returns nil on a noop build so UI
-// affordances that offer to run the tagger stay hidden on a binary that
-// cannot run one.
+// EnabledTaggers returns taggers that are both enabled in config and
+// available on disk. Returns nil on a noop build so the UI hides
+// affordances that depend on inference.
 func EnabledTaggers(cfg *config.Config) []TaggerStatus {
 	if !buildSupportsInference() {
 		return nil
@@ -106,12 +103,11 @@ func EnabledTaggers(cfg *config.Config) []TaggerStatus {
 	return out
 }
 
-// resolveTaggerFiles picks the model and tags filenames for one tagger
-// subfolder. Explicit TOML values always win. Otherwise the default names
-// (model.onnx, tags.csv, tags.txt) are tried, then a lone .onnx or a lone
-// label file (.csv/.txt) is auto-picked whatever its name. When nothing
-// matches, the defaults are returned so the caller surfaces a missing-file
-// reason instead of a silent empty filename.
+// resolveTaggerFiles picks model and tags filenames for one subfolder.
+// Explicit TOML values win; otherwise the defaults (model.onnx,
+// tags.csv, tags.txt) are tried, then a lone .onnx or a lone label
+// file is auto-picked. Falls back to the defaults so the caller can
+// surface a missing-file reason rather than an empty filename.
 func resolveTaggerFiles(dir, explicitModel, explicitTags string) (string, string) {
 	modelFile := explicitModel
 	tagsFile := explicitTags
@@ -169,8 +165,8 @@ func resolveTaggerFiles(dir, explicitModel, explicitTags string) (string, string
 }
 
 // hasTaggerFiles reports whether dir contains at least one file with a
-// tagger-related extension. Used to skip completely empty subdirectories
-// during discovery (H13 in the UI audit).
+// tagger-related extension, used to skip empty subdirectories during
+// discovery.
 func hasTaggerFiles(dir string) bool {
 	entries, err := os.ReadDir(dir)
 	if err != nil {

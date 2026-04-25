@@ -59,7 +59,7 @@
     <div id="flash-galleries"></div>
     <table class="gallery-table">
       <thead>
-        <tr><th>Name</th><th>Gallery path</th><th>Status</th><th>API suffix</th><th>Actions</th></tr>
+        <tr><th>Name</th><th>Gallery path</th><th>Status</th><th>API suffix</th><th>Import/Export</th><th>Actions</th></tr>
       </thead>
       <tbody>
         {{range $galleries}}
@@ -73,6 +73,21 @@
           <td><code>?gallery={{.Name}}</code></td>
           <td>
             <div class="tagger-actions">
+              <button class="btn-sm btn-gallery-export" data-name="{{.Name}}">Export</button>
+              <button class="btn-sm btn-danger btn-gallery-import"
+                      data-name="{{.Name}}"
+                      data-can-replace="{{if or (eq .Name $active) (eq .Name $cfg.DefaultGallery)}}false{{else}}true{{end}}">Import</button>
+            </div>
+          </td>
+          <td>
+            <div class="tagger-actions">
+              {{if ne .Name $active}}
+              <form hx-post="/internal/gallery/switch" hx-target="#flash-galleries" hx-swap="innerHTML" style="display:inline">
+                <input type="hidden" name="_csrf" value="{{$csrf}}">
+                <input type="hidden" name="name" value="{{.Name}}">
+                <button type="submit" class="btn-sm">Switch</button>
+              </form>
+              {{end}}
               <button class="btn-sm btn-gallery-rename"
                       data-name="{{.Name}}">Rename</button>
               {{if ne .Name $cfg.DefaultGallery}}
@@ -109,14 +124,14 @@
   </section>
 
   <dialog id="gallery-rename-dialog">
-    <form id="gallery-rename-form" hx-post="" hx-target="#flash-galleries" hx-swap="innerHTML"
-          hx-on::after-request="if(event.detail.successful){document.getElementById('gallery-rename-dialog').close()}">
+    <form id="gallery-rename-form" hx-post="" hx-target="#flash-gallery-rename" hx-swap="innerHTML">
       <input type="hidden" name="_csrf" value="{{$csrf}}">
       <p>Rename <strong id="gallery-rename-src"></strong></p>
       <div class="field">
         <label>New name</label>
         <input type="text" name="new_name" id="gallery-rename-input" required pattern="[A-Za-z0-9_-]+" autocomplete="off">
       </div>
+      <div id="flash-gallery-rename"></div>
       <div class="dialog-actions">
         <button type="submit">Rename</button>
         <button type="button" onclick="document.getElementById('gallery-rename-dialog').close()">Cancel</button>
@@ -125,17 +140,87 @@
   </dialog>
 
   <dialog id="gallery-delete-dialog">
-    <form id="gallery-delete-form" hx-post="" hx-target="#flash-galleries" hx-swap="innerHTML"
-          hx-on::after-request="if(event.detail.successful){document.getElementById('gallery-delete-dialog').close()}">
+    <!-- Success sends HX-Refresh, which reloads the page and implicitly
+         dismisses the dialog; on error the flash-err lands inside the
+         dialog (#flash-gallery-delete) so the user actually sees it
+         instead of having it written behind the modal, and the dialog
+         stays open so the confirm-name input can be retried. -->
+    <form id="gallery-delete-form" hx-post="" hx-target="#flash-gallery-delete" hx-swap="innerHTML">
       <input type="hidden" name="_csrf" value="{{$csrf}}">
       <p>Delete gallery <strong id="gallery-delete-src"></strong>?</p>
       <p class="confirm-dialog-danger">The database and thumbnails will be erased.</p>
       <div class="field">
         <label><input type="checkbox" name="remove_folder"> Also delete the gallery folder (source images)</label>
       </div>
+      <div class="field">
+        <label>Type the gallery name to confirm</label>
+        <input type="text" name="confirm_name" id="gallery-delete-confirm" required autocomplete="off">
+      </div>
+      <div id="flash-gallery-delete"></div>
       <div class="dialog-actions">
         <button type="submit" class="btn-danger">Delete</button>
         <button type="button" onclick="document.getElementById('gallery-delete-dialog').close()">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="gallery-export-dialog">
+    <form id="gallery-export-form" method="get" action=""
+          onsubmit="setTimeout(function(){document.getElementById('gallery-export-dialog').close()}, 100)">
+      <p>Export gallery <strong id="gallery-export-src"></strong></p>
+      <div class="field">
+        <label><input type="radio" name="format" value="db" checked> Database (.db): SQLite snapshot, monbooru format</label>
+      </div>
+      <div class="field">
+        <label><input type="radio" name="format" value="json"> JSON (.json): human-readable dump, monbooru format</label>
+      </div>
+      <div class="field">
+        <label><input type="radio" name="format" value="light"> Light (.json): images<->tags only, no monbooru-specific data</label>
+      </div>
+      <div class="field">
+        <label><input type="checkbox" name="with_images" value="true" id="gallery-export-with-images"> Include image files (bundled in a .zip)</label>
+      </div>
+      <div class="dialog-actions">
+        <button type="submit">Download</button>
+        <button type="button" onclick="document.getElementById('gallery-export-dialog').close()">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="gallery-import-dialog">
+    <!-- Two-mode dialog. Replace is the existing wipe-and-restore path; it
+         keeps the type-to-confirm gate. Merge is additive (images ingested,
+         tags applied, no wipe) and so skips the confirm. Client-side JS
+         hides the confirm row and the destructive warning when Merge is
+         selected, and flips the submit button between .btn-danger and a
+         neutral style. -->
+    <form id="gallery-import-form" hx-post="" hx-target="#flash-gallery-import" hx-swap="innerHTML"
+          hx-encoding="multipart/form-data"
+          hx-on::before-request="setImportBusy(this, true)"
+          hx-on::after-request="onImportResponse(this)">
+      <input type="hidden" name="_csrf" value="{{$csrf}}">
+      <p>Import into gallery <strong id="gallery-import-src"></strong></p>
+      <div class="field">
+        <label><input type="radio" name="mode" value="replace" checked> Replace: wipe this gallery and restore from the uploaded file</label>
+      </div>
+      <div class="field">
+        <label><input type="radio" name="mode" value="merge"> Merge: add new images and tags from the uploaded file</label>
+      </div>
+      <p class="field-hint">With a .db or .json upload (no images bundled), only tags on matching images are applied — in both modes.</p>
+      <p id="gallery-import-danger" class="confirm-dialog-danger">Destructive: replaces the current database. If the uploaded file is a .zip with images, the source folder is replaced as well.</p>
+      <div class="field">
+        <label>File (.db, .json, or .zip)</label>
+        <input type="file" name="file" accept=".db,.sqlite,.json,.zip" required>
+      </div>
+      <div class="field" id="gallery-import-confirm-row">
+        <label>Type the gallery name to confirm</label>
+        <input type="text" name="confirm_name" autocomplete="off">
+      </div>
+      <p id="gallery-import-wait" class="field-hint" hidden>Uploading and restoring the database. On large galleries this can take a few minutes; keep this tab open.</p>
+      <div id="flash-gallery-import"></div>
+      <div class="dialog-actions">
+        <button type="submit" class="btn-danger">Import</button>
+        <button type="button" onclick="document.getElementById('gallery-import-dialog').close()">Cancel</button>
       </div>
     </form>
   </dialog>
@@ -148,6 +233,7 @@
       form.setAttribute('hx-post', '/settings/galleries/' + name + '/rename');
       if (window.htmx) window.htmx.process(form);
       document.getElementById('gallery-rename-src').textContent = name;
+      document.getElementById('flash-gallery-rename').innerHTML = '';
       var input = document.getElementById('gallery-rename-input');
       input.value = name;
       document.getElementById('gallery-rename-dialog').showModal();
@@ -162,10 +248,117 @@
       form.setAttribute('hx-post', '/settings/galleries/' + name + '/delete');
       if (window.htmx) window.htmx.process(form);
       document.getElementById('gallery-delete-src').textContent = name;
+      document.getElementById('flash-gallery-delete').innerHTML = '';
       form.querySelector('input[name="remove_folder"]').checked = false;
+      form.querySelector('input[name="confirm_name"]').value = '';
       document.getElementById('gallery-delete-dialog').showModal();
+      document.getElementById('gallery-delete-confirm').focus();
     });
   });
+  document.querySelectorAll('.btn-gallery-export').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var name = this.dataset.name;
+      var form = document.getElementById('gallery-export-form');
+      form.setAttribute('action', '/settings/galleries/' + name + '/export');
+      document.getElementById('gallery-export-src').textContent = name;
+      form.querySelector('input[name="format"][value="db"]').checked = true;
+      form.querySelector('input[name="with_images"]').checked = false;
+      document.getElementById('gallery-export-dialog').showModal();
+    });
+  });
+
+  document.querySelectorAll('.btn-gallery-import').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var name = this.dataset.name;
+      var canReplace = this.dataset.canReplace !== 'false';
+      var form = document.getElementById('gallery-import-form');
+      form.setAttribute('hx-post', '/settings/galleries/' + name + '/import');
+      if (window.htmx) window.htmx.process(form);
+      document.getElementById('gallery-import-src').textContent = name;
+      document.getElementById('flash-gallery-import').innerHTML = '';
+      form.reset();
+      setImportBusy(form, false);
+      // Active and default galleries reject Replace server-side; disable the
+      // radio up front and start on Merge so the user can't pick a mode that
+      // will error, and a hint explains why.
+      var replaceRadio = form.querySelector('input[name="mode"][value="replace"]');
+      var mergeRadio = form.querySelector('input[name="mode"][value="merge"]');
+      var replaceLabel = replaceRadio.parentElement;
+      replaceRadio.disabled = !canReplace;
+      replaceLabel.title = canReplace ? '' : 'Replace is not allowed on the active or default gallery; switch to another first.';
+      if (!canReplace) {
+        mergeRadio.checked = true;
+      } else {
+        replaceRadio.checked = true;
+      }
+      syncImportModeFields();
+      document.getElementById('gallery-import-dialog').showModal();
+    });
+  });
+
+  // Toggle the confirm-name row, destructive warning, and submit button
+  // styling to match the selected mode. Replace keeps the type-to-confirm
+  // gate and the red button; merge drops both so the user isn't forced to
+  // type the name for a non-destructive action.
+  function syncImportModeFields() {
+    var form = document.getElementById('gallery-import-form');
+    if (!form) return;
+    var mode = form.querySelector('input[name="mode"]:checked').value;
+    var confirmRow = document.getElementById('gallery-import-confirm-row');
+    var confirmInput = confirmRow.querySelector('input[name="confirm_name"]');
+    var danger = document.getElementById('gallery-import-danger');
+    var submit = form.querySelector('button[type=submit]');
+    if (mode === 'merge') {
+      confirmRow.hidden = true;
+      confirmInput.required = false;
+      confirmInput.value = '';
+      danger.hidden = true;
+      submit.classList.remove('btn-danger');
+    } else {
+      confirmRow.hidden = false;
+      confirmInput.required = true;
+      danger.hidden = false;
+      submit.classList.add('btn-danger');
+    }
+  }
+  document.querySelectorAll('#gallery-import-form input[name="mode"]').forEach(function(radio) {
+    radio.addEventListener('change', syncImportModeFields);
+  });
+
+  // Toggles the in-flight state of the import form: swaps the submit label,
+  // disables the file + confirm inputs, and shows the wait hint. Called on
+  // both the before-request and after-request HTMX events.
+  function setImportBusy(form, busy) {
+    var submit = form.querySelector('button[type=submit]');
+    submit.disabled = busy;
+    submit.textContent = busy ? 'Importing…' : 'Import';
+    form.querySelector('input[name=file]').disabled = busy;
+    form.querySelector('input[name=confirm_name]').disabled = busy;
+    document.getElementById('gallery-import-wait').hidden = !busy;
+  }
+
+  // Runs after the import POST settles. Unwinds the busy state and, when
+  // the server replied with a flash-ok body (written to the in-dialog
+  // #flash-gallery-import by the hx-target), relays the flash out to
+  // #flash-galleries so it survives the dialog close and then closes the
+  // modal. Error responses keep the flash inside the dialog so the user
+  // can read it and fix the confirm-name or file input.
+  //
+  // A successful import also flips the server-side active gallery, so the
+  // page has to repaint to show the new badge in the galleries table and
+  // the footer switcher. Delay the reload just long enough for the flash
+  // to be readable in #flash-galleries.
+  function onImportResponse(form) {
+    setImportBusy(form, false);
+    var flash = document.getElementById('flash-gallery-import');
+    if (flash && flash.querySelector('.flash-ok')) {
+      var outer = document.getElementById('flash-galleries');
+      if (outer) outer.innerHTML = flash.innerHTML;
+      flash.innerHTML = '';
+      document.getElementById('gallery-import-dialog').close();
+      setTimeout(function(){ window.location.reload(); }, 1500);
+    }
+  }
   </script>
 
   <section id="tagger" class="settings-section">

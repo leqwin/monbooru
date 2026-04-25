@@ -304,7 +304,10 @@ func (s *Server) sidebarLoad(pageImageIDs []int64) ([]models.Tag, []gallery.Fold
 		defer ssRows.Close()
 		for ssRows.Next() {
 			var ss models.SavedSearch
-			ssRows.Scan(&ss.ID, &ss.Name, &ss.Query)
+			if err := ssRows.Scan(&ss.ID, &ss.Name, &ss.Query); err != nil {
+				logx.Warnf("sidebar saved searches scan: %v", err)
+				continue
+			}
 			saved = append(saved, ss)
 		}
 	}()
@@ -411,7 +414,10 @@ func (s *Server) sidebarBrowse(w http.ResponseWriter, r *http.Request) {
 		defer rows.Close()
 		for rows.Next() {
 			var ss models.SavedSearch
-			rows.Scan(&ss.ID, &ss.Name, &ss.Query)
+			if err := rows.Scan(&ss.ID, &ss.Name, &ss.Query); err != nil {
+				logx.Warnf("sidebar-browse saved searches scan: %v", err)
+				continue
+			}
 			saved = append(saved, ss)
 		}
 	}()
@@ -1291,7 +1297,10 @@ func (s *Server) mergeTagsPost(w http.ResponseWriter, r *http.Request) {
 		var ids []int64
 		for rows.Next() {
 			var id int64
-			rows.Scan(&id)
+			if err := rows.Scan(&id); err != nil {
+				logx.Warnf("merge tags lookup scan: %v", err)
+				continue
+			}
 			ids = append(ids, id)
 		}
 		rows.Close()
@@ -1735,7 +1744,9 @@ func (s *Server) pruneMissingImagesPost(w http.ResponseWriter, r *http.Request) 
 		for id := range affectedTags {
 			tagIDs = append(tagIDs, id)
 		}
-		s.tagSvc().RecalcAndPruneIDs(tagIDs)
+		if err := s.tagSvc().RecalcAndPruneIDs(tagIDs); err != nil {
+			logx.Warnf("prune-missing recalc IDs: %v", err)
+		}
 	}
 	if removed > 0 {
 		s.Active().InvalidateCaches()
@@ -1892,7 +1903,10 @@ func (s *Server) duplicatesListHandler(w http.ResponseWriter, r *http.Request) {
 	var aliases []aliasRow
 	for rows.Next() {
 		var a aliasRow
-		rows.Scan(&a.ImageID, &a.CanonicalPath, &a.PathID, &a.AliasPath)
+		if err := rows.Scan(&a.ImageID, &a.CanonicalPath, &a.PathID, &a.AliasPath); err != nil {
+			logx.Warnf("duplicates list scan: %v", err)
+			continue
+		}
 		aliases = append(aliases, a)
 	}
 
@@ -1963,7 +1977,10 @@ func (s *Server) removeDuplicatesPost(w http.ResponseWriter, r *http.Request) {
 	var paths []pathRow
 	for rows.Next() {
 		var p pathRow
-		rows.Scan(&p.ID, &p.Path)
+		if err := rows.Scan(&p.ID, &p.Path); err != nil {
+			logx.Warnf("remove duplicates scan: %v", err)
+			continue
+		}
 		paths = append(paths, p)
 	}
 	rows.Close()
@@ -1985,58 +2002,68 @@ func (s *Server) removeDuplicatesPost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) rebuildThumbnailsPost(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db().Read.Query(
-		`SELECT id, canonical_path, file_type FROM images WHERE is_missing = 0`)
-	if err != nil {
+	if err := s.startRebuildThumbsJob(s.Active()); err != nil {
 		w.Write([]byte(`<div class="flash flash-err">` + html.EscapeString(err.Error()) + `</div>`))
 		return
+	}
+	w.Write([]byte(`<div class="flash flash-ok">Thumbnail rebuild started.</div>`))
+}
+
+// startRebuildThumbsJob queues a rebuild-thumbs job against the supplied
+// gallery context, reading images and writing thumbnails from that gallery's
+// own DB + thumbnails dir. Reused by the manual handler (active gallery) and
+// the post-import hook (imported non-active gallery).
+func (s *Server) startRebuildThumbsJob(cx *galleryCtx) error {
+	if cx == nil || cx.DB == nil {
+		return fmt.Errorf("no gallery context")
 	}
 	type imgRow struct {
 		ID       int64
 		Path     string
 		FileType string
 	}
+	rows, err := cx.DB.Read.Query(
+		`SELECT id, canonical_path, file_type FROM images WHERE is_missing = 0`)
+	if err != nil {
+		return err
+	}
 	var imgs []imgRow
 	for rows.Next() {
 		var img imgRow
 		if err := rows.Scan(&img.ID, &img.Path, &img.FileType); err != nil {
 			rows.Close()
-			logx.Errorf("rebuild thumbnails scan: %v", err)
-			w.Write([]byte(`<div class="flash flash-err">` + html.EscapeString(err.Error()) + `</div>`))
-			return
+			return err
 		}
 		imgs = append(imgs, img)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		logx.Errorf("rebuild thumbnails rows: %v", err)
-		w.Write([]byte(`<div class="flash flash-err">` + html.EscapeString(err.Error()) + `</div>`))
-		return
+		return err
 	}
 
 	if err := s.jobs.Start("rebuild-thumbs"); err != nil {
-		w.Write([]byte(`<div class="flash flash-err">A job is already running.</div>`))
-		return
+		return fmt.Errorf("a job is already running")
 	}
-	thumbnailsPath := s.thumbnailsPath()
+	thumbnailsPath := cx.ThumbnailsPath
+	galleryName := cx.Name
 	go func() {
 		ctx := s.jobs.Context()
 		processed := 0
 		total := len(imgs)
 		for _, img := range imgs {
 			if ctx.Err() != nil {
-				s.jobs.Complete(fmt.Sprintf("rebuild cancelled (%d/%d rebuilt)", processed, total))
+				s.jobs.Complete(fmt.Sprintf("[%s] rebuild cancelled (%d/%d rebuilt)", galleryName, processed, total))
 				return
 			}
-			s.jobs.Update(processed, total, fmt.Sprintf("rebuilding %d/%d", processed, total))
+			s.jobs.Update(processed, total, fmt.Sprintf("[%s] rebuilding %d/%d", galleryName, processed, total))
 			if err := gallery.Generate(img.Path, thumbnailsPath, img.ID, img.FileType); err != nil {
 				logx.Warnf("rebuild thumbnail for %d: %v", img.ID, err)
 			}
 			processed++
 		}
-		s.jobs.Complete(fmt.Sprintf("Rebuilt %d thumbnail(s).", processed))
+		s.jobs.Complete(fmt.Sprintf("[%s] rebuilt %d thumbnail(s).", galleryName, processed))
 	}()
-	w.Write([]byte(`<div class="flash flash-ok">Thumbnail rebuild started.</div>`))
+	return nil
 }
 
 func (s *Server) vacuumDBPost(w http.ResponseWriter, r *http.Request) {
@@ -2181,27 +2208,13 @@ func (s *Server) reExtractMetadataPost(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			database.Write.Exec(`UPDATE images SET source_type = ? WHERE id = ?`, sourceType, img.ID)
-			database.Write.Exec(`DELETE FROM sd_metadata WHERE image_id = ?`, img.ID)
-			database.Write.Exec(`DELETE FROM comfyui_metadata WHERE image_id = ?`, img.ID)
-
-			if sdMeta != nil {
-				sdMeta.ImageID = img.ID
-				database.Write.Exec(
-					`INSERT OR REPLACE INTO sd_metadata (image_id, prompt, negative_prompt, model, seed, sampler, steps, cfg_scale, raw_params, generation_hash)
-					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-					sdMeta.ImageID, sdMeta.Prompt, sdMeta.NegativePrompt, sdMeta.Model,
-					sdMeta.Seed, sdMeta.Sampler, sdMeta.Steps, sdMeta.CFGScale, sdMeta.RawParams, sdMeta.GenerationHash,
-				)
-			}
-			if comfyMeta != nil {
-				comfyMeta.ImageID = img.ID
-				database.Write.Exec(
-					`INSERT OR REPLACE INTO comfyui_metadata (image_id, prompt, model_checkpoint, seed, sampler, steps, cfg_scale, raw_workflow, generation_hash)
-					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-					comfyMeta.ImageID, comfyMeta.Prompt, comfyMeta.ModelCheckpoint,
-					comfyMeta.Seed, comfyMeta.Sampler, comfyMeta.Steps, comfyMeta.CFGScale, comfyMeta.RawWorkflow, comfyMeta.GenerationHash,
-				)
+			// Single transaction per image so a mid-flight failure can't leave
+			// images.source_type updated against a half-deleted metadata table
+			// or a deleted-but-not-reinserted row.
+			if err := reExtractApply(ctx, database, img.ID, sourceType, sdMeta, comfyMeta); err != nil {
+				logx.Warnf("re-extract image %d: %v", img.ID, err)
+				processed++
+				continue
 			}
 			processed++
 			updated++
@@ -2210,6 +2223,51 @@ func (s *Server) reExtractMetadataPost(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	w.Write([]byte(`<div class="flash flash-ok">Re-extraction started.</div>`))
+}
+
+// reExtractApply commits a re-extracted image's source_type, deletes the
+// previous SD/ComfyUI rows, and reinserts whichever the parser produced.
+// All four steps run in one transaction so a partial failure (writer
+// contention, ctx cancellation mid-statement) never leaves the row with
+// updated source_type but missing metadata.
+func reExtractApply(ctx context.Context, database *db.DB, imageID int64, sourceType string, sdMeta *models.SDMetadata, comfyMeta *models.ComfyUIMetadata) error {
+	tx, err := database.Write.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE images SET source_type = ? WHERE id = ?`, sourceType, imageID); err != nil {
+		return fmt.Errorf("update source_type: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sd_metadata WHERE image_id = ?`, imageID); err != nil {
+		return fmt.Errorf("delete sd_metadata: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM comfyui_metadata WHERE image_id = ?`, imageID); err != nil {
+		return fmt.Errorf("delete comfyui_metadata: %w", err)
+	}
+	if sdMeta != nil {
+		sdMeta.ImageID = imageID
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO sd_metadata (image_id, prompt, negative_prompt, model, seed, sampler, steps, cfg_scale, raw_params, generation_hash)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			sdMeta.ImageID, sdMeta.Prompt, sdMeta.NegativePrompt, sdMeta.Model,
+			sdMeta.Seed, sdMeta.Sampler, sdMeta.Steps, sdMeta.CFGScale, sdMeta.RawParams, sdMeta.GenerationHash,
+		); err != nil {
+			return fmt.Errorf("insert sd_metadata: %w", err)
+		}
+	}
+	if comfyMeta != nil {
+		comfyMeta.ImageID = imageID
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO comfyui_metadata (image_id, prompt, model_checkpoint, seed, sampler, steps, cfg_scale, raw_workflow, generation_hash)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			comfyMeta.ImageID, comfyMeta.Prompt, comfyMeta.ModelCheckpoint,
+			comfyMeta.Seed, comfyMeta.Sampler, comfyMeta.Steps, comfyMeta.CFGScale, comfyMeta.RawWorkflow, comfyMeta.GenerationHash,
+		); err != nil {
+			return fmt.Errorf("insert comfyui_metadata: %w", err)
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Server) jobDismissPost(w http.ResponseWriter, r *http.Request) {
@@ -2425,166 +2483,6 @@ func (s *Server) renameCategoryPost(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/categories", http.StatusSeeOther)
 }
 
-func (s *Server) uploadPage(w http.ResponseWriter, r *http.Request) {
-	base := s.base(r, "upload", "Upload - Monbooru")
-	s.renderTemplate(w, "upload.html", map[string]any{
-		"Title":           base.Title,
-		"ActiveNav":       base.ActiveNav,
-		"CSRFToken":       base.CSRFToken,
-		"AuthEnabled":     base.AuthEnabled,
-		"Degraded":        base.Degraded,
-		"Version":         base.Version,
-		"RepoURL":         base.RepoURL,
-		"Variant":         base.Variant,
-		"ActiveGallery":   base.ActiveGallery,
-		"Galleries":       s.galleryList(),
-		"VisibleCount":    base.VisibleCount,
-		"TagCount":        base.TagCount,
-		"SavedCount":      base.SavedCount,
-		"AcceptFileTypes": gallery.SupportedMIMETypes,
-		"TaggerAvailable": tagger.IsAvailable(s.cfg),
-		"EnabledTaggers":  tagger.EnabledTaggers(s.cfg),
-	})
-}
-
-func (s *Server) uploadPost(w http.ResponseWriter, r *http.Request) {
-	if cx := s.Active(); cx == nil || cx.Degraded {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		w.Write([]byte(`<div class="flash flash-err">Upload unavailable: gallery path is unreadable.</div>`))
-		return
-	}
-	maxBytes := int64(s.cfg.Gallery.MaxFileSizeMB) * 1024 * 1024
-	r.Body = http.MaxBytesReader(w, r.Body, maxBytes*10+4096) // allow multiple files
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		w.Write([]byte(`<div class="flash flash-err">Upload too large or invalid.</div>`))
-		return
-	}
-
-	tagInput := strings.TrimSpace(r.FormValue("tags"))
-	autotagAfter := r.FormValue("autotag") == "on"
-	folderInput := strings.TrimSpace(r.FormValue("folder"))
-	taggerName := strings.TrimSpace(r.FormValue("tagger_name"))
-	files := r.MultipartForm.File["files"]
-	if len(files) == 0 {
-		w.Write([]byte(`<div class="flash flash-err">No files selected.</div>`))
-		return
-	}
-
-	destDir, destErr := gallery.ResolveSubdir(s.galleryPath(), folderInput)
-	if destErr != nil {
-		w.Write([]byte(`<div class="flash flash-err">` + html.EscapeString(destErr.Error()) + `</div>`))
-		return
-	}
-	if err := os.MkdirAll(destDir, 0755); err != nil {
-		w.Write([]byte(`<div class="flash flash-err">Could not create folder: ` + html.EscapeString(err.Error()) + `</div>`))
-		return
-	}
-
-	// Resolve tags using the shared parser (same logic as addTagToImage).
-	var tagPairs []catTag
-	if tagInput != "" {
-		tagPairs, _ = s.parseTagInput(tagInput)
-	}
-
-	var addedIDs []int64
-	added, dupes, errors := 0, 0, 0
-	for _, fh := range files {
-		file, err := fh.Open()
-		if err != nil {
-			errors++
-			continue
-		}
-
-		dstPath := gallery.UniqueDestPath(destDir, fh.Filename)
-		dst, err := os.Create(dstPath)
-		if err != nil {
-			file.Close()
-			errors++
-			continue
-		}
-
-		if _, err := dst.ReadFrom(file); err != nil {
-			dst.Close()
-			file.Close()
-			os.Remove(dstPath)
-			errors++
-			continue
-		}
-		dst.Close()
-		file.Close()
-
-		ft, ftErr := gallery.DetectFileType(dstPath)
-		if ftErr != nil {
-			os.Remove(dstPath)
-			errors++
-			continue
-		}
-
-		img, isDup, ingestErr := gallery.Ingest(s.db(), s.galleryPath(), s.thumbnailsPath(), dstPath, ft, models.OriginUpload)
-		if ingestErr != nil {
-			logx.Warnf("upload ingest %q: %v", fh.Filename, ingestErr)
-			errors++
-			continue
-		}
-		if isDup {
-			dupes++
-			continue
-		}
-
-		for _, ct := range tagPairs {
-			tag, err := s.tagSvc().GetOrCreateTag(ct.name, ct.catID)
-			if err == nil {
-				s.tagSvc().AddTagToImage(img.ID, tag.ID, false, nil)
-			}
-		}
-		addedIDs = append(addedIDs, img.ID)
-		added++
-	}
-
-	if added > 0 {
-		s.Active().InvalidateCaches()
-	}
-
-	msg := fmt.Sprintf("%d added", added)
-	if dupes > 0 {
-		msg += fmt.Sprintf(", %d duplicate(s)", dupes)
-	}
-	if errors > 0 {
-		msg += fmt.Sprintf(", %d error(s)", errors)
-	}
-	cssClass := "flash-ok"
-	if errors > 0 && added == 0 {
-		cssClass = "flash-err"
-	}
-
-	// Optionally kick off auto-tagging on the newly uploaded images.
-	if autotagAfter && len(addedIDs) > 0 && tagger.IsAvailable(s.cfg) {
-		selected, selErr := selectTaggers(s.cfg, taggerName)
-		if selErr != nil {
-			msg += " (autotag skipped: " + selErr.Error() + ")"
-		} else if err := s.jobs.Start("autotag"); err != nil {
-			msg += " (autotag skipped: a job is already running)"
-		} else {
-			ids := addedIDs
-			database := s.db()
-			go func() {
-				ctx := s.jobs.Context()
-				err := tagger.RunWithTaggers(ctx, database, s.cfg, ids, selected, s.jobs, s.cfg.Tagger.UseCUDA)
-				if ctx.Err() != nil {
-					s.jobs.Complete(fmt.Sprintf("auto-tagging cancelled (%d image(s) queued)", len(ids)))
-					return
-				}
-				if err != nil {
-					s.jobs.Fail(err.Error())
-					return
-				}
-				s.jobs.Complete(fmt.Sprintf("auto-tagged %d uploaded image(s)", len(ids)))
-			}()
-			msg += fmt.Sprintf(", auto-tagging %d image(s)", len(addedIDs))
-		}
-	}
-	w.Write([]byte(`<div class="flash ` + cssClass + `">` + html.EscapeString(msg) + `</div>`))
-}
 
 func (s *Server) helpHandler(w http.ResponseWriter, r *http.Request) {
 	s.renderTemplate(w, "help.html", s.base(r, "help", "Help - Monbooru"))
@@ -2646,171 +2544,6 @@ func (s *Server) syncTrigger(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, redirectTo, http.StatusSeeOther)
 }
 
-// removeAutotaggedPost deletes every auto-tagged image_tags row across the
-// library. An optional tagger_name form field restricts the deletion to
-// rows produced by that one tagger.
-func (s *Server) removeAutotaggedPost(w http.ResponseWriter, r *http.Request) {
-	if !parseFormOK(w, r) {
-		return
-	}
-	taggerName := strings.TrimSpace(r.FormValue("tagger_name"))
-	var names []string
-	if taggerName != "" {
-		names = []string{taggerName}
-	}
-	removed, err := s.tagSvc().RemoveAllAutoTags(names)
-	if err != nil {
-		w.Write([]byte(`<div class="flash flash-err">` + html.EscapeString(err.Error()) + `</div>`))
-		return
-	}
-	label := "all auto-taggers"
-	if taggerName != "" {
-		label = taggerName
-	}
-	w.Write([]byte(fmt.Sprintf(
-		`<div class="flash flash-ok">Removed %d auto-tag(s) from %s.</div>`,
-		removed, html.EscapeString(label),
-	)))
-}
-
-// removeAllUserTagsPost deletes every manual (is_auto=0) image_tags row
-// across the library.
-func (s *Server) removeAllUserTagsPost(w http.ResponseWriter, r *http.Request) {
-	removed, err := s.tagSvc().RemoveAllUserTags()
-	if err != nil {
-		w.Write([]byte(`<div class="flash flash-err">` + html.EscapeString(err.Error()) + `</div>`))
-		return
-	}
-	w.Write([]byte(fmt.Sprintf(
-		`<div class="flash flash-ok">Removed %d user tag(s) from the library.</div>`, removed,
-	)))
-}
-
-// removeAllTagsPost deletes every image_tags row across the library
-// (both manual and auto-tagged).
-func (s *Server) removeAllTagsPost(w http.ResponseWriter, r *http.Request) {
-	removed, err := s.tagSvc().RemoveAllTags()
-	if err != nil {
-		w.Write([]byte(`<div class="flash flash-err">` + html.EscapeString(err.Error()) + `</div>`))
-		return
-	}
-	w.Write([]byte(fmt.Sprintf(
-		`<div class="flash flash-ok">Removed %d tag(s) from the library.</div>`, removed,
-	)))
-}
-
-func (s *Server) autotagTrigger(w http.ResponseWriter, r *http.Request) {
-	if !tagger.IsAvailable(s.cfg) {
-		http.Error(w, "auto-tagger not available: "+tagger.UnavailableReason(s.cfg), http.StatusServiceUnavailable)
-		return
-	}
-
-	if !parseFormOK(w, r) {
-		return
-	}
-	mode := r.FormValue("mode") // "never", "all", or empty for checked IDs
-	idStrs := r.Form["ids"]
-	taggerName := strings.TrimSpace(r.FormValue("tagger_name"))
-
-	selected, selErr := selectTaggers(s.cfg, taggerName)
-	if selErr != nil {
-		if isHTMXRequest(r) {
-			w.Write([]byte(`<div class="flash flash-err">` + html.EscapeString(selErr.Error()) + `</div>`))
-			return
-		}
-		http.Error(w, selErr.Error(), http.StatusBadRequest)
-		return
-	}
-
-	var ids []int64
-	switch mode {
-	case "never":
-		// "Untagged" means "currently has no auto-tags from the taggers
-		// about to run". Scoping by tagger_name when one is supplied lets a
-		// per-tagger run pick up images missing only that tagger's output.
-		query := `SELECT id FROM images WHERE is_missing = 0
-		          AND NOT EXISTS (SELECT 1 FROM image_tags it
-		                          WHERE it.image_id = images.id AND it.is_auto = 1`
-		args := []any{}
-		if taggerName != "" {
-			query += ` AND it.tagger_name = ?`
-			args = append(args, taggerName)
-		}
-		query += `)`
-		rows, err := s.db().Read.QueryContext(r.Context(), query, args...)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var id int64
-			rows.Scan(&id)
-			ids = append(ids, id)
-		}
-	case "all":
-		rows, err := s.db().Read.QueryContext(r.Context(), `SELECT id FROM images WHERE is_missing = 0`)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var id int64
-			rows.Scan(&id)
-			ids = append(ids, id)
-		}
-	default:
-		for _, s := range idStrs {
-			if id, err := strconv.ParseInt(s, 10, 64); err == nil {
-				ids = append(ids, id)
-			}
-		}
-	}
-
-	if len(ids) == 0 {
-		if isHTMXRequest(r) {
-			w.Write([]byte(`<div class="flash flash-err">No images to tag.</div>`))
-			return
-		}
-		http.Error(w, "no images selected", http.StatusBadRequest)
-		return
-	}
-
-	if err := s.jobs.Start("autotag"); err != nil {
-		if isHTMXRequest(r) {
-			w.Write([]byte(`<div class="flash flash-err">A job is already running.</div>`))
-			return
-		}
-		http.Error(w, "job already running", http.StatusConflict)
-		return
-	}
-	// Loading the ONNX model (and initialising CUDA when enabled) can take a
-	// few seconds before the first image completes; surface that up front so
-	// the status bar doesn't look stalled.
-	s.jobs.Update(0, len(ids), "starting (loading model may take a few seconds)…")
-
-	database := s.db()
-	go func() {
-		ctx := s.jobs.Context()
-		err := tagger.RunWithTaggers(ctx, database, s.cfg, ids, selected, s.jobs, s.cfg.Tagger.UseCUDA)
-		if ctx.Err() != nil {
-			s.jobs.Complete(fmt.Sprintf("auto-tagging cancelled (%d image(s) queued)", len(ids)))
-			return
-		}
-		if err != nil {
-			s.jobs.Fail(err.Error())
-			return
-		}
-		s.jobs.Complete(fmt.Sprintf("auto-tagged %d image(s)", len(ids)))
-	}()
-
-	if isHTMXRequest(r) {
-		w.Write([]byte(`<div class="flash flash-ok">Auto-tagger started for ` + fmt.Sprintf("%d", len(ids)) + ` image(s).</div>`))
-		return
-	}
-	w.WriteHeader(http.StatusAccepted)
-}
 
 func (s *Server) batchDelete(w http.ResponseWriter, r *http.Request) {
 	if !parseFormOK(w, r) {
@@ -2979,7 +2712,9 @@ func (s *Server) runBulkDelete(targets []search.DeleteTarget) {
 		for id := range affectedTags {
 			ids = append(ids, id)
 		}
-		s.tagSvc().RecalcAndPruneIDs(ids)
+		if err := s.tagSvc().RecalcAndPruneIDs(ids); err != nil {
+			logx.Warnf("bulk delete recalc IDs: %v", err)
+		}
 	}
 
 	for fp := range folders {
@@ -3290,11 +3025,12 @@ func (s *Server) searchSuggest(w http.ResponseWriter, r *http.Request) {
 		if colonIdx := strings.IndexByte(last, ':'); colonIdx >= 0 {
 			key := strings.ToLower(last[:colonIdx])
 			val := last[colonIdx+1:]
-			// For value-only filter keywords, don't suggest tags.
-			switch key {
-			case "fav", "source", "width", "height", "date", "missing", "folder", "folderonly", "generated":
+			// For value-only filter keywords, don't suggest tags. The set
+			// is shared with alreadyTypedTags via search.IsFilterKeyword
+			// so the two helpers stay in lockstep.
+			if search.IsFilterKeyword(key) {
 				// no tag suggestions
-			default:
+			} else {
 				// Category-qualified only when the prefix actually names
 				// a category; otherwise suggest literal tags that match
 				// the whole "key:val" string (e.g. "nier:aut…" →
@@ -3362,9 +3098,10 @@ func alreadyTypedTags(contextTokens []string) map[string]struct{} {
 		if t == "" {
 			continue
 		}
+		// Skip filter keywords; only tag tokens belong in the de-dup set.
+		// Shares search.IsFilterKeyword with searchSuggest's value-only check.
 		if colonIdx := strings.IndexByte(t, ':'); colonIdx > 0 {
-			switch strings.ToLower(t[:colonIdx]) {
-			case "fav", "source", "width", "height", "date", "missing", "folder", "generated":
+			if search.IsFilterKeyword(strings.ToLower(t[:colonIdx])) {
 				continue
 			}
 		}
@@ -3405,88 +3142,6 @@ func (s *Server) changeTagCategory(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/tags", http.StatusSeeOther)
 }
 
-func (s *Server) autotagImage(w http.ResponseWriter, r *http.Request) {
-	if !tagger.IsAvailable(s.cfg) {
-		reason := tagger.UnavailableReason(s.cfg)
-		if isHTMXRequest(r) {
-			w.Write([]byte(`<div class="flash flash-err">Auto-tagger not available: ` + html.EscapeString(reason) + `.</div>`))
-			return
-		}
-		http.Error(w, "auto-tagger not available: "+reason, http.StatusServiceUnavailable)
-		return
-	}
-
-	idStr := r.PathValue("id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
-		http.Error(w, "bad id", http.StatusBadRequest)
-		return
-	}
-	if !parseFormOK(w, r) {
-		return
-	}
-	taggerName := strings.TrimSpace(r.FormValue("tagger_name"))
-
-	selected, selErr := selectTaggers(s.cfg, taggerName)
-	if selErr != nil {
-		if isHTMXRequest(r) {
-			w.Write([]byte(`<div class="flash flash-err">` + html.EscapeString(selErr.Error()) + `</div>`))
-			return
-		}
-		http.Error(w, selErr.Error(), http.StatusBadRequest)
-		return
-	}
-
-	if err := s.jobs.Start("autotag"); err != nil {
-		if isHTMXRequest(r) {
-			w.Write([]byte(`<div class="flash flash-err">A job is already running.</div>`))
-			return
-		}
-		http.Error(w, "job already running", http.StatusConflict)
-		return
-	}
-
-	database := s.db()
-	go func() {
-		// Force CPU inference for one-shot detail-page runs: spinning up the
-		// CUDA session and loading the model onto the GPU dwarfs the tagging
-		// time for a single image, so CPU finishes faster even when the
-		// global toggle is on.
-		ctx := s.jobs.Context()
-		err := tagger.RunWithTaggers(ctx, database, s.cfg, []int64{id}, selected, s.jobs, false)
-		if ctx.Err() != nil {
-			s.jobs.Complete("auto-tagging cancelled")
-			return
-		}
-		if err != nil {
-			s.jobs.Fail(err.Error())
-			return
-		}
-		s.jobs.Complete("auto-tagged image #" + idStr)
-	}()
-
-	if isHTMXRequest(r) {
-		w.Write([]byte(`<div class="flash flash-ok">Auto-tagger started for this image.</div>`))
-		return
-	}
-	http.Redirect(w, r, "/images/"+idStr, http.StatusSeeOther)
-}
-
-// selectTaggers resolves a user-supplied tagger_name to the concrete
-// TaggerStatus list to run. Empty name means all enabled+available taggers.
-// Returns an error if the requested tagger is not enabled or unavailable.
-func selectTaggers(cfg *config.Config, name string) ([]tagger.TaggerStatus, error) {
-	enabled := tagger.EnabledTaggers(cfg)
-	if name == "" {
-		return enabled, nil
-	}
-	for _, t := range enabled {
-		if t.Name == name {
-			return []tagger.TaggerStatus{t}, nil
-		}
-	}
-	return nil, fmt.Errorf("tagger %q is not enabled or available", name)
-}
 
 func (s *Server) getImageTagsHandler(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
@@ -3640,7 +3295,10 @@ func loadImagePaths(ctx context.Context, database *db.DB, id int64) []models.Ima
 	for rows.Next() {
 		var p models.ImagePath
 		var isCanon int
-		rows.Scan(&p.ID, &p.ImageID, &p.Path, &isCanon)
+		if err := rows.Scan(&p.ID, &p.ImageID, &p.Path, &isCanon); err != nil {
+			logx.Warnf("load image paths scan: %v", err)
+			continue
+		}
 		p.IsCanonical = isCanon == 1
 		paths = append(paths, p)
 	}

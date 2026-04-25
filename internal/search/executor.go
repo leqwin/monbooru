@@ -19,16 +19,12 @@ type Query struct {
 	RandomSeed int64  // used when Sort=="random" for stable ordering
 	Page       int    // 1-based
 	Limit      int
-	// PresetTotal skips the COUNT(*) query when set to a non-negative
-	// value. Callers that already know the match count (e.g. an unfiltered
-	// gallery page using a cached visible-image count) should set this to
-	// avoid scanning the whole index on large libraries.
+	// PresetTotal lets a caller that already knows the match count
+	// (e.g. cached visible-image count for an unfiltered render) skip
+	// the COUNT(*) pass.
 	PresetTotal *int
-	// SkipCount drops the COUNT(*) query entirely and returns Total = 0.
-	// For callers that only need Results (e.g. the sidebar handlers, which
-	// use the returned IDs to build the per-page tag aggregation but never
-	// surface Total). On filtered searches against 100k-image libraries the
-	// count pass is a full filter evaluation; skipping it halves the work.
+	// SkipCount drops COUNT(*) entirely; result.Total is 0. For callers
+	// like the sidebar that consume Results.IDs but never surface Total.
 	SkipCount bool
 }
 
@@ -59,7 +55,6 @@ func Execute(database *db.DB, q Query) (*models.SearchResult, error) {
 	var total int
 	switch {
 	case q.SkipCount:
-		// total stays 0; caller opted out.
 	case q.PresetTotal != nil:
 		total = *q.PresetTotal
 	default:
@@ -127,12 +122,10 @@ func Execute(database *db.DB, q Query) (*models.SearchResult, error) {
 	}, nil
 }
 
-// ExecuteAdjacent returns the image IDs immediately preceding and following
-// currentID in sort order under the same filter as Execute. Uses cursor-style
-// LIMIT 1 queries so the cost is O(log n) via the ingested_at / file_size
-// indexes instead of loading every matching ID. Random sort uses the same
-// deterministic seed expression as Execute, so a (currentID, seed) pair
-// resolves to the same neighbours the gallery shows.
+// ExecuteAdjacent returns the image IDs immediately before and after
+// currentID under q's sort and filter. Uses cursor-style LIMIT 1
+// queries so cost is O(log n) via the ingested_at / file_size indexes,
+// not O(matches).
 func ExecuteAdjacent(database *db.DB, q Query, currentID int64) (*int64, *int64, error) {
 	var ingestedAt string
 	var fileSize int64
@@ -159,9 +152,8 @@ func ExecuteAdjacent(database *db.DB, q Query, currentID int64) (*int64, *int64,
 			return nil, nil, nil
 		}
 		// SAFETY: q.RandomSeed is generated server-side via crypto/rand
-		// (see galleryHandler) and never sourced from user input. %d only
-		// produces digits regardless of value, so this is safe from SQL
-		// injection - same pattern as buildOrder uses for the data query.
+		// and never sourced from user input. %d only produces digits, so
+		// the literal interpolation is safe from SQL injection.
 		keyCol = fmt.Sprintf("((i.id * %d) & 2147483647)", q.RandomSeed)
 		keyVal = (currentID * q.RandomSeed) & 2147483647
 	case "filesize":
@@ -172,9 +164,8 @@ func ExecuteAdjacent(database *db.DB, q Query, currentID int64) (*int64, *int64,
 		keyVal = ingestedAt
 	}
 
-	// For desc order the list runs largest→smallest; prev is the next-larger
-	// neighbour, next is the next-smaller. For asc and random (which iterate
-	// ascending by keyCol), mirrored.
+	// In desc order prev is the next-larger neighbour; in asc/random it's
+	// the next-smaller one.
 	var prevCmp, nextCmp, prevSort, nextSort string
 	if q.Order == "asc" || q.Sort == "random" {
 		prevCmp = fmt.Sprintf("(%s < ? OR (%s = ? AND i.id < ?))", keyCol, keyCol)
@@ -203,11 +194,10 @@ func ExecuteAdjacent(database *db.DB, q Query, currentID int64) (*int64, *int64,
 	return lookup(prevCmp, prevSort), lookup(nextCmp, nextSort), nil
 }
 
-// ExecutePosition returns the 1-based rank of currentID in the same sort
-// order Execute would produce under q, and the total number of matching
-// rows. The detail page uses it for the "X/Y" counter next to prev/next.
-// A single combined COUNT exploits the same key-col indexes ExecuteAdjacent
-// does instead of materialising the full match list.
+// ExecutePosition returns the 1-based rank of currentID under q's sort
+// plus the total matching rows. Drives the detail page's "X/Y" counter.
+// One combined COUNT exploits the same key-col indexes ExecuteAdjacent
+// uses, avoiding a full materialised match list.
 func ExecutePosition(database *db.DB, q Query, currentID int64) (int, int, error) {
 	var ingestedAt string
 	var fileSize int64
@@ -233,9 +223,7 @@ func ExecutePosition(database *db.DB, q Query, currentID int64) (int, int, error
 		if q.RandomSeed == 0 {
 			return 0, 0, nil
 		}
-		// SAFETY: q.RandomSeed is generated server-side via crypto/rand;
-		// %d only emits digits. Same inlined-literal approach ExecuteAdjacent
-		// and buildOrder use.
+		// SAFETY: see ExecuteAdjacent - server-side seed, %d-only.
 		keyCol = fmt.Sprintf("((i.id * %d) & 2147483647)", q.RandomSeed)
 		keyVal = (currentID * q.RandomSeed) & 2147483647
 	case "filesize":
@@ -246,9 +234,8 @@ func ExecutePosition(database *db.DB, q Query, currentID int64) (int, int, error
 		keyVal = ingestedAt
 	}
 
-	// prevCmp mirrors ExecuteAdjacent: it matches rows that come before
-	// currentID in the active sort order, so SUM(CASE WHEN prevCmp …) gives
-	// the zero-based rank. Position = rank + 1.
+	// prevCmp mirrors ExecuteAdjacent's matcher for rows preceding
+	// currentID, so SUM(CASE WHEN prevCmp ...) gives zero-based rank.
 	var prevCmp string
 	if q.Order == "asc" || q.Sort == "random" {
 		prevCmp = fmt.Sprintf("(%s < ? OR (%s = ? AND i.id < ?))", keyCol, keyCol)
@@ -275,7 +262,7 @@ func ExecutePosition(database *db.DB, q Query, currentID int64) (int, int, error
 	return int(rankBefore.Int64) + 1, total, nil
 }
 
-// DeleteTarget holds minimal image data needed for bulk deletion.
+// DeleteTarget is the minimum bulk-delete needs from a row.
 type DeleteTarget struct {
 	ID            int64
 	CanonicalPath string
@@ -283,25 +270,9 @@ type DeleteTarget struct {
 	IsMissing     bool
 }
 
-// ExecuteForDelete returns all images matching expr with their paths, for
-// bulk deletion. No pagination is applied - all matching images are
-// returned in a single query.
-//
-// Prefer ExecuteForDeleteStream when caller-side memory is a concern on
-// large libraries; this variant remains for callers that genuinely need
-// the whole slice up front.
-func ExecuteForDelete(database *db.DB, expr Expr) ([]DeleteTarget, error) {
-	var targets []DeleteTarget
-	err := ExecuteForDeleteStream(database, expr, func(t DeleteTarget) error {
-		targets = append(targets, t)
-		return nil
-	})
-	return targets, err
-}
-
 // ExecuteForDeleteStream invokes visit for each matching row, streaming
-// directly off the cursor so very large result sets never materialise in
-// Go. visit returning a non-nil error aborts the iteration.
+// directly off the cursor so very large result sets never materialise.
+// visit returning a non-nil error aborts iteration.
 func ExecuteForDeleteStream(database *db.DB, expr Expr, visit func(DeleteTarget) error) error {
 	where, args, hasMissingFilter := buildWhereDB(expr, database)
 	if !hasMissingFilter {
@@ -335,18 +306,15 @@ func ExecuteForDeleteStream(database *db.DB, expr Expr, visit func(DeleteTarget)
 	return rows.Err()
 }
 
-// sidebarMaxPerCategory is the per-category cap applied to the sidebar tag
-// list. Kept small so the tree stays legible on long-tail tag collections.
+// sidebarMaxPerCategory caps the sidebar tag list per category so the
+// tree stays legible on long-tail libraries.
 const sidebarMaxPerCategory = 25
 
 // SidebarTagsWithGlobalCount returns the top N tags per category for the
-// given image IDs. Tags are ranked by how many images on the current page
-// use them (page_count); UsageCount is set to the global tags.usage_count
-// so the sidebar badge reflects total occurrences across the library.
-//
-// A ROW_NUMBER() window caps each category to sidebarMaxPerCategory rows
-// server-side so wide-tagged libraries don't ship every association back
-// just to slice most of them off in Go.
+// given image IDs. Tags are ranked by per-page count; UsageCount carries
+// the global tags.usage_count so the sidebar badge reflects total
+// occurrences across the library. A ROW_NUMBER() window caps each
+// category server-side.
 func SidebarTagsWithGlobalCount(database *db.DB, imageIDs []int64) ([]models.Tag, error) {
 	if len(imageIDs) == 0 {
 		return nil, nil
@@ -401,21 +369,14 @@ func SidebarTagsWithGlobalCount(database *db.DB, imageIDs []int64) ([]models.Tag
 	return out, rows.Err()
 }
 
-// SuggestTagsWithFilter returns up to limit tags whose name starts with (or
-// contains, as a secondary ranking) prefix AND which co-exist on at least one
-// image matching the preceding search expression. UsageCount on each returned
-// tag carries the count of images matching the full combination (existing
-// expression ANDed with the suggested tag), not the global usage count.
-//
-// When categoryName is non-empty, suggestions are restricted to that category.
-// When expr is nil, the filter degrades to "at least one image with this tag"
-// (which is identical to the global usage count).
+// SuggestTagsWithFilter returns up to limit tags matching prefix that
+// also co-occur with at least one image matching expr. UsageCount on
+// each returned tag carries the combination count (expr AND the
+// suggested tag), not the global one. categoryName, when set, restricts
+// suggestions to that category.
 func SuggestTagsWithFilter(database *db.DB, expr Expr, prefix, categoryName string, limit int) ([]models.Tag, error) {
-	// No preceding context → the combination count collapses to the tag's own
-	// count (tags.usage_count already excludes missing images after recalc),
-	// so skip the image_tags ⋈ images join entirely and rank by usage_count.
-	// Typing a single word in an empty search bar is the common case and the
-	// combo join is pure overhead there.
+	// No preceding context: the combination count collapses to the tag's
+	// global usage count, so skip the image_tags ⋈ images join entirely.
 	if expr == nil {
 		return suggestByUsage(database, prefix, categoryName, limit)
 	}
@@ -429,8 +390,8 @@ func SuggestTagsWithFilter(database *db.DB, expr Expr, prefix, categoryName stri
 		}
 	}
 
-	// Two-pass: prefix matches first (ranked by combo count), then substring
-	// matches until we hit limit. Each pass passes its own copy of args.
+	// Two-pass: prefix matches first (ranked by combo count), then
+	// substring matches until limit is hit.
 	prefixPat := prefix + "%"
 	substrPat := "%" + prefix + "%"
 
@@ -505,11 +466,9 @@ func SuggestTagsWithFilter(database *db.DB, expr Expr, prefix, categoryName stri
 	return out, nil
 }
 
-// suggestByUsage is the fast path of SuggestTagsWithFilter when no preceding
-// search expression is present. Same prefix-then-substring two-pass shape,
-// but the per-tag image count is read from tags.usage_count instead of being
-// recomputed by joining image_tags and images - the dominant cost on large
-// libraries where every candidate tag otherwise drags an image_tags scan.
+// suggestByUsage is the no-context fast path of SuggestTagsWithFilter:
+// same two-pass prefix→substring shape, but the per-tag count comes
+// from tags.usage_count instead of an image_tags ⋈ images join.
 func suggestByUsage(database *db.DB, prefix, categoryName string, limit int) ([]models.Tag, error) {
 	baseSQL := `SELECT t.id, t.name, tc.name, tc.color, t.usage_count
 	            FROM tags t
@@ -584,14 +543,12 @@ func buildOrder(sort, order string, randomSeed int64) string {
 		return "ORDER BY i.file_size " + dir + ", i.id " + dir
 	case "random":
 		if randomSeed != 0 {
-			// Deterministic pseudo-random order using seed: stable across page loads.
-			// The masked product is not injective (two rows can share the same 31-bit
-			// key), so we append i.id as a tiebreaker to guarantee a total order -
-			// otherwise pagination can repeat or skip images.
-			// SAFETY: randomSeed is an int64 generated server-side in galleryHandler
-			// (via crypto/rand) and never sourced from user input. Interpolating it as
-			// an integer literal is safe from SQL injection - fmt.Sprintf with %d only
-			// produces digit characters regardless of the value.
+			// Deterministic pseudo-random order, stable across page
+			// loads. The 31-bit masked product can collide, so i.id is
+			// the tiebreaker for a total order (otherwise pagination
+			// can repeat or skip images).
+			// SAFETY: randomSeed comes from crypto/rand in galleryHandler,
+			// never user input; %d only produces digits.
 			return fmt.Sprintf("ORDER BY ((i.id * %d) & 2147483647), i.id", randomSeed)
 		}
 		return "ORDER BY RANDOM(), i.id"
@@ -608,11 +565,11 @@ type whereBuilder struct {
 	parts            []string
 	args             []any
 	hasMissingFilter bool
-	// db is optional: when set, FilterExpr's default branch checks whether
-	// an unknown `prefix:value` key matches a real tag category. On miss
-	// the token falls back to a literal tag match so names like
-	// `nier:automata` remain searchable by their raw form. A nil db keeps
-	// the historic "always category-qualified" behaviour used in tests.
+	// db, when non-nil, lets FilterExpr's default branch check whether
+	// an unknown `prefix:value` key matches a real tag category. On
+	// miss the whole token is matched as a literal tag so names like
+	// `nier:automata` remain searchable. A nil db (test path) keeps
+	// the always-category-qualified behaviour.
 	db *db.DB
 }
 
@@ -620,10 +577,9 @@ func buildWhere(expr Expr) (string, []any, bool) {
 	return buildWhereDB(expr, nil)
 }
 
-// categoryExists reports whether the given name matches a tag_categories
-// row. Returns false when the builder has no DB handle (tests), which
-// preserves the old "always treat unknown key as category-qualified"
-// default for the pure-parser test path.
+// categoryExists reports whether name matches a tag_categories row.
+// Returns true on a nil-db (test) builder so the caller's old behaviour
+// is preserved.
 func (b *whereBuilder) categoryExists(name string) bool {
 	if b.db == nil {
 		return true
@@ -684,17 +640,48 @@ func (b *whereBuilder) buildExpr(expr Expr) string {
 }
 
 func (b *whereBuilder) buildTagExpr(e TagExpr) string {
+	// COALESCE(canonical_tag_id, id) collapses alias rows onto their
+	// canonical so a search for the alias name still hits image_tags
+	// rows that were re-pointed at the canonical.
 	switch e.Wildcard {
 	case "prefix":
 		b.args = append(b.args, e.Tag+"%")
-		return `EXISTS (SELECT 1 FROM image_tags it JOIN tags t ON it.tag_id = t.id WHERE it.image_id = i.id AND t.name LIKE ?)`
+		return `EXISTS (SELECT 1 FROM image_tags it WHERE it.image_id = i.id AND it.tag_id IN (SELECT COALESCE(canonical_tag_id, id) FROM tags WHERE name LIKE ?))`
 	case "substring":
 		b.args = append(b.args, "%"+e.Tag+"%")
-		return `EXISTS (SELECT 1 FROM image_tags it JOIN tags t ON it.tag_id = t.id WHERE it.image_id = i.id AND t.name LIKE ?)`
+		return `EXISTS (SELECT 1 FROM image_tags it WHERE it.image_id = i.id AND it.tag_id IN (SELECT COALESCE(canonical_tag_id, id) FROM tags WHERE name LIKE ?))`
 	default:
 		b.args = append(b.args, e.Tag)
-		return `EXISTS (SELECT 1 FROM image_tags it JOIN tags t ON it.tag_id = t.id WHERE it.image_id = i.id AND t.name = ?)`
+		return `EXISTS (SELECT 1 FROM image_tags it WHERE it.image_id = i.id AND it.tag_id IN (SELECT COALESCE(canonical_tag_id, id) FROM tags WHERE name = ?))`
 	}
+}
+
+// FilterKeywords is the canonical set of `key:value` filter prefixes the
+// query language understands. Use IsFilterKeyword to test membership; both
+// the search-suggest dropdown and the typed-tag de-duplication helper in
+// internal/web reference this so they don't drift out of sync with the
+// executor's switch below.
+var FilterKeywords = map[string]struct{}{
+	"fav":        {},
+	"source":     {},
+	"cat":        {},
+	"width":      {},
+	"height":     {},
+	"date":       {},
+	"missing":    {},
+	"animated":   {},
+	"tagged":     {},
+	"autotagged": {},
+	"folder":     {},
+	"folderonly": {},
+	"generated":  {},
+}
+
+// IsFilterKeyword reports whether key is one of the recognized search
+// filter keywords. Returns false for tag-name colons like "nier:automata".
+func IsFilterKeyword(key string) bool {
+	_, ok := FilterKeywords[key]
+	return ok
 }
 
 func (b *whereBuilder) buildFilterExpr(e FilterExpr) string {
@@ -706,12 +693,12 @@ func (b *whereBuilder) buildFilterExpr(e FilterExpr) string {
 		return "i.is_favorited = 0"
 
 	case "source":
-		// Support comma-separated source_type (e.g. "a1111,comfyui") and legacy "sd" alias.
+		// Accept comma-separated source_type and the legacy "sd" alias.
 		val := e.Val
 		if val == "sd" {
 			val = "a1111"
 		}
-		// "ai" is a parent that matches any image with a1111 and/or comfyui metadata.
+		// "ai" matches any image carrying a1111 and/or comfyui metadata.
 		if val == "ai" {
 			return "(i.source_type = 'a1111' OR i.source_type = 'comfyui' OR i.source_type = 'a1111,comfyui')"
 		}
@@ -742,12 +729,10 @@ func (b *whereBuilder) buildFilterExpr(e FilterExpr) string {
 		return b.buildDateFilter(e.Val)
 
 	case "missing":
-		// Any explicit `missing:` filter - true or false - opts out of
-		// the auto-injected `AND is_missing = 0`. Without this flag the
-		// negated form `-missing:false` collapses to
-		// `NOT (is_missing = 0) AND is_missing = 0`, which matches
-		// nothing; the user typed it expecting "show me missing" and
-		// got an empty grid instead.
+		// Any explicit `missing:` opts out of the default
+		// `AND is_missing = 0`. Without this flag, `-missing:false`
+		// collapses to `NOT (is_missing = 0) AND is_missing = 0` and
+		// returns nothing.
 		b.hasMissingFilter = true
 		if e.Val == "true" {
 			return "i.is_missing = 1"
@@ -774,52 +759,48 @@ func (b *whereBuilder) buildFilterExpr(e FilterExpr) string {
 
 	case "folder":
 		if e.Val == "" {
-			// `folder:` alone is the recursive root: every non-missing image
-			// lives at or below the gallery root, so the filter is a no-op.
-			// Use `folderonly:` with an empty value for "root directly".
+			// `folder:` alone is recursive root - every non-missing
+			// image lives at or below the gallery root. Use
+			// `folderonly:` with an empty value for "root directly".
 			return "1=1"
 		}
-		// Recursive: images in this folder or anywhere beneath it. Matches
-		// how clicking a folder in the sidebar is expected to surface the
-		// full subtree rather than just the directly-contained images.
+		// Recursive match: this folder or anywhere beneath it.
 		b.args = append(b.args, e.Val, e.Val+"/%")
 		return "(i.folder_path = ? OR i.folder_path LIKE ?)"
 
 	case "folderonly":
 		if e.Val == "" {
-			// Gallery root directly, excluding every subfolder.
 			return "i.folder_path = ''"
 		}
 		b.args = append(b.args, e.Val)
 		return "i.folder_path = ?"
 
 	case "generated":
-		// Match images whose A1111 or ComfyUI recipe hashes to e.Val.
 		b.args = append(b.args, e.Val, e.Val)
 		return `(EXISTS (SELECT 1 FROM sd_metadata sm WHERE sm.image_id = i.id AND sm.generation_hash = ?)
 		         OR EXISTS (SELECT 1 FROM comfyui_metadata cm WHERE cm.image_id = i.id AND cm.generation_hash = ?))`
 
 	default:
 		// Unknown key is either a category-qualified tag search
-		// (e.g. "character:cat") or a literal tag name that happens to
-		// contain a colon (e.g. "nier:automata", ":3"). Resolution is by
-		// existence: if the key matches a real tag category the token
-		// is split; otherwise the whole `key:val` is matched as a tag
-		// name so colon-bearing tags stay searchable by their raw form.
+		// ("character:cat") or a literal colon-bearing tag name
+		// ("nier:automata", ":3"). If the key matches a real category
+		// we split; otherwise the whole "key:val" is matched as a
+		// literal tag name.
 		if e.Val == "" {
 			return "1=1"
 		}
 		if b.categoryExists(e.Key) {
 			b.args = append(b.args, e.Val, e.Key)
 			return `EXISTS (SELECT 1 FROM image_tags it
-			         JOIN tags t ON t.id = it.tag_id
-			         JOIN tag_categories tc ON tc.id = t.category_id
-			         WHERE it.image_id = i.id AND t.name = ? AND tc.name = ?)`
+			         WHERE it.image_id = i.id AND it.tag_id IN (
+			             SELECT COALESCE(t.canonical_tag_id, t.id) FROM tags t
+			             JOIN tag_categories tc ON tc.id = t.category_id
+			             WHERE t.name = ? AND tc.name = ?))`
 		}
 		b.args = append(b.args, e.Key+":"+e.Val)
 		return `EXISTS (SELECT 1 FROM image_tags it
-		         JOIN tags t ON t.id = it.tag_id
-		         WHERE it.image_id = i.id AND t.name = ?)`
+		         WHERE it.image_id = i.id AND it.tag_id IN (
+		             SELECT COALESCE(canonical_tag_id, id) FROM tags WHERE name = ?))`
 	}
 }
 
@@ -854,10 +835,9 @@ func parseCompOp(val string) (string, string) {
 }
 
 // parseIntComp wraps parseCompOp with strict int parsing so non-numeric
-// values like `width:>=abc` no longer collapse to `width >= 0` (SQLite
-// silently coerces a string operand to 0). Returns ok=false when the
-// value isn't a base-10 integer; callers should emit `1=0` so the user
-// sees an explicit empty result instead of a silently overwide match.
+// values like `width:>=abc` produce ok=false (and an explicit empty
+// result via `1=0`) instead of SQLite silently coercing the operand to
+// 0 and returning everything wider than 0.
 func parseIntComp(val string) (string, int64, bool) {
 	op, raw := parseCompOp(val)
 	n, err := strconv.ParseInt(raw, 10, 64)

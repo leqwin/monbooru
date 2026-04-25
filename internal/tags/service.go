@@ -18,34 +18,54 @@ var (
 	ErrTagNotFound          = errors.New("tag not found")
 	ErrCategoryNotFound     = errors.New("category not found")
 	ErrBuiltinCategory      = errors.New("cannot delete built-in category")
-	ErrReservedCategoryName = errors.New("this name is used by a search filter (e.g. fav:, source:, cat:, width:, height:, date:, missing:, folder:, generated:, animated:)")
+	ErrReservedCategoryName = errors.New("this name is used by a search filter (e.g. fav:, source:, cat:, width:, height:, date:, missing:, folder:, folderonly:, generated:, animated:, tagged:, autotagged:)")
 
-	// Allowed tag name characters: [a-z0-9_()!@#$.~+:-]. The colon is kept
-	// here despite doubling as the category:tag separator in inputs; the
-	// parse-time fallback treats prefix:value as a literal tag when the
-	// prefix is neither a filter keyword nor a known category.
+	// Allowed tag name characters. The colon is kept despite doubling
+	// as the category:tag separator; the parser falls back to a literal
+	// tag when the prefix is neither a filter keyword nor a known
+	// category.
 	tagNameRe = regexp.MustCompile(`^[a-z0-9_()!@#$.~+:\-]+$`)
 
-	// Accept #rgb or #rrggbb. Anything else would end up ZgotmplZ'd in the
-	// template's CSS context, so reject it up front with a useful message.
+	// #rgb or #rrggbb. Anything else gets ZgotmplZ'd in the template's
+	// CSS context, so reject it up front with a useful error.
 	categoryColorRe = regexp.MustCompile(`^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$`)
 
 	ErrInvalidCategoryColor = errors.New("invalid category color (must be #rgb or #rrggbb)")
+)
 
-	// Search filter keywords that would collide with a category-qualified
-	// tag search (see internal/search/executor.go). Category names matching
-	// any of these are rejected at create/rename time.
+// IsValidCategoryColor reports whether s matches the #rgb / #rrggbb
+// shape the UI form enforces.
+func IsValidCategoryColor(s string) bool { return categoryColorRe.MatchString(s) }
+
+// SafeCategoryColor returns s when it's a valid hex colour, otherwise
+// the neutral fallback ("#888888"). Used on rows arriving from outside
+// the UI form layer (JSON / DB imports) so foreign payloads never
+// reach the inline-style template context unchecked.
+func SafeCategoryColor(s string) string {
+	if IsValidCategoryColor(s) {
+		return s
+	}
+	return "#888888"
+}
+
+var (
+	// reservedCategoryNames are search-filter keywords that would
+	// collide with a category-qualified tag search. Category names
+	// matching any of these are refused at create/rename time.
 	reservedCategoryNames = map[string]struct{}{
-		"fav":       {},
-		"source":    {},
-		"cat":       {},
-		"width":     {},
-		"height":    {},
-		"date":      {},
-		"missing":   {},
-		"folder":    {},
-		"generated": {},
-		"animated":  {},
+		"fav":        {},
+		"source":     {},
+		"cat":        {},
+		"width":      {},
+		"height":     {},
+		"date":       {},
+		"missing":    {},
+		"folder":     {},
+		"folderonly": {},
+		"generated":  {},
+		"animated":   {},
+		"tagged":     {},
+		"autotagged": {},
 	}
 )
 
@@ -76,22 +96,19 @@ func New(database *db.DB) *Service {
 	return &Service{db: database}
 }
 
-// RecalcAndPrune recomputes usage_count from the authoritative image_tags
-// table (counting only non-missing images) and deletes any tags with no
-// remaining associations. Call after bulk deletions or sync.
+// RecalcAndPruneDB recomputes usage_count from image_tags (non-missing
+// images only) and deletes any tags that drop to zero usage. Call after
+// bulk deletes or sync.
 func RecalcAndPruneDB(database *db.DB) {
 	_, _ = RecalcAndPruneDBCount(database)
 }
 
-// RecalcAndPruneDBCount behaves like RecalcAndPruneDB but reports how many
-// tag rows had their usage_count adjusted and how many were pruned for
-// dropping to zero usage.
+// RecalcAndPruneDBCount is RecalcAndPruneDB with row counts.
 //
-// A naïve correlated-subquery UPDATE reruns the count twice per tag, which
-// dominates sync time on libraries with many tags. This implementation
-// zeros out tags whose only remaining associations point to missing images,
-// then fills in the rest from a single GROUP BY aggregation - one scan of
-// image_tags instead of one per tag.
+// A naïve correlated-subquery UPDATE recomputes the count twice per
+// tag and dominates sync time on tag-heavy libraries. This impl zeros
+// out tags whose remaining usages all point at missing images, then
+// fills in the rest with one GROUP BY pass over image_tags.
 func RecalcAndPruneDBCount(database *db.DB) (updated int64, pruned int64) {
 	if res, err := database.Write.Exec(`
 		UPDATE tags SET usage_count = 0
@@ -124,24 +141,21 @@ func RecalcAndPruneDBCount(database *db.DB) (updated int64, pruned int64) {
 	return
 }
 
-// RecalcAndPrune is a convenience method on Service.
 func (s *Service) RecalcAndPrune() {
 	RecalcAndPruneDB(s.db)
 }
 
-// RecalcAndPruneCount is like RecalcAndPrune but reports counts.
 func (s *Service) RecalcAndPruneCount() (updated int64, pruned int64) {
 	return RecalcAndPruneDBCount(s.db)
 }
 
-// RecalcAndPruneIDs recomputes usage_count for the given tag IDs only and
-// prunes any of them that drop to zero usage. Used after bulk operations that
-// know which tags were touched, so cost scales with the affected subset
-// instead of the whole tags table (which the full RecalcAndPrune must walk).
+// RecalcAndPruneIDs recomputes usage_count for the given tag IDs and
+// prunes any that drop to zero usage. Lets bulk callers scope the work
+// to tags they actually touched instead of walking the whole table.
 // IDs are processed in chunks to stay under the SQLite parameter limit.
-func (s *Service) RecalcAndPruneIDs(ids []int64) {
+func (s *Service) RecalcAndPruneIDs(ids []int64) error {
 	if len(ids) == 0 {
-		return
+		return nil
 	}
 	const chunkSize = 500
 	for start := 0; start < len(ids); start += chunkSize {
@@ -156,13 +170,18 @@ func (s *Service) RecalcAndPruneIDs(ids []int64) {
 		for i, id := range chunk {
 			args[i] = id
 		}
-		s.db.Write.Exec(`UPDATE tags SET usage_count = (
+		if _, err := s.db.Write.Exec(`UPDATE tags SET usage_count = (
 			SELECT COUNT(*) FROM image_tags it
 			JOIN images i ON i.id = it.image_id
 			WHERE it.tag_id = tags.id AND i.is_missing = 0
-		) WHERE id IN (`+placeholders+`)`, args...)
-		s.db.Write.Exec(`DELETE FROM tags WHERE usage_count <= 0 AND id IN (`+placeholders+`)`, args...)
+		) WHERE id IN (`+placeholders+`)`, args...); err != nil {
+			return fmt.Errorf("recalc usage_count chunk: %w", err)
+		}
+		if _, err := s.db.Write.Exec(`DELETE FROM tags WHERE usage_count <= 0 AND id IN (`+placeholders+`)`, args...); err != nil {
+			return fmt.Errorf("prune zero-usage chunk: %w", err)
+		}
 	}
+	return nil
 }
 
 // --- Category methods ---
@@ -255,8 +274,8 @@ func (s *Service) GetCategoryTagCount(id int64) (int, error) {
 	return count, err
 }
 
-// DeleteCategoryMoveOrDelete deletes a category. If action=="delete_all", all tags in the
-// category are deleted. If action=="move", tags are moved to targetID.
+// DeleteCategoryMoveOrDelete deletes a category. action="delete_all"
+// deletes all tags in the category; "move" reparents them to targetID.
 func (s *Service) DeleteCategoryMoveOrDelete(id int64, action string, targetID int64) error {
 	tx, err := s.db.Write.Begin()
 	if err != nil {
@@ -278,7 +297,6 @@ func (s *Service) DeleteCategoryMoveOrDelete(id int64, action string, targetID i
 
 	switch action {
 	case "delete_all":
-		// Delete all tags in the category (cascades image_tags via FK or usage_count cleanup)
 		rows, err := tx.Query(`SELECT id FROM tags WHERE category_id = ?`, id)
 		if err != nil {
 			return err
@@ -320,10 +338,10 @@ func (s *Service) DeleteCategoryMoveOrDelete(id int64, action string, targetID i
 
 // --- Tag methods ---
 
-// ValidateTagName normalises (lowercases + trims) and validates a tag name
-// against the documented allowlist. Returns the normalised name or an error
-// wrapping ErrInvalidTagName. Exposed so non-UI sources of tag names (e.g.
-// the auto-tagger label loader) can apply the same rules.
+// ValidateTagName lowercases + trims name and checks it against the
+// documented allowlist. Returns the normalised name or an
+// ErrInvalidTagName-wrapped error. Exposed so non-UI sources (the
+// auto-tagger label loader, the JSON import path) apply the same rules.
 func ValidateTagName(name string) (string, error) {
 	name = strings.TrimSpace(name)
 	name = strings.ToLower(name)
@@ -336,7 +354,6 @@ func ValidateTagName(name string) (string, error) {
 		return "", fmt.Errorf("%w: contains invalid characters (allowed: a-z 0-9 _ ( ) ! @ # $ . ~ + - :)", ErrInvalidTagName)
 	}
 
-	// Reject names consisting only of punctuation
 	allPunct := true
 	for _, r := range name {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
@@ -373,11 +390,13 @@ func (s *Service) GetOrCreateTag(name string, categoryID int64) (*models.Tag, er
 func getOrCreateTagTx(tx *sql.Tx, name string, categoryID int64) (*models.Tag, error) {
 	var tag models.Tag
 	var createdAt string
-	// Look up by (name, category_id) - allows same name in different categories.
+	var canonicalID sql.NullInt64
+	// Look up by (name, category_id) so the same name can live in
+	// multiple categories.
 	err := tx.QueryRow(
-		`SELECT id, name, category_id, usage_count, is_alias, created_at FROM tags WHERE name = ? AND category_id = ?`,
+		`SELECT id, name, category_id, usage_count, is_alias, canonical_tag_id, created_at FROM tags WHERE name = ? AND category_id = ?`,
 		name, categoryID,
-	).Scan(&tag.ID, &tag.Name, &tag.CategoryID, &tag.UsageCount, &tag.IsAlias, &createdAt)
+	).Scan(&tag.ID, &tag.Name, &tag.CategoryID, &tag.UsageCount, &tag.IsAlias, &canonicalID, &createdAt)
 
 	if err == sql.ErrNoRows {
 		var id int64
@@ -399,13 +418,27 @@ func getOrCreateTagTx(tx *sql.Tx, name string, categoryID int64) (*models.Tag, e
 		return nil, err
 	}
 
+	// If this row is an alias, redirect to its canonical. MergeTags
+	// refuses to point an alias at another alias, so one hop is enough.
+	if tag.IsAlias && canonicalID.Valid {
+		var canon models.Tag
+		var canonCreated string
+		if err := tx.QueryRow(
+			`SELECT id, name, category_id, usage_count, is_alias, created_at FROM tags WHERE id = ?`,
+			canonicalID.Int64,
+		).Scan(&canon.ID, &canon.Name, &canon.CategoryID, &canon.UsageCount, &canon.IsAlias, &canonCreated); err == nil {
+			canon.CreatedAt, _ = time.Parse(time.RFC3339, canonCreated)
+			return &canon, nil
+		}
+	}
+
 	tag.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
 	return &tag, nil
 }
 
 func (s *Service) ListTags(filter TagFilter) ([]models.Tag, int, error) {
 	args := []any{}
-	where := "t.is_alias = 0"
+	where := "1=1"
 
 	if filter.CategoryID != nil {
 		where += " AND t.category_id = ?"
@@ -417,11 +450,11 @@ func (s *Service) ListTags(filter TagFilter) ([]models.Tag, int, error) {
 	}
 	switch filter.Origin {
 	case "auto":
-		// Auto-only: no manual image_tags entry exists
-		where += " AND NOT EXISTS (SELECT 1 FROM image_tags it WHERE it.tag_id = t.id AND it.is_auto = 0)"
+		where += " AND t.is_alias = 0 AND NOT EXISTS (SELECT 1 FROM image_tags it WHERE it.tag_id = t.id AND it.is_auto = 0)"
 	case "user":
-		// User: at least one manual image_tags entry exists
-		where += " AND EXISTS (SELECT 1 FROM image_tags it WHERE it.tag_id = t.id AND it.is_auto = 0)"
+		where += " AND t.is_alias = 0 AND EXISTS (SELECT 1 FROM image_tags it WHERE it.tag_id = t.id AND it.is_auto = 0)"
+	case "alias":
+		where += " AND t.is_alias = 1"
 	}
 
 	orderBy := "t.name ASC"
@@ -442,10 +475,17 @@ func (s *Service) ListTags(filter TagFilter) ([]models.Tag, int, error) {
 	}
 	offset := filter.PageIndex * limit
 
+	// LEFT JOIN pulls the canonical name/category when t.is_alias = 1
+	// so the caller can render "alias → canonical" without a second
+	// round trip.
 	query := fmt.Sprintf(
-		`SELECT t.id, t.name, t.category_id, tc.name, tc.color, t.usage_count, t.is_alias, t.created_at
+		`SELECT t.id, t.name, t.category_id, tc.name, tc.color,
+		        t.usage_count, t.is_alias, t.canonical_tag_id, t.created_at,
+		        c.name, cc.name, cc.color
 		 FROM tags t
 		 JOIN tag_categories tc ON tc.id = t.category_id
+		 LEFT JOIN tags c ON c.id = t.canonical_tag_id
+		 LEFT JOIN tag_categories cc ON cc.id = c.category_id
 		 WHERE %s ORDER BY %s LIMIT ? OFFSET ?`,
 		where, orderBy,
 	)
@@ -461,14 +501,29 @@ func (s *Service) ListTags(filter TagFilter) ([]models.Tag, int, error) {
 	for rows.Next() {
 		var t models.Tag
 		var isAlias int
+		var canonicalID sql.NullInt64
 		var createdAt string
+		var canonName, canonCatName, canonCatColor sql.NullString
 		if err := rows.Scan(
 			&t.ID, &t.Name, &t.CategoryID, &t.CategoryName, &t.CategoryColor,
-			&t.UsageCount, &isAlias, &createdAt,
+			&t.UsageCount, &isAlias, &canonicalID, &createdAt,
+			&canonName, &canonCatName, &canonCatColor,
 		); err != nil {
 			return nil, 0, err
 		}
 		t.IsAlias = isAlias == 1
+		if canonicalID.Valid {
+			t.CanonicalTagID = &canonicalID.Int64
+		}
+		if canonName.Valid {
+			t.CanonicalName = canonName.String
+		}
+		if canonCatName.Valid {
+			t.CanonicalCategoryName = canonCatName.String
+		}
+		if canonCatColor.Valid {
+			t.CanonicalCategoryColor = canonCatColor.String
+		}
 		t.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
 		tagList = append(tagList, t)
 	}
@@ -476,14 +531,16 @@ func (s *Service) ListTags(filter TagFilter) ([]models.Tag, int, error) {
 		return nil, 0, err
 	}
 
-	// Resolve IsAutoOnly in one batch keyed on the visible-page tag IDs.
-	// A tag is "user-origin" if at least one manual image_tags row exists;
-	// otherwise every association is auto-tagged.
-	if len(tagList) > 0 {
-		ids := make([]any, len(tagList))
-		for i, t := range tagList {
-			ids[i] = t.ID
+	// Resolve IsAutoOnly in one batch keyed on canonical rows only.
+	// Aliases have no image_tags of their own; the origin badge for
+	// them is "alias", not "auto-only".
+	var ids []any
+	for _, t := range tagList {
+		if !t.IsAlias {
+			ids = append(ids, t.ID)
 		}
+	}
+	if len(ids) > 0 {
 		placeholders := strings.Repeat("?,", len(ids))
 		placeholders = placeholders[:len(placeholders)-1]
 		userRows, err := s.db.Read.Query(
@@ -504,6 +561,9 @@ func (s *Service) ListTags(filter TagFilter) ([]models.Tag, int, error) {
 		}
 		userRows.Close()
 		for i := range tagList {
+			if tagList[i].IsAlias {
+				continue
+			}
 			if _, ok := hasUser[tagList[i].ID]; !ok {
 				tagList[i].IsAutoOnly = true
 			}
@@ -592,21 +652,18 @@ func (s *Service) AddTagToImage(imageID, tagID int64, isAuto bool, confidence *f
 	return err
 }
 
-// AddTagToImageFromTagger is like AddTagToImage but records the source
-// auto-tagger name for later attribution. taggerName is ignored for manual
-// tags (isAuto=false).
+// AddTagToImageFromTagger is AddTagToImage with a source identifier
+// stored alongside the row (auto-tagger subfolder name when isAuto, or
+// any caller-supplied string for manual/API adds).
 func (s *Service) AddTagToImageFromTagger(imageID, tagID int64, isAuto bool, confidence *float64, taggerName string) error {
 	_, err := s.AddTagToImageReportingDup(imageID, tagID, isAuto, confidence, taggerName)
 	return err
 }
 
-// AddTagToImageReportingDup performs the INSERT OR IGNORE in a single
-// write-pool transaction and reports whether a new row was actually
-// inserted (added=true) or the (image_id, tag_id) pair already existed
-// (added=false). Use this when the caller wants to surface a "tag
-// already on image" message atomically: a read-then-write across the
-// two pools is racy under concurrent adds, so both POSTs can otherwise
-// believe they were the first writer.
+// AddTagToImageReportingDup runs INSERT OR IGNORE inside a write-pool
+// transaction and returns whether a new row was inserted. Lets a
+// caller atomically distinguish "added" from "already on image"
+// without the read-then-write race of doing it across pools.
 func (s *Service) AddTagToImageReportingDup(imageID, tagID int64, isAuto bool, confidence *float64, taggerName string) (bool, error) {
 	tx, err := s.db.Write.Begin()
 	if err != nil {
@@ -629,9 +686,9 @@ func addTagToImageTxReportingDup(tx *sql.Tx, imageID, tagID int64, isAuto bool, 
 	if isAuto {
 		isAutoInt = 1
 	}
-	// tagger_name doubles as a generic "source identifier": the tagger
-	// subfolder name for auto rows, any caller-supplied string (app name,
-	// URL…) for manual rows, NULL for UI-driven user adds.
+	// tagger_name doubles as a generic source identifier: the tagger
+	// subfolder name on auto rows, any caller-supplied string on manual
+	// rows, NULL for UI-driven user adds.
 	var tname any
 	if taggerName != "" {
 		tname = taggerName
@@ -646,7 +703,6 @@ func addTagToImageTxReportingDup(tx *sql.Tx, imageID, tagID int64, isAuto bool, 
 	}
 	rows, _ := res.RowsAffected()
 	if rows == 0 {
-		// Already exists - no-op
 		return false, nil
 	}
 
@@ -680,7 +736,8 @@ func removeTagFromImageTx(tx *sql.Tx, imageID, tagID int64) error {
 	}
 	rows, _ := res.RowsAffected()
 	if rows == 0 {
-		return nil // tag wasn't on the image
+		// Tag wasn't on the image; nothing to decrement.
+		return nil
 	}
 
 	if _, err := tx.Exec(
@@ -689,10 +746,8 @@ func removeTagFromImageTx(tx *sql.Tx, imageID, tagID int64) error {
 		return err
 	}
 
-	// Delete the tag itself if it has no more usages. The error here was
-	// previously discarded, so a stuck row could quietly persist at zero
-	// usage and leak into the sidebar; surface it so the surrounding
-	// transaction can roll back instead of committing inconsistent state.
+	// Surface the prune error so the surrounding tx can roll back rather
+	// than commit a zero-usage tag that would leak into the sidebar.
 	if _, err := tx.Exec(`DELETE FROM tags WHERE id = ? AND usage_count <= 0`, tagID); err != nil {
 		return fmt.Errorf("prune zero-usage tag %d: %w", tagID, err)
 	}
@@ -700,9 +755,9 @@ func removeTagFromImageTx(tx *sql.Tx, imageID, tagID int64) error {
 }
 
 // RemoveAllAutoTags deletes every auto-tagged image_tags row across the
-// library. When taggerNames is non-empty only rows with a matching
-// tagger_name are removed. Usage counts are recomputed and zero-usage
-// tags pruned afterwards.
+// library. A non-empty taggerNames restricts the deletion to rows whose
+// tagger_name matches. Usage counts are recomputed and zero-usage tags
+// pruned afterwards.
 func (s *Service) RemoveAllAutoTags(taggerNames []string) (int, error) {
 	var (
 		res sql.Result
@@ -730,8 +785,8 @@ func (s *Service) RemoveAllAutoTags(taggerNames []string) (int, error) {
 	return int(removed), nil
 }
 
-// RemoveAllUserTags deletes every manual (non-auto) image_tags row across
-// the library. Usage counts are recomputed and zero-usage tags pruned.
+// RemoveAllUserTags deletes every manual image_tags row across the
+// library, then recomputes usage counts.
 func (s *Service) RemoveAllUserTags() (int, error) {
 	res, err := s.db.Write.Exec(`DELETE FROM image_tags WHERE is_auto = 0`)
 	if err != nil {
@@ -742,9 +797,8 @@ func (s *Service) RemoveAllUserTags() (int, error) {
 	return int(removed), nil
 }
 
-// RemoveAllTags deletes every image_tags row across the library (both
-// manual and auto-tagged). Usage counts are recomputed and zero-usage
-// tags pruned.
+// RemoveAllTags deletes every image_tags row across the library, both
+// manual and auto-tagged, then recomputes usage counts.
 func (s *Service) RemoveAllTags() (int, error) {
 	res, err := s.db.Write.Exec(`DELETE FROM image_tags`)
 	if err != nil {
@@ -755,8 +809,8 @@ func (s *Service) RemoveAllTags() (int, error) {
 	return int(removed), nil
 }
 
-// RemoveUserTagsFromImage removes every manual (non-auto) image_tags row
-// for one image. Usage counts are maintained and zero-usage tags pruned.
+// RemoveUserTagsFromImage drops every manual image_tags row for one
+// image and adjusts usage counts.
 func (s *Service) RemoveUserTagsFromImage(imageID int64) error {
 	tx, err := s.db.Write.Begin()
 	if err != nil {
@@ -787,10 +841,9 @@ func (s *Service) RemoveUserTagsFromImage(imageID int64) error {
 	return tx.Commit()
 }
 
-// RemoveAutoTagsFromImage removes auto-tagged image_tags rows for one image.
-// When taggerNames is non-empty only rows whose tagger_name is in the list
-// are removed; otherwise every row with is_auto=1 on the image is removed.
-// Usage counts are maintained and zero-usage tags pruned.
+// RemoveAutoTagsFromImage drops auto-tagged image_tags rows for one
+// image. A non-empty taggerNames restricts the deletion to rows whose
+// tagger_name matches.
 func (s *Service) RemoveAutoTagsFromImage(imageID int64, taggerNames []string) error {
 	tx, err := s.db.Write.Begin()
 	if err != nil {
@@ -859,7 +912,6 @@ func (s *Service) RemoveAllTagsFromImage(imageID int64) error {
 	}
 	rows.Close()
 
-	// Bulk decrement usage_counts
 	if len(tagIDs) > 0 {
 		placeholders := strings.Repeat("?,", len(tagIDs))
 		placeholders = placeholders[:len(placeholders)-1]
@@ -873,7 +925,6 @@ func (s *Service) RemoveAllTagsFromImage(imageID int64) error {
 		); err != nil {
 			return err
 		}
-		// Delete tags that reached 0 usage.
 		tx.Exec(`DELETE FROM tags WHERE usage_count <= 0 AND id IN (`+placeholders+`)`, args...)
 	}
 
@@ -884,25 +935,22 @@ func (s *Service) RemoveAllTagsFromImage(imageID int64) error {
 	return tx.Commit()
 }
 
-// relatedGeneralTagsCap bounds the general-category portion of the probe
-// set: only the K rarest general tags of the source image feed into the
-// candidate GROUP BY. General is the noisy default bucket - a source
-// carrying `1girl` would otherwise drag every image_tags row for that tag
-// into the join. Character/artist/copyright (and other non-general
-// non-meta categories) carry too much distinguishing signal to cap, so
-// they pass through uncapped no matter how common they are.
+// relatedGeneralTagsCap bounds the general-category portion of the
+// probe set so a source carrying `1girl` doesn't drag every image_tags
+// row for that tag into the candidate GROUP BY. Non-general non-meta
+// categories pass through uncapped because they carry distinguishing
+// signal worth the scan even when common.
 const relatedGeneralTagsCap = 15
 
-// RelatedImages returns up to limit images that share the most tags with
-// imageID, ranked by the shared tag count. The source image itself, missing
-// images, and images whose only shared tags are meta tags are excluded.
+// RelatedImages returns up to limit images that share the most tags
+// with imageID, ranked by shared tag count. The source image, missing
+// images, and meta-only matches are excluded.
 //
-// Staged so the images join only runs against the top-N candidates: the
-// source image's non-meta tags resolve once into my_tags (general capped
-// to the K rarest, every other category kept whole); candidates aggregate
-// from image_tags alone, capped by an inner LIMIT buffer; the images row
-// is joined last so is_missing filtering and display-column fetches cost
-// O(buffer) rather than O(shared-tag intermediate set).
+// Staged so the images join only runs against the top-N candidates:
+// my_tags resolves once (general capped to the K rarest, every other
+// category whole); candidates aggregate from image_tags alone with an
+// inner LIMIT; the images row is joined last so is_missing filtering
+// and column fetches cost O(buffer).
 func (s *Service) RelatedImages(imageID int64, limit int) ([]models.Image, error) {
 	rows, err := s.db.Read.Query(
 		`WITH my_tags AS (
@@ -965,9 +1013,9 @@ func (s *Service) RelatedImages(imageID int64, limit int) ([]models.Image, error
 	return out, rows.Err()
 }
 
-// SuggestTags returns tags matching the prefix, sorted by usage_count DESC.
+// SuggestTags returns tags matching prefix, sorted by usage_count DESC.
+// Two-pass shape: prefix matches first, then substring matches.
 func (s *Service) SuggestTags(prefix string, limit int) ([]models.Tag, error) {
-	// Prefix match first, then substring for the remainder
 	prefixLimit := limit
 	rows, err := s.db.Read.Query(
 		`SELECT t.id, t.name, tc.name, tc.color, t.usage_count
@@ -1025,7 +1073,8 @@ func (s *Service) SuggestTags(prefix string, limit int) ([]models.Tag, error) {
 	return result, nil
 }
 
-// SuggestTagsInCategory returns tags matching prefix in the named category, sorted by usage_count DESC.
+// SuggestTagsInCategory returns tags matching prefix in the named
+// category, sorted by usage_count DESC.
 func (s *Service) SuggestTagsInCategory(prefix, categoryName string, limit int) ([]models.Tag, error) {
 	rows, err := s.db.Read.Query(
 		`SELECT t.id, t.name, tc.name, tc.color, t.usage_count
@@ -1052,10 +1101,9 @@ func (s *Service) SuggestTagsInCategory(prefix, categoryName string, limit int) 
 	return result, rows.Err()
 }
 
-// DeleteTag removes a tag from every image that has it and deletes the tag
-// row. Any alias tags pointing at the deleted tag are removed as well (their
-// canonical_tag_id would otherwise dangle). image_tags rows cascade via
-// ON DELETE CASCADE on the tags row.
+// DeleteTag removes a tag from every image and drops the tag row. Alias
+// rows pointing at it are removed too (their canonical_tag_id would
+// otherwise dangle). image_tags rows cascade on the tags FK.
 func (s *Service) DeleteTag(id int64) error {
 	tx, err := s.db.Write.Begin()
 	if err != nil {
@@ -1075,14 +1123,13 @@ func (s *Service) DeleteTag(id int64) error {
 	return tx.Commit()
 }
 
-// RenameTag changes the name of a tag. The new name must pass validation.
-// Returns an error if the new name already exists in the same category.
+// RenameTag renames a tag. The new name must pass validation and must
+// not collide with another tag in the same category.
 func (s *Service) RenameTag(id int64, newName string) error {
 	normalized, err := ValidateTagName(newName)
 	if err != nil {
 		return err
 	}
-	// Check for duplicate (name, category_id)
 	var catID int64
 	s.db.Read.QueryRow(`SELECT category_id FROM tags WHERE id = ?`, id).Scan(&catID)
 	var existing int64
@@ -1095,14 +1142,11 @@ func (s *Service) RenameTag(id int64, newName string) error {
 	return err
 }
 
-// MergeGeneralIntoCategorized scans for general-category tags whose name has
-// exactly one categorized counterpart (any non-general non-meta non-alias
-// category) and merges the general tag into that counterpart via MergeTags.
-// Useful after a label-only auto-tagger has filed names under general that
-// a categorized .csv tagger or another autotagger later produced proper
-// category-qualified versions for. General tags with any manual image_tags
-// row are skipped - those reflect explicit user intent and should not be
-// swallowed into a categorized version. Returns the number of tags merged.
+// MergeGeneralIntoCategorized scans general-category tags whose name has
+// exactly one non-general non-meta counterpart and merges the general
+// tag into that counterpart via MergeTags. General tags carrying any
+// manual image_tags row are skipped (explicit user intent). Returns the
+// number of tags merged.
 func (s *Service) MergeGeneralIntoCategorized() (int, error) {
 	rows, err := s.db.Read.Query(`
 		SELECT g.id, c.id
@@ -1148,12 +1192,10 @@ func (s *Service) MergeGeneralIntoCategorized() (int, error) {
 	return merged, nil
 }
 
-// ChangeTagCategory moves a tag to a different category.
-// Returns ErrTagNotFound if the tag does not exist, ErrCategoryNotFound if the
-// target category does not exist, or a clean error if another tag with the same
-// name already occupies the target category (unique (name, category_id)).
+// ChangeTagCategory moves a tag to a different category. Returns
+// ErrTagNotFound, ErrCategoryNotFound, or a clean error when a tag with
+// the same name already lives in the target category.
 func (s *Service) ChangeTagCategory(tagID, newCategoryID int64) error {
-	// Verify the tag exists and fetch its name for the uniqueness check.
 	var currentCatID int64
 	var name string
 	if err := s.db.Read.QueryRow(
@@ -1164,16 +1206,14 @@ func (s *Service) ChangeTagCategory(tagID, newCategoryID int64) error {
 	if currentCatID == newCategoryID {
 		return nil
 	}
-	// Verify the target category exists.
 	var catExists int
 	if err := s.db.Read.QueryRow(
 		`SELECT COUNT(*) FROM tag_categories WHERE id = ?`, newCategoryID,
 	).Scan(&catExists); err != nil || catExists == 0 {
 		return ErrCategoryNotFound
 	}
-	// Reject up front when another tag with this name already lives in the
-	// target category; otherwise the UNIQUE(name, category_id) constraint
-	// would surface as an opaque SQL error.
+	// Reject up front so the user gets a clean message rather than the
+	// raw UNIQUE(name, category_id) constraint error.
 	var existing int64
 	if err := s.db.Read.QueryRow(
 		`SELECT id FROM tags WHERE name = ? AND category_id = ? AND id != ?`,

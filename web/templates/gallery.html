@@ -27,7 +27,7 @@
     </select>
     {{if .RandomSeed}}<input type="hidden" name="seed" value="{{.RandomSeed}}">{{end}}
     <button type="submit">Search</button>
-    <button type="button" id="fav-filter-btn" class="{{if eq .Query "fav:true"}}active{{end}}"
+    <button type="button" id="fav-filter-btn" class="{{if hasFavFilter .Query}}active{{end}}"
             onclick="toggleFavFilter()" title="Show favorites">★</button>
     <button type="button" id="random-sort-btn" class="{{if eq .Sort "random"}}active{{end}}"
             onclick="applyRandomSort()" title="{{if eq .Sort "random"}}Re-shuffle{{else}}Random order{{end}}">⇄</button>
@@ -259,10 +259,16 @@ function confirmDeleteSearch() {
 function toggleFavFilter() {
   var si = document.getElementById('search-input');
   if (!si) return;
-  if (si.value.trim() === 'fav:true') {
-    si.value = '';
+  // Strip any existing fav:true token from the query, then re-add at the
+  // front when toggling on. Lets the toggle compose with arbitrary other
+  // tags ('fav:true 1girl' / '1girl fav:true' / 'fav:true').
+  var tokens = si.value.split(/\s+/).filter(function(t) { return t && t.toLowerCase() !== 'fav:true'; });
+  var hadFav = tokens.length !== si.value.split(/\s+/).filter(Boolean).length;
+  if (hadFav) {
+    si.value = tokens.join(' ');
   } else {
-    si.value = 'fav:true';
+    tokens.unshift('fav:true');
+    si.value = tokens.join(' ');
   }
   document.getElementById('search-form').dispatchEvent(new Event('submit', {bubbles:true}));
 }

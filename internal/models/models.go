@@ -16,13 +16,11 @@ const (
 	// SourceTypeBoth is used when an image has both A1111 and ComfyUI metadata.
 	SourceTypeBoth = "a1111,comfyui"
 
-	// OriginIngest is the origin recorded for files the watcher or a Sync
-	// picks up from disk - the historical "something dropped a file in the
-	// gallery root" path. The default for Ingest() when no explicit origin
-	// is supplied.
+	// OriginIngest is recorded for files the watcher or Sync picks up from
+	// disk; also the Ingest() default when no explicit origin is supplied.
 	OriginIngest = "ingest"
-	// OriginUpload is the origin recorded for files the web UI upload form
-	// pushed in. Also used as the default for the multipart REST API mode.
+	// OriginUpload is recorded for web-UI uploads and is the default for
+	// multipart API uploads.
 	OriginUpload = "upload"
 )
 
@@ -51,16 +49,19 @@ type ImagePath struct {
 }
 
 type Tag struct {
-	ID             int64
-	Name           string
-	CategoryID     int64
-	CategoryName   string
-	CategoryColor  string
-	UsageCount     int
-	IsAlias        bool
-	IsAutoOnly     bool   // true if all usages of this tag are auto-tagged (no manual usage)
-	CanonicalTagID *int64
-	CreatedAt      time.Time
+	ID                    int64
+	Name                  string
+	CategoryID            int64
+	CategoryName          string
+	CategoryColor         string
+	UsageCount            int
+	IsAlias               bool
+	IsAutoOnly            bool // true if all usages of this tag are auto-tagged (no manual usage)
+	CanonicalTagID        *int64
+	CanonicalName         string // populated on alias rows when ListTags joins the canonical
+	CanonicalCategoryName string
+	CanonicalCategoryColor string
+	CreatedAt             time.Time
 }
 
 type TagCategory struct {
@@ -147,10 +148,9 @@ type JobState struct {
 	FinishedAt *time.Time
 	Summary    string
 	Error      string
-	// WatcherNotices is a monotonic counter the watcher bumps on every
-	// ingest/remove event that happens while a job is running. The client
-	// observes it as a refresh signal (the main Summary/Message fields keep
-	// showing the running job's progress).
+	// WatcherNotices is a monotonic counter bumped on every watcher
+	// ingest/remove that fires while a job is running. The client uses it
+	// as a refresh signal without overwriting the running progress line.
 	WatcherNotices int
 }
 

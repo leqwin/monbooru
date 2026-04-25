@@ -10,13 +10,11 @@ import (
 	"github.com/leqwin/monbooru/internal/models"
 )
 
-// sanitizeComfyJSON replaces Python-specific non-standard JSON values (NaN,
-// Infinity, -Infinity) with null so Go's JSON parser can handle ComfyUI's
-// output. The walk tracks string state so that prompts like
-// "foo:Infinity bar" keep their literal content untouched; only unquoted
-// regions are rewritten.
+// sanitizeComfyJSON replaces Python-only JSON literals (NaN, Infinity,
+// -Infinity) with null so encoding/json can parse them. The walk tracks
+// string state so that quoted text like "foo:Infinity bar" stays as-is;
+// only unquoted regions are rewritten.
 func sanitizeComfyJSON(s string) string {
-	// Quick check to avoid allocation when not needed.
 	if !strings.Contains(s, "NaN") && !strings.Contains(s, "Infinity") {
 		return s
 	}
@@ -46,9 +44,8 @@ func sanitizeComfyJSON(s string) string {
 			b.WriteByte(c)
 			continue
 		}
-		// Outside a string: try to match -Infinity / Infinity / NaN at this
-		// position. These literals only ever appear as JSON number stand-ins,
-		// so a match here is always safe to rewrite to null.
+		// Outside a string the three literals are always number stand-ins;
+		// rewrite to null.
 		switch {
 		case strings.HasPrefix(s[i:], "-Infinity"):
 			b.WriteString("null")
@@ -66,8 +63,9 @@ func sanitizeComfyJSON(s string) string {
 	return b.String()
 }
 
-// parseComfyPromptChunk parses the ComfyUI API "prompt" chunk (dict format with class_type).
-// This is the primary format used by ComfyUI when saving images.
+// parseComfyPromptChunk parses the ComfyUI API "prompt" chunk (dict
+// keyed by node id, with class_type per node). This is the primary
+// format ComfyUI saves into images.
 func parseComfyPromptChunk(raw string) *models.ComfyUIMetadata {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -81,7 +79,6 @@ func parseComfyPromptChunk(raw string) *models.ComfyUIMetadata {
 		return nil
 	}
 
-	// Parse all nodes into a map for reference resolution
 	parsedNodes := make(map[string]comfyAPINode, len(apiNodes))
 	for id, nodeRaw := range apiNodes {
 		var node comfyAPINode
@@ -92,7 +89,8 @@ func parseComfyPromptChunk(raw string) *models.ComfyUIMetadata {
 
 	meta := &models.ComfyUIMetadata{}
 
-	// First pass: find KSampler to resolve which CLIPTextEncode feeds the positive prompt.
+	// First pass: find KSampler to learn which CLIPTextEncode is the
+	// positive prompt.
 	positiveNodeID := ""
 	for _, node := range parsedNodes {
 		nodeType := node.ClassType
@@ -113,13 +111,15 @@ func parseComfyPromptChunk(raw string) *models.ComfyUIMetadata {
 		}
 	}
 
-	// Second pass: apply all node inputs
+	// Second pass: apply node inputs.
 	for id, node := range parsedNodes {
 		nodeType := node.ClassType
 		if nodeType == "" {
 			nodeType = node.Type
 		}
-		// For CLIPTextEncode: only use it as prompt if it's the positive reference
+		// For CLIPTextEncode, only use it as the prompt when it's the
+		// positive reference; otherwise fall back to the first non-empty
+		// text when no KSampler reference was found.
 		if nodeType == "CLIPTextEncode" {
 			if textRaw, ok := node.Inputs["text"]; ok {
 				text := resolveStringInput(textRaw, parsedNodes)
@@ -129,7 +129,6 @@ func parseComfyPromptChunk(raw string) *models.ComfyUIMetadata {
 							meta.Prompt = text
 						}
 					} else if meta.Prompt == "" {
-						// No KSampler reference found; pick first non-empty text
 						meta.Prompt = text
 					}
 				}
@@ -139,7 +138,7 @@ func parseComfyPromptChunk(raw string) *models.ComfyUIMetadata {
 		applyComfyNodeInputs(nodeType, node.Inputs, meta, parsedNodes)
 	}
 
-	// Fallback: PrimitiveStringMultiline nodes as prompt sources
+	// Fallback: PrimitiveStringMultiline as prompt source.
 	if meta.Prompt == "" {
 		for _, node := range parsedNodes {
 			nodeType := node.ClassType
@@ -168,7 +167,9 @@ func parseComfyPromptChunk(raw string) *models.ComfyUIMetadata {
 	return meta
 }
 
-// parseComfyWorkflow extracts ComfyUI metadata from the workflow JSON (node graph format).
+// parseComfyWorkflow extracts ComfyUI metadata from the node-graph
+// "workflow" JSON. Both old (flat dict) and new (top-level "nodes"
+// array) formats are accepted.
 func parseComfyWorkflow(raw string) *models.ComfyUIMetadata {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -183,11 +184,9 @@ func parseComfyWorkflow(raw string) *models.ComfyUIMetadata {
 
 	meta := &models.ComfyUIMetadata{RawWorkflow: raw}
 
-	// New ComfyUI workflow format has "nodes" array at top level
 	if nodesRaw, ok := workflow["nodes"]; ok {
 		parseComfyNodesArray(nodesRaw, meta)
 	} else {
-		// Old flat dict format
 		parseComfyNodesDict(workflow, meta)
 	}
 
@@ -213,16 +212,14 @@ type comfyNode struct {
 	Inputs map[string]json.RawMessage `json:"inputs"`
 }
 
-// resolveStringInput tries to unmarshal raw as a string. If it's a reference
-// array [nodeID, slotIndex], it follows the reference into parsedNodes looking
-// for a string "value" input. Returns "" if nothing can be resolved.
+// resolveStringInput unmarshals raw as a string, or follows a reference
+// array [nodeID, slotIndex] to a "value" / "text" / "string" input on
+// the referenced node. Returns "" when nothing resolves.
 func resolveStringInput(raw json.RawMessage, nodes map[string]comfyAPINode) string {
-	// Try direct string first
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
 		return s
 	}
-	// Try reference array
 	var ref []json.RawMessage
 	if err := json.Unmarshal(raw, &ref); err != nil || len(ref) < 1 {
 		return ""
@@ -235,7 +232,6 @@ func resolveStringInput(raw json.RawMessage, nodes map[string]comfyAPINode) stri
 	if !ok {
 		return ""
 	}
-	// Try to get a "value", "text", or "string" input from the referenced node
 	for _, key := range []string{"value", "text", "string"} {
 		if valRaw, ok := refNode.Inputs[key]; ok {
 			var val string
@@ -247,8 +243,9 @@ func resolveStringInput(raw json.RawMessage, nodes map[string]comfyAPINode) stri
 	return ""
 }
 
-// resolveInt64Input tries to unmarshal raw as an int64. If it's a reference
-// array, it follows the reference to find a numeric "seed" or "value" input.
+// resolveInt64Input unmarshals raw as an int64, or follows a reference
+// array to a numeric "seed" / "value" / "int" input on the referenced
+// node.
 func resolveInt64Input(raw json.RawMessage, nodes map[string]comfyAPINode) (int64, bool) {
 	var v int64
 	if err := json.Unmarshal(raw, &v); err == nil {
@@ -296,11 +293,11 @@ func parseComfyNodesDict(workflow map[string]json.RawMessage, meta *models.Comfy
 	}
 }
 
-// ParseComfyWorkflowNodes parses the raw_workflow JSON and returns a structured
-// list of nodes suitable for display - one entry per node, with scalar inputs shown
-// as values and array (reference) inputs shown as "→ nodeKey". Nodes are sorted
-// by their string key (alphabetical). Nodes with no displayable inputs are included
-// to give a complete picture of the workflow graph.
+// ParseComfyWorkflowNodes parses the raw_workflow JSON for display.
+// Each entry is one node; scalar inputs render as values, array
+// (reference) inputs as "→ nodeKey". Nodes with no inputs are kept so
+// the graph stays complete. Output is sorted: numeric keys first (by
+// value), then lexicographic.
 func ParseComfyWorkflowNodes(raw string) []models.ComfyNode {
 	if raw == "" {
 		return nil
@@ -319,7 +316,6 @@ func ParseComfyWorkflowNodes(raw string) []models.ComfyNode {
 		Inputs    map[string]json.RawMessage `json:"inputs"`
 	}
 
-	// Collect and sort keys for stable output
 	keys := make([]string, 0, len(apiNodes))
 	parsed := make(map[string]rawNode, len(apiNodes))
 	for k, v := range apiNodes {
@@ -329,7 +325,6 @@ func ParseComfyWorkflowNodes(raw string) []models.ComfyNode {
 			keys = append(keys, k)
 		}
 	}
-	// Sort keys: numeric-looking keys first by value, then lexicographic
 	sortComfyKeys(keys)
 
 	nodes := make([]models.ComfyNode, 0, len(keys))
@@ -341,7 +336,6 @@ func ParseComfyWorkflowNodes(raw string) []models.ComfyNode {
 		}
 
 		var params []models.ComfyNodeParam
-		// Sort input param names for stable output
 		paramKeys := make([]string, 0, len(n.Inputs))
 		for pk := range n.Inputs {
 			paramKeys = append(paramKeys, pk)
@@ -366,18 +360,16 @@ func ParseComfyWorkflowNodes(raw string) []models.ComfyNode {
 	return nodes
 }
 
-// comfyParamToDisplay converts a raw JSON input value to a displayable ComfyNodeParam.
-// Returns nil for null values.
+// comfyParamToDisplay converts a raw JSON input value into a
+// ComfyNodeParam suitable for display. Returns nil for JSON null.
 func comfyParamToDisplay(name string, raw json.RawMessage) *models.ComfyNodeParam {
 	if string(raw) == "null" {
 		return nil
 	}
-	// Try as a string
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
 		return &models.ComfyNodeParam{Name: name, Value: s}
 	}
-	// Try as a number (float covers int)
 	var f float64
 	if err := json.Unmarshal(raw, &f); err == nil {
 		var val string
@@ -388,7 +380,6 @@ func comfyParamToDisplay(name string, raw json.RawMessage) *models.ComfyNodePara
 		}
 		return &models.ComfyNodeParam{Name: name, Value: val}
 	}
-	// Try as a bool
 	var b bool
 	if err := json.Unmarshal(raw, &b); err == nil {
 		val := "false"
@@ -397,7 +388,7 @@ func comfyParamToDisplay(name string, raw json.RawMessage) *models.ComfyNodePara
 		}
 		return &models.ComfyNodeParam{Name: name, Value: val}
 	}
-	// Try as an array - likely a reference [nodeKey, slotIndex]
+	// Array → reference [nodeKey, slotIndex].
 	var arr []json.RawMessage
 	if err := json.Unmarshal(raw, &arr); err == nil && len(arr) >= 1 {
 		var ref string
@@ -405,12 +396,13 @@ func comfyParamToDisplay(name string, raw json.RawMessage) *models.ComfyNodePara
 			return &models.ComfyNodeParam{Name: name, Value: "→ " + ref, IsRef: true}
 		}
 	}
-	// Fallback: show raw JSON as-is; the detail template wraps long values
-	// in a <details> toggle.
+	// Anything else: raw JSON; the template wraps long values in a
+	// <details> toggle.
 	return &models.ComfyNodeParam{Name: name, Value: string(raw)}
 }
 
-// sortComfyKeys sorts node keys: pure-integer keys numerically first, then the rest lexicographically.
+// sortComfyKeys sorts pure-integer keys numerically first, then the
+// rest lexicographically.
 func sortComfyKeys(keys []string) {
 	slices.SortFunc(keys, func(a, b string) int {
 		ai, bi := parseIntKey(a), parseIntKey(b)
@@ -501,7 +493,6 @@ func applyComfyNodeInputs(nodeType string, inputs map[string]json.RawMessage, me
 			}
 		}
 	case "LoraLoader", "LoraLoaderModelOnly":
-		// Append LoRA info to model checkpoint
 		if loraRaw, ok := inputs["lora_name"]; ok {
 			var lora string
 			if err := json.Unmarshal(loraRaw, &lora); err == nil && lora != "" {
@@ -513,7 +504,7 @@ func applyComfyNodeInputs(nodeType string, inputs map[string]json.RawMessage, me
 			}
 		}
 	case "Lora Loader Stack (rgthree)":
-		// Multi-lora loader - collect non-None loras
+		// Multi-lora loader; collect every non-"None" slot.
 		for i := 1; i <= 10; i++ {
 			key := fmt.Sprintf("lora_%02d", i)
 			if loraRaw, ok := inputs[key]; ok {

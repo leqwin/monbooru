@@ -382,6 +382,41 @@ func TestExecute_FolderFilter(t *testing.T) {
 	}
 }
 
+func TestExecute_TagAliasResolvesToCanonical(t *testing.T) {
+	// After a merge the image_tags row lives on the canonical; searching
+	// for the alias name must still surface the image.
+	database, env := setupSearchDB(t)
+	ingestTestImage(t, database, env, "alias_search.png")
+
+	var imgID, generalID int64
+	database.Read.QueryRow(`SELECT id FROM images LIMIT 1`).Scan(&imgID)
+	database.Read.QueryRow(`SELECT id FROM tag_categories WHERE name = 'general'`).Scan(&generalID)
+
+	var canonID, aliasID int64
+	database.Write.QueryRow(`INSERT INTO tags (name, category_id) VALUES (?, ?) RETURNING id`, "feline", generalID).Scan(&canonID)
+	database.Write.QueryRow(
+		`INSERT INTO tags (name, category_id, is_alias, canonical_tag_id) VALUES (?, ?, 1, ?) RETURNING id`,
+		"cat", generalID, canonID,
+	).Scan(&aliasID)
+	if _, err := database.Write.Exec(
+		`INSERT INTO image_tags (image_id, tag_id, is_auto) VALUES (?, ?, 0)`, imgID, canonID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Execute(database, Query{
+		Expr:  TagExpr{Tag: "cat"},
+		Page:  1,
+		Limit: 40,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Total != 1 {
+		t.Errorf("Total = %d, want 1 (alias should resolve to canonical)", result.Total)
+	}
+}
+
 func TestExecute_FullSync(t *testing.T) {
 	database, env := setupSearchDB(t)
 	ingestTestImage(t, database, env, "a.png")
@@ -451,8 +486,13 @@ func TestBuildWhere_TagExact(t *testing.T) {
 	if len(args) != 1 || args[0] != "cute" {
 		t.Errorf("args = %v", args)
 	}
-	if !strings.Contains(where, "t.name = ?") {
+	if !strings.Contains(where, "name = ?") {
 		t.Errorf("where = %q", where)
+	}
+	// Alias-aware: the tag_id lookup goes through COALESCE so a name
+	// matching an alias row resolves to its canonical.
+	if !strings.Contains(where, "COALESCE(canonical_tag_id, id)") {
+		t.Errorf("where missing alias resolution: %q", where)
 	}
 }
 
