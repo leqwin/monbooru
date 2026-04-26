@@ -316,6 +316,7 @@ func (s *Server) ExportGalleryArchive(name, format string, w io.Writer) error {
 // ExportGalleryLight, which used to carry near-identical walkers.
 func writeGalleryFilesToZip(zw *zip.Writer, galleryPath string) error {
 	if _, err := os.Stat(galleryPath); err != nil {
+		logx.Warnf("export: gallery path %q unreadable; archive will not include gallery files: %v", galleryPath, err)
 		return nil
 	}
 	return filepath.Walk(galleryPath, func(path string, info os.FileInfo, walkErr error) error {
@@ -637,6 +638,13 @@ func replaceFromArchive(srcPath, dbPath, thumbsPath, galleryPath string) error {
 		}
 	}
 	if innerDB == nil && innerJSON == nil && innerLight == nil {
+		// No monbooru-native shape inside; fall through to the foreign-format translators.
+		// They synthesise a light manifest plus a {rel → zip.File} map and
+		// route through the same wipe+ingest path the native light replacer
+		// uses, so the import flow stays identical past this point.
+		if format := detectCompatFormat(zr.File); format != "" {
+			return replaceFromCompatArchive(zr.File, format, dbPath, thumbsPath, galleryPath)
+		}
 		return fmt.Errorf("archive missing monbooru.db, monbooru.json, or tags.json")
 	}
 	// A light archive ships only tags.json + gallery/; route to the light
@@ -1246,6 +1254,12 @@ func (s *Server) settingsGalleryImport(w http.ResponseWriter, r *http.Request) {
 		if err := s.MergeGallery(name, format, file); err != nil {
 			writeFlash(w, "err", err.Error())
 			return
+		}
+		// Mirror the replace path (ImportGallery → SwitchGallery): a merge
+		// brings new images into the target gallery, so the user expects to
+		// land on it. No-op if the target is already active.
+		if err := s.SwitchGallery(name); err != nil {
+			logx.Infof("gallery %q: post-merge switch skipped: %v", name, err)
 		}
 		writeFlash(w, "ok", "Gallery "+name+" merged.")
 		return

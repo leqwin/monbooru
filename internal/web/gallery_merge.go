@@ -32,6 +32,12 @@ type lightManifest struct {
 	Images  []lightManifestImage `json:"images"`
 }
 
+// importSourceNative is the tagger_name attached to image_tags rows
+// produced by monbooru-native imports (full export and light archive).
+// Compat translators pass their format name (`hydrus`...) so the
+// detail page can credit the originating provider.
+const importSourceNative = "import"
+
 // ExportGalleryLight streams a zip containing gallery/<rel> image files plus
 // a tags.json manifest listing {sha256, path, tags} for each non-missing
 // image. The archive omits monbooru-specific data (SD/ComfyUI metadata,
@@ -155,10 +161,66 @@ func replaceFromLightArchive(manifest *zip.File, galleryFiles []*zip.File, dbPat
 	if err != nil {
 		return fmt.Errorf("decode tags.json: %w", err)
 	}
+	files := make([]translatedFile, 0, len(galleryFiles))
+	for _, f := range galleryFiles {
+		files = append(files, translatedFile{
+			rel:  strings.TrimPrefix(f.Name, "gallery/"),
+			file: f,
+		})
+	}
+	return applyLightReplace(mf, files, dbPath, thumbsPath, galleryPath, importSourceNative)
+}
+
+// translatedFile pairs a zip entry with the relative gallery path it should
+// extract to. Used by every "wipe + reseed from a light manifest plus its
+// bundled files" caller (the native light-zip path and the compat path).
+type translatedFile struct {
+	rel  string
+	file *zip.File
+}
+
+// applyLightReplace wipes the target's db / thumbnails / gallery dir, drops
+// the listed files at their relative gallery paths, and bootstraps a fresh
+// db that ingests every manifest entry. Shared by the native light-zip
+// replacer and the compat (hydrus...) replacer.
+func applyLightReplace(mf lightManifest, files []translatedFile, dbPath, thumbsPath, galleryPath, source string) error {
 	if mf.Version != galleryExportVersion {
 		return fmt.Errorf("unsupported light export version %d (expected %d)", mf.Version, galleryExportVersion)
 	}
+	if err := resetDBAndThumbs(dbPath, thumbsPath); err != nil {
+		return err
+	}
+	if err := wipeDirContents(galleryPath); err != nil {
+		return fmt.Errorf("wipe gallery: %w", err)
+	}
+	for _, tf := range files {
+		dst, err := safeArchiveDest(galleryPath, tf.rel)
+		if err != nil {
+			return fmt.Errorf("rejecting archive entry %q: %w", tf.rel, err)
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return err
+		}
+		if err := copyZipFile(tf.file, dst); err != nil {
+			return err
+		}
+	}
+	database, err := db.Open(dbPath)
+	if err != nil {
+		return fmt.Errorf("open new db: %w", err)
+	}
+	defer database.Close()
+	if err := db.Bootstrap(database); err != nil {
+		return fmt.Errorf("bootstrap: %w", err)
+	}
+	ingestLightManifestEntries(database, galleryPath, thumbsPath, mf.Images, source)
+	return nil
+}
 
+// resetDBAndThumbs removes the live DB sidecars and the thumbnails directory
+// so a fresh DB can be bootstrapped onto cleared state. Shared by every
+// destructive replace path.
+func resetDBAndThumbs(dbPath, thumbsPath string) error {
 	for _, p := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
 		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("remove %s: %w", p, err)
@@ -170,33 +232,6 @@ func replaceFromLightArchive(manifest *zip.File, galleryFiles []*zip.File, dbPat
 	if err := os.MkdirAll(thumbsPath, 0o755); err != nil {
 		return fmt.Errorf("recreate thumbnails dir: %w", err)
 	}
-	if err := wipeDirContents(galleryPath); err != nil {
-		return fmt.Errorf("wipe gallery: %w", err)
-	}
-
-	for _, f := range galleryFiles {
-		rel := strings.TrimPrefix(f.Name, "gallery/")
-		dst, err := safeArchiveDest(galleryPath, rel)
-		if err != nil {
-			return fmt.Errorf("rejecting archive entry %q: %w", f.Name, err)
-		}
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			return err
-		}
-		if err := copyZipFile(f, dst); err != nil {
-			return err
-		}
-	}
-
-	database, err := db.Open(dbPath)
-	if err != nil {
-		return fmt.Errorf("open new db: %w", err)
-	}
-	defer database.Close()
-	if err := db.Bootstrap(database); err != nil {
-		return fmt.Errorf("bootstrap: %w", err)
-	}
-	ingestLightManifestEntries(database, galleryPath, thumbsPath, mf.Images)
 	return nil
 }
 
@@ -220,19 +255,9 @@ func replaceFromLightManifest(srcPath, dbPath, thumbsPath, galleryPath string) e
 	if mf.Version != galleryExportVersion {
 		return fmt.Errorf("unsupported light export version %d (expected %d)", mf.Version, galleryExportVersion)
 	}
-
-	for _, p := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
-		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove %s: %w", p, err)
-		}
+	if err := resetDBAndThumbs(dbPath, thumbsPath); err != nil {
+		return err
 	}
-	if err := os.RemoveAll(thumbsPath); err != nil {
-		return fmt.Errorf("clear thumbnails: %w", err)
-	}
-	if err := os.MkdirAll(thumbsPath, 0o755); err != nil {
-		return fmt.Errorf("recreate thumbnails dir: %w", err)
-	}
-
 	database, err := db.Open(dbPath)
 	if err != nil {
 		return fmt.Errorf("open new db: %w", err)
@@ -241,7 +266,7 @@ func replaceFromLightManifest(srcPath, dbPath, thumbsPath, galleryPath string) e
 	if err := db.Bootstrap(database); err != nil {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
-	ingestLightManifestEntries(database, galleryPath, thumbsPath, mf.Images)
+	ingestLightManifestEntries(database, galleryPath, thumbsPath, mf.Images, importSourceNative)
 	return nil
 }
 
@@ -252,7 +277,7 @@ func replaceFromLightManifest(srcPath, dbPath, thumbsPath, galleryPath string) e
 // the missing:true filter, mirroring how Sync flags vanished files.
 // Shared by the light-zip and light-json replace paths so both end up with
 // identical row shapes in the freshly bootstrapped db.
-func ingestLightManifestEntries(database *db.DB, galleryPath, thumbsPath string, entries []lightManifestImage) {
+func ingestLightManifestEntries(database *db.DB, galleryPath, thumbsPath string, entries []lightManifestImage, source string) {
 	tagSvc := tags.New(database)
 	generalID := lookupCategoryID(database, "general")
 	for _, r := range entries {
@@ -267,7 +292,7 @@ func ingestLightManifestEntries(database *db.DB, galleryPath, thumbsPath string,
 				logx.Warnf("light import: record missing %q: %v", r.Path, err)
 				continue
 			}
-			applyImportTagsToImage(database, tagSvc, imgID, r.Tags, generalID)
+			applyImportTagsToImage(database, tagSvc, imgID, r.Tags, generalID, source)
 			continue
 		}
 		ft, err := gallery.DetectFileType(path)
@@ -280,7 +305,7 @@ func ingestLightManifestEntries(database *db.DB, galleryPath, thumbsPath string,
 			logx.Warnf("light import: ingest %q: %v", r.Path, err)
 			continue
 		}
-		applyImportTagsToImage(database, tagSvc, img.ID, r.Tags, generalID)
+		applyImportTagsToImage(database, tagSvc, img.ID, r.Tags, generalID, source)
 	}
 }
 
@@ -413,7 +438,7 @@ func mergeFromDB(cx *galleryCtx, tmpPath string) error {
 	if err != nil {
 		return err
 	}
-	applyMergeRecords(cx, records)
+	applyMergeRecords(cx, records, importSourceNative)
 	return nil
 }
 
@@ -430,7 +455,7 @@ func mergeFromJSON(cx *galleryCtx, tmpPath string) error {
 	if exp.Version != galleryExportVersion {
 		return fmt.Errorf("unsupported export version %d (expected %d)", exp.Version, galleryExportVersion)
 	}
-	applyMergeRecords(cx, readExportMergeRecords(exp))
+	applyMergeRecords(cx, readExportMergeRecords(exp), importSourceNative)
 	return nil
 }
 
@@ -456,7 +481,7 @@ func mergeFromLightJSON(cx *galleryCtx, tmpPath string) error {
 	for _, img := range mf.Images {
 		records = append(records, mergeRecord{SHA256: img.SHA256, Tags: img.Tags})
 	}
-	applyMergeRecords(cx, records)
+	applyMergeRecords(cx, records, importSourceNative)
 	return nil
 }
 
@@ -536,6 +561,13 @@ func mergeFromZip(cx *galleryCtx, tmpPath string) error {
 		}
 		records = readExportMergeRecords(exp)
 	default:
+		// Try the foreign-format translators before giving up.
+		// A hydrus files+sidecar zip lands here because none
+		// of the monbooru-native shapes (monbooru.{db,json}, tags.json) are
+		// present at the archive root.
+		if format := detectCompatFormat(zr.File); format != "" {
+			return mergeFromCompatArchive(cx, zr.File, format)
+		}
 		return fmt.Errorf("archive missing monbooru.db, monbooru.json, or tags.json")
 	}
 
@@ -546,21 +578,22 @@ func mergeFromZip(cx *galleryCtx, tmpPath string) error {
 			}
 		}
 	}
-	applyMergeRecords(cx, records)
+	applyMergeRecords(cx, records, importSourceNative)
 	return nil
 }
 
 // applyMergeRecords processes every record against the live gallery. When the
 // record carries a zip entry and its SHA is unknown to the target, the entry
 // is extracted into the gallery and ingested; otherwise only the tags are
-// applied to the pre-existing image.
-func applyMergeRecords(cx *galleryCtx, records []mergeRecord) {
+// applied to the pre-existing image. The source string is propagated to
+// every inserted image_tags row so the detail page can credit the importer.
+func applyMergeRecords(cx *galleryCtx, records []mergeRecord, source string) {
 	generalID := lookupCategoryID(cx.DB, "general")
 	for _, r := range records {
 		var imgID int64
 		err := cx.DB.Read.QueryRow(`SELECT id FROM images WHERE sha256 = ?`, r.SHA256).Scan(&imgID)
 		if err == nil {
-			applyImportTagsToImage(cx.DB, cx.TagSvc, imgID, r.Tags, generalID)
+			applyImportTagsToImage(cx.DB, cx.TagSvc, imgID, r.Tags, generalID, source)
 			continue
 		}
 		if err != sql.ErrNoRows {
@@ -600,7 +633,7 @@ func applyMergeRecords(cx *galleryCtx, records []mergeRecord) {
 			os.Remove(dst)
 			continue
 		}
-		applyImportTagsToImage(cx.DB, cx.TagSvc, img.ID, r.Tags, generalID)
+		applyImportTagsToImage(cx.DB, cx.TagSvc, img.ID, r.Tags, generalID, source)
 	}
 }
 
@@ -702,8 +735,11 @@ func readExportMergeRecords(exp galleryExport) []mergeRecord {
 
 // applyImportTagsToImage resolves each "name" or "category:name" token and
 // attaches it to imageID through the tag service so alias resolution and
-// usage-count maintenance match the rest of the app.
-func applyImportTagsToImage(database *db.DB, tagSvc *tags.Service, imageID int64, tokens []string, generalID int64) {
+// usage-count maintenance match the rest of the app. The source string is
+// stored on every inserted image_tags row (`tagger_name`) so the detail
+// page can credit the import provider — `"import"` for native exports,
+// the format name (`"hydrus"`...) for compat archives.
+func applyImportTagsToImage(database *db.DB, tagSvc *tags.Service, imageID int64, tokens []string, generalID int64, source string) {
 	for _, token := range tokens {
 		token = strings.TrimSpace(token)
 		if token == "" {
@@ -715,7 +751,7 @@ func applyImportTagsToImage(database *db.DB, tagSvc *tags.Service, imageID int64
 			logx.Warnf("import tag %q: %v", token, err)
 			continue
 		}
-		if err := tagSvc.AddTagToImageFromTagger(imageID, t.ID, false, nil, "import"); err != nil {
+		if err := tagSvc.AddTagToImageFromTagger(imageID, t.ID, false, nil, source); err != nil {
 			logx.Warnf("import tag %q to image %d: %v", token, imageID, err)
 		}
 	}

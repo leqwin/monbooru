@@ -9,15 +9,15 @@
             hx-headers='{"X-CSRF-Token":"{{.CSRFToken}}"}'>Remove all tags</button>
     {{end}}
     {{if .HasUserTags}}
-    <button class="btn-warning"
+    <button class="btn-warning-subtle"
             hx-delete="/images/{{.ImageID}}/user-tags"
             hx-target="#image-tags"
             hx-swap="outerHTML"
             hx-headers='{"X-CSRF-Token":"{{.CSRFToken}}"}'>Remove user tags</button>
     {{end}}
     {{if .ImageTaggers}}
-    <button class="btn-warning" type="button"
-            onclick="document.getElementById('remove-auto-dialog').showModal()">Remove all auto-tagged tags</button>
+    <button class="btn-warning-subtle" type="button"
+            onclick="document.getElementById('remove-auto-dialog').showModal()">Remove auto-tags</button>
     {{end}}
     <button type="button" class="danger-zone-trailing"
             onclick="openMoveImageDialog()">Move image</button>

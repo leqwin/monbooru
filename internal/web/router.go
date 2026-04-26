@@ -252,6 +252,8 @@ func NewServer(cfg *config.Config, configPath string, jobManager *jobs.Manager) 
 				return "Stop thumbnail rebuild"
 			case "move":
 				return "Stop moving"
+			case "tag":
+				return "Stop tagging"
 			}
 			return "Stop"
 		},
@@ -446,9 +448,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /upload", s.uploadPage)
 	mux.HandleFunc("POST /upload", s.uploadPost)
 
-	// Root only - `GET /` would otherwise act as a catch-all in Go 1.22's
-	// servemux, turning every mistyped URL into the home page.
+	// Root only; `GET /` below is the catch-all for unmatched paths. The
+	// `/{$}` pattern wins over `/` for the exact root.
 	mux.HandleFunc("GET /{$}", s.galleryHandler)
+	mux.HandleFunc("GET /", s.notFoundHandler)
 
 	mux.HandleFunc("GET /images/{id}", s.detailHandler)
 	mux.HandleFunc("GET /images/{id}/related", s.relatedImagesHandler)
@@ -477,12 +480,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /categories", s.categoriesHandler)
 
 	mux.HandleFunc("GET /settings", s.settingsHandler)
-	mux.HandleFunc("POST /settings/gallery", s.settingsGalleryPost)
+	mux.HandleFunc("POST /settings/general", s.settingsGeneralPost)
 	mux.HandleFunc("POST /settings/tagger", s.settingsTaggerPost)
 	mux.HandleFunc("POST /settings/auth/password", s.settingsPasswordPost)
 	mux.HandleFunc("POST /settings/auth/remove-password", s.settingsRemovePasswordPost)
 	mux.HandleFunc("POST /settings/auth/token", s.settingsTokenPost)
-	mux.HandleFunc("POST /settings/ui", s.settingsUIPost)
 	mux.HandleFunc("PATCH /settings/categories/{id}", s.updateCategoryPatch)
 	mux.HandleFunc("POST /settings/schedule", s.settingsSchedulePost)
 	mux.HandleFunc("POST /settings/maintenance/prune-missing", s.pruneMissingImagesPost)
@@ -499,6 +501,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /settings/tagger/remove-all-tags", s.removeAllTagsPost)
 	mux.HandleFunc("POST /settings/tagger/{name}/enable", s.settingsTaggerEnablePost)
 	mux.HandleFunc("POST /settings/tagger/{name}/disable", s.settingsTaggerDisablePost)
+	mux.HandleFunc("POST /settings/tagger/{name}/delete", s.settingsTaggerDeletePost)
 
 	// Saved searches are managed from the sidebar (no dedicated search page).
 	mux.HandleFunc("POST /search/saved", s.createSavedSearch)
@@ -513,6 +516,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /internal/autotag", s.autotagTrigger)
 	mux.HandleFunc("POST /internal/batch-delete", s.batchDelete)
 	mux.HandleFunc("POST /internal/batch-move", s.batchMove)
+	mux.HandleFunc("POST /internal/batch-tag", s.batchTag)
 	mux.HandleFunc("POST /internal/delete-search", s.deleteSearchPost)
 	mux.HandleFunc("POST /internal/delete-folder", s.deleteFolderPost)
 	mux.HandleFunc("GET /internal/tags/suggest", s.tagSuggest)

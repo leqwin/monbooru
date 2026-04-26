@@ -5,5 +5,8 @@
   {{template "partials/sidebar_content.html" .}}
 </div>
 {{/* OOB status line so the match count reflects the new search */}}
-<div id="gallery-status" class="status-bar" hx-swap-oob="true">match <span id="result-count" class="result-count">{{.Result.Total}}</span></div>
+<div id="gallery-status" class="status-bar" hx-swap-oob="true"><span id="result-count" class="result-count">{{.Result.Total}}</span> {{plural .Result.Total "match" "matches"}}</div>
+{{/* OOB toolbar: keeps Save search / Tag all / Delete all in sync with the current search.
+     Without this, the toolbar rendered on full-page load goes stale on every htmx swap. */}}
+<div id="save-search-area" hx-swap-oob="true">{{template "partials/save_search_area.html" .}}</div>
 {{end}}

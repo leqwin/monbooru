@@ -7,7 +7,7 @@
     <a href="/images/{{.ID}}?back_q={{$.Query}}&back_sort={{$.Sort}}&back_order={{$.Order}}&back_page={{$.Page}}{{if $.RandomSeed}}&back_seed={{$.RandomSeed}}{{end}}" class="thumb-link">
       <img src="/thumbnails/{{$.ActiveGallery}}/{{.ID}}.jpg" alt="image {{.ID}}" loading="lazy"
            class="thumb-img"
-           onerror="this.parentElement.innerHTML='<div class=thumb-placeholder>?</div>'">
+           onerror="this.parentElement.innerHTML='<div class=thumb-placeholder title=&quot;preview unavailable&quot;>?</div>'">
       <div class="thumb-overlay">
         {{if or (eq .FileType "mp4") (eq .FileType "webm")}}
           <span class="badge badge-video">▶</span>

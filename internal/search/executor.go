@@ -643,17 +643,30 @@ func (b *whereBuilder) buildTagExpr(e TagExpr) string {
 	// COALESCE(canonical_tag_id, id) collapses alias rows onto their
 	// canonical so a search for the alias name still hits image_tags
 	// rows that were re-pointed at the canonical.
+	//
+	// Wildcard branches escape `_` and `%` in the user-supplied portion
+	// so a tag literal containing those characters (legal: `[a-z0-9_…]`)
+	// matches itself instead of acting as a LIKE wildcard.
 	switch e.Wildcard {
 	case "prefix":
-		b.args = append(b.args, e.Tag+"%")
-		return `EXISTS (SELECT 1 FROM image_tags it WHERE it.image_id = i.id AND it.tag_id IN (SELECT COALESCE(canonical_tag_id, id) FROM tags WHERE name LIKE ?))`
+		b.args = append(b.args, escapeLike(e.Tag)+"%")
+		return `EXISTS (SELECT 1 FROM image_tags it WHERE it.image_id = i.id AND it.tag_id IN (SELECT COALESCE(canonical_tag_id, id) FROM tags WHERE name LIKE ? ESCAPE '\'))`
 	case "substring":
-		b.args = append(b.args, "%"+e.Tag+"%")
-		return `EXISTS (SELECT 1 FROM image_tags it WHERE it.image_id = i.id AND it.tag_id IN (SELECT COALESCE(canonical_tag_id, id) FROM tags WHERE name LIKE ?))`
+		b.args = append(b.args, "%"+escapeLike(e.Tag)+"%")
+		return `EXISTS (SELECT 1 FROM image_tags it WHERE it.image_id = i.id AND it.tag_id IN (SELECT COALESCE(canonical_tag_id, id) FROM tags WHERE name LIKE ? ESCAPE '\'))`
 	default:
 		b.args = append(b.args, e.Tag)
 		return `EXISTS (SELECT 1 FROM image_tags it WHERE it.image_id = i.id AND it.tag_id IN (SELECT COALESCE(canonical_tag_id, id) FROM tags WHERE name = ?))`
 	}
+}
+
+// escapeLike escapes the SQLite LIKE metacharacters (`_`, `%`) and the
+// escape character itself (`\`) so user-supplied input matches literally
+// when concatenated with `%`/`_` wildcards. Callers must pair this with
+// `ESCAPE '\'` on the LIKE clause.
+func escapeLike(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `_`, `\_`, `%`, `\%`)
+	return r.Replace(s)
 }
 
 // FilterKeywords is the canonical set of `key:value` filter prefixes the
@@ -764,9 +777,11 @@ func (b *whereBuilder) buildFilterExpr(e FilterExpr) string {
 			// `folderonly:` with an empty value for "root directly".
 			return "1=1"
 		}
-		// Recursive match: this folder or anywhere beneath it.
-		b.args = append(b.args, e.Val, e.Val+"/%")
-		return "(i.folder_path = ? OR i.folder_path LIKE ?)"
+		// Recursive match: this folder or anywhere beneath it. Escape
+		// LIKE metacharacters so a folder named `foo_bar` only matches
+		// itself (not `fooXbar`).
+		b.args = append(b.args, e.Val, escapeLike(e.Val)+"/%")
+		return `(i.folder_path = ? OR i.folder_path LIKE ? ESCAPE '\')`
 
 	case "folderonly":
 		if e.Val == "" {

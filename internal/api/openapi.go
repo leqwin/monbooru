@@ -249,7 +249,25 @@ func buildSpec(baseURL string) map[string]any {
 						},
 					},
 					"responses": map[string]any{
-						"200": map[string]any{"description": "Updated tag list", "content": jsonContent("#/components/schemas/TagArray")},
+						"200": map[string]any{
+							"description": "Bare TagArray on success; wrapped in {tags, tag_warnings} when any tag failed validation.",
+							"content": map[string]any{
+								"application/json": map[string]any{
+									"schema": map[string]any{
+										"oneOf": []map[string]any{
+											{"$ref": "#/components/schemas/TagArray"},
+											{
+												"type": "object",
+												"properties": map[string]any{
+													"tags":         map[string]any{"$ref": "#/components/schemas/TagArray"},
+													"tag_warnings": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
 					},
 				},
 				"delete": map[string]any{

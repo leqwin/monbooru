@@ -81,7 +81,9 @@ document.addEventListener('DOMContentLoaded', function() {
     var files = input.files;
     for (var i = 0; i < files.length; i++) {
       var li = document.createElement('li');
-      li.textContent = files[i].name + ' (' + Math.round(files[i].size / 1024) + ' KiB)';
+      var kib = Math.round(files[i].size / 1024);
+      var sizeText = kib > 0 ? (kib + ' KiB') : '<1 KiB';
+      li.textContent = files[i].name + ' (' + sizeText + ')';
       list.appendChild(li);
     }
   }

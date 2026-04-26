@@ -489,14 +489,14 @@ func (s *Server) detailHandler(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		http.NotFound(w, r)
+		s.notFoundHandler(w, r)
 		return
 	}
 
 	ctx := r.Context()
 	img, err := loadImage(ctx, s.db(), id)
 	if err != nil {
-		http.NotFound(w, r)
+		s.notFoundHandler(w, r)
 		return
 	}
 
@@ -693,8 +693,12 @@ func (s *Server) parseTagInput(tagInput string) ([]catTag, string) {
 		return nil, err.Error()
 	}
 
+	// general category id is cached on galleryCtx at open time so this
+	// hot path doesn't re-query the immutable built-in row.
 	var generalID int64
-	s.db().Read.QueryRow(`SELECT id FROM tag_categories WHERE name='general'`).Scan(&generalID)
+	if cx := s.Active(); cx != nil {
+		generalID = cx.GeneralCategoryID
+	}
 
 	var catTags []catTag
 	for _, tok := range tokens {
@@ -1360,6 +1364,17 @@ func (s *Server) categoriesHandler(w http.ResponseWriter, r *http.Request) {
 	s.renderTemplate(w, "categories.html", data)
 }
 
+// catalogRow is the per-template render shape for a downloadable tagger.
+// Commands are precomputed server-side so the template stays free of shell
+// quoting concerns; both forms are passed since the user picks the right
+// one for their deployment shape (host vs docker exec).
+type catalogRow struct {
+	Name          string
+	Description   string
+	HostCommand   string
+	DockerCommand string
+}
+
 func (s *Server) settingsHandler(w http.ResponseWriter, r *http.Request) {
 	base := s.base(r, "settings", "Settings - Monbooru")
 	taggers := tagger.AvailableTaggers(s.cfg)
@@ -1368,6 +1383,27 @@ func (s *Server) settingsHandler(w http.ResponseWriter, r *http.Request) {
 		if t.Enabled && t.Available {
 			enabledCount++
 		}
+	}
+	// Catalog ghosts: catalog entries whose subfolder isn't on disk yet, so
+	// the row appears in the Settings table with a "Show download commands"
+	// button. Already-installed catalog names skip this list (their on-disk
+	// row is the canonical one).
+	taggerNames := map[string]bool{}
+	for _, t := range taggers {
+		taggerNames[t.Name] = true
+	}
+	modelPath := s.cfg.Paths.ModelPath
+	var catalogGhosts []catalogRow
+	for _, e := range tagger.LoadCatalog(modelPath) {
+		if taggerNames[e.Name] {
+			continue
+		}
+		catalogGhosts = append(catalogGhosts, catalogRow{
+			Name:          e.Name,
+			Description:   e.Description,
+			HostCommand:   e.HostCommand(),
+			DockerCommand: e.DockerCommand("monbooru"),
+		})
 	}
 	data := map[string]any{
 		"Title":          base.Title,
@@ -1386,6 +1422,7 @@ func (s *Server) settingsHandler(w http.ResponseWriter, r *http.Request) {
 		"Config":         s.cfg,
 		"Taggers":        taggers,
 		"EnabledCount":   enabledCount,
+		"CatalogGhosts":  catalogGhosts,
 		"ScheduleStatus": s.ScheduleStatus(),
 	}
 	s.renderTemplate(w, "settings.html", data)
@@ -1420,7 +1457,10 @@ func (s *Server) settingsSchedulePost(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`<div class="flash flash-ok">Saved.</div>`))
 }
 
-func (s *Server) settingsGalleryPost(w http.ResponseWriter, r *http.Request) {
+// settingsGeneralPost saves the unified Settings → General form: the Files
+// subsection (watch toggle + max file size) and the UI subsection (page
+// size). One submit covers both so the page has a single Save button.
+func (s *Server) settingsGeneralPost(w http.ResponseWriter, r *http.Request) {
 	if !parseFormOK(w, r) {
 		return
 	}
@@ -1429,12 +1469,15 @@ func (s *Server) settingsGalleryPost(w http.ResponseWriter, r *http.Request) {
 	if n, err := strconv.Atoi(r.FormValue("max_file_size_mb")); err == nil {
 		s.cfg.Gallery.MaxFileSizeMB = n
 	}
+	if n, err := strconv.Atoi(r.FormValue("page_size")); err == nil && n > 0 {
+		s.cfg.UI.PageSize = n
+	}
 	s.cfgMu.Unlock()
 	if err := s.saveConfig(); err != nil {
 		fmt.Fprintf(w, `<div class="flash flash-err">Could not save: %s</div>`, html.EscapeString(err.Error()))
 		return
 	}
-	logx.Infof("settings: gallery updated")
+	logx.Infof("settings: general updated")
 	w.Write([]byte(`<div class="flash flash-ok">Saved.</div>`))
 }
 
@@ -1579,6 +1622,46 @@ func (s *Server) settingsTaggerDisablePost(w http.ResponseWriter, r *http.Reques
 	w.Write([]byte(`<div class="flash flash-ok">Tagger ` + html.EscapeString(name) + ` disabled.</div>`))
 }
 
+// settingsTaggerDeletePost removes a tagger entry from the config and wipes
+// its subfolder under paths.model_path. Refused if the tagger is currently
+// enabled (the UI hides the button in that case; this is the server gate).
+// The name is validated so it can't escape model_path with `..` segments.
+func (s *Server) settingsTaggerDeletePost(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimSpace(r.PathValue("name"))
+	if name == "" || strings.ContainsAny(name, `/\`) || name == "." || name == ".." {
+		http.Error(w, "bad name", http.StatusBadRequest)
+		return
+	}
+	s.cfgMu.Lock()
+	for _, t := range s.cfg.Tagger.Taggers {
+		if t.Name == name && t.Enabled {
+			s.cfgMu.Unlock()
+			fmt.Fprintf(w, `<div class="flash flash-err">Disable tagger %s before deleting it.</div>`, html.EscapeString(name))
+			return
+		}
+	}
+	for i, t := range s.cfg.Tagger.Taggers {
+		if t.Name == name {
+			s.cfg.Tagger.Taggers = append(s.cfg.Tagger.Taggers[:i], s.cfg.Tagger.Taggers[i+1:]...)
+			break
+		}
+	}
+	dir := filepath.Join(s.cfg.Paths.ModelPath, name)
+	s.cfgMu.Unlock()
+	if err := os.RemoveAll(dir); err != nil {
+		logx.Warnf("delete tagger %q: remove %q: %v", name, dir, err)
+		fmt.Fprintf(w, `<div class="flash flash-err">Removed config entry but could not delete folder: %s</div>`, html.EscapeString(err.Error()))
+		return
+	}
+	if err := s.saveConfig(); err != nil {
+		fmt.Fprintf(w, `<div class="flash flash-err">Could not save: %s</div>`, html.EscapeString(err.Error()))
+		return
+	}
+	logx.Infof("settings: tagger %q deleted (folder %s removed)", name, dir)
+	w.Header().Set("HX-Refresh", "true")
+	w.Write([]byte(`<div class="flash flash-ok">Tagger ` + html.EscapeString(name) + ` deleted.</div>`))
+}
+
 func (s *Server) settingsPasswordPost(w http.ResponseWriter, r *http.Request) {
 	if !parseFormOK(w, r) {
 		return
@@ -1609,7 +1692,7 @@ func (s *Server) settingsPasswordPost(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `<div class="flash flash-err">Could not save: %s</div>`, html.EscapeString(err.Error()))
 		return
 	}
-	logx.Infof("settings: password updated from %s", r.RemoteAddr)
+	logx.Infof("settings: password updated from %s", clientIP(r))
 	w.Write([]byte(`<div class="flash flash-ok">Password updated.</div>`))
 	s.renderAuthPasswordOOB(w, r)
 }
@@ -1629,26 +1712,9 @@ func (s *Server) settingsTokenPost(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `<div class="flash flash-err">Could not save: %s</div>`, html.EscapeString(err.Error()))
 		return
 	}
-	logx.Infof("settings: API token regenerated from %s", r.RemoteAddr)
+	logx.Infof("settings: API token regenerated from %s", clientIP(r))
 	w.Header().Set("Cache-Control", "no-store")
 	s.renderTemplate(w, "partials/flash_token.html", map[string]any{"Token": token})
-}
-
-func (s *Server) settingsUIPost(w http.ResponseWriter, r *http.Request) {
-	if !parseFormOK(w, r) {
-		return
-	}
-	s.cfgMu.Lock()
-	if n, err := strconv.Atoi(r.FormValue("page_size")); err == nil && n > 0 {
-		s.cfg.UI.PageSize = n
-	}
-	s.cfgMu.Unlock()
-	if err := s.saveConfig(); err != nil {
-		fmt.Fprintf(w, `<div class="flash flash-err">Could not save: %s</div>`, html.EscapeString(err.Error()))
-		return
-	}
-	logx.Infof("settings: UI updated")
-	w.Write([]byte(`<div class="flash flash-ok">Saved.</div>`))
 }
 
 func (s *Server) pruneMissingImagesPost(w http.ResponseWriter, r *http.Request) {
@@ -1763,7 +1829,9 @@ func (s *Server) pruneOrphanedThumbnailsPost(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Load the full set of image ids once, then diff against on-disk files
-	// instead of issuing one SELECT per thumbnail.
+	// instead of issuing one SELECT per thumbnail. A partial set here would
+	// flag legit thumbnails as orphans and remove them from disk, so a
+	// scan/cursor failure mid-iteration must abort cleanly.
 	known := map[int64]struct{}{}
 	idRows, err := s.db().Read.Query(`SELECT id FROM images`)
 	if err != nil {
@@ -1772,9 +1840,17 @@ func (s *Server) pruneOrphanedThumbnailsPost(w http.ResponseWriter, r *http.Requ
 	}
 	for idRows.Next() {
 		var id int64
-		if err := idRows.Scan(&id); err == nil {
-			known[id] = struct{}{}
+		if scanErr := idRows.Scan(&id); scanErr != nil {
+			idRows.Close()
+			w.Write([]byte(`<div class="flash flash-err">Error: ` + html.EscapeString(scanErr.Error()) + `</div>`))
+			return
 		}
+		known[id] = struct{}{}
+	}
+	if iterErr := idRows.Err(); iterErr != nil {
+		idRows.Close()
+		w.Write([]byte(`<div class="flash flash-err">Error: ` + html.EscapeString(iterErr.Error()) + `</div>`))
+		return
 	}
 	idRows.Close()
 
@@ -1847,7 +1923,7 @@ func (s *Server) settingsRemovePasswordPost(w http.ResponseWriter, r *http.Reque
 		fmt.Fprintf(w, `<div class="flash flash-err">Could not save: %s</div>`, html.EscapeString(err.Error()))
 		return
 	}
-	logx.Infof("settings: password removed from %s", r.RemoteAddr)
+	logx.Infof("settings: password removed from %s", clientIP(r))
 	// Invalidate all sessions so nobody is locked out of the now-open instance
 	s.sessions.Clear()
 	w.Write([]byte(`<div class="flash flash-ok">Password removed. Authentication is now disabled.</div>`))
@@ -2488,6 +2564,15 @@ func (s *Server) helpHandler(w http.ResponseWriter, r *http.Request) {
 	s.renderTemplate(w, "help.html", s.base(r, "help", "Help - Monbooru"))
 }
 
+// notFoundHandler renders a styled 404 for any unmatched GET path. The
+// mux's default behaviour is unstyled `404 page not found` text on a
+// white page; routing through the standard layout keeps the user inside
+// the app with a back link.
+func (s *Server) notFoundHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotFound)
+	s.renderTemplate(w, "notfound.html", s.base(r, "", "Not found - Monbooru"))
+}
+
 func (s *Server) jobStatusHandler(w http.ResponseWriter, r *http.Request) {
 	// Mark before Get so the first render of a completed state starts the
 	// short post-view dismiss timer. Subsequent views don't re-arm it.
@@ -2531,10 +2616,7 @@ func (s *Server) syncTrigger(w http.ResponseWriter, r *http.Request) {
 			result.Added, result.Removed, result.Moved))
 	}()
 
-	redirectTo := r.Referer()
-	if redirectTo == "" {
-		redirectTo = "/"
-	}
+	redirectTo := sameOriginReferer(r)
 	if isHTMXRequest(r) {
 		// Signal the client to reload the gallery when the job finishes.
 		w.Header().Set("HX-Trigger", "syncStarted")
@@ -2822,6 +2904,186 @@ func (s *Server) runBatchMove(ids []int64, targetFolder string) {
 		summary = fmt.Sprintf("Moved %d image(s), %d failed.", moved, failed)
 	}
 	s.jobs.Complete(summary)
+}
+
+// batchTag kicks off a background `tag` job that adds or removes a tag set
+// across either every image in the current search (scope=search) or just
+// the checked ids (scope=selection). The dialog in gallery.html uses the
+// same shape as batchDelete / batchMove and posts the tags string verbatim
+// (parsed server-side so category:name and quoted spans behave identically
+// to the detail-page tag input).
+func (s *Server) batchTag(w http.ResponseWriter, r *http.Request) {
+	if !parseFormOK(w, r) {
+		return
+	}
+	op := strings.TrimSpace(r.FormValue("op"))
+	if op != "add" && op != "remove" {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`<div class="flash flash-err">op must be add or remove</div>`))
+		return
+	}
+	tagInput := strings.TrimSpace(r.FormValue("tags"))
+	if tagInput == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`<div class="flash flash-err">No tags provided.</div>`))
+		return
+	}
+	catTags, parseErrMsg := s.parseTagInput(tagInput)
+	if parseErrMsg != "" {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`<div class="flash flash-err">` + html.EscapeString(parseErrMsg) + `</div>`))
+		return
+	}
+	if len(catTags) == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`<div class="flash flash-err">No tags to apply.</div>`))
+		return
+	}
+
+	scope := strings.TrimSpace(r.FormValue("scope"))
+	var ids []int64
+	switch scope {
+	case "selection":
+		for _, idStr := range r.Form["ids"] {
+			if id, err := strconv.ParseInt(idStr, 10, 64); err == nil {
+				ids = append(ids, id)
+			}
+		}
+	case "search":
+		expr, parseErr := search.Parse(r.FormValue("q"))
+		if parseErr != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`<div class="flash flash-err">Could not parse search: ` +
+				html.EscapeString(parseErr.Error()) + `</div>`))
+			return
+		}
+		// ExecuteForDeleteStream is just "iterate matching image ids"; reuse
+		// it so the search → ids materialisation is identical to delete-all.
+		err := search.ExecuteForDeleteStream(s.db(), expr, func(t search.DeleteTarget) error {
+			ids = append(ids, t.ID)
+			return nil
+		})
+		if err != nil {
+			logx.Errorf("batch-tag search: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`<div class="flash flash-err">Search error.</div>`))
+			return
+		}
+	default:
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`<div class="flash flash-err">scope must be search or selection</div>`))
+		return
+	}
+
+	if len(ids) == 0 {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	if err := s.jobs.Start("tag"); err != nil {
+		w.WriteHeader(http.StatusConflict)
+		w.Write([]byte(`<div class="flash flash-err">A job is already running.</div>`))
+		return
+	}
+	go s.runBatchTag(ids, op, catTags)
+	w.WriteHeader(http.StatusAccepted)
+}
+
+// runBatchTag resolves each (catID, name) token to a tag id once up front
+// (creating new tags on add, looking up only existing ones on remove), then
+// applies the resolved set to every image in turn. Cancellable via the
+// shared job context, identical to runBulkDelete's pattern.
+func (s *Server) runBatchTag(ids []int64, op string, catTags []catTag) {
+	type resolvedTag struct {
+		id   int64
+		name string
+	}
+	var resolved []resolvedTag
+	if op == "add" {
+		for _, ct := range catTags {
+			t, err := s.tagSvc().GetOrCreateTag(ct.name, ct.catID)
+			if err != nil {
+				logx.Warnf("batch-tag get-or-create %q: %v", ct.name, err)
+				continue
+			}
+			resolved = append(resolved, resolvedTag{t.ID, t.Name})
+		}
+	} else {
+		for _, ct := range catTags {
+			var id int64
+			err := s.db().Read.QueryRow(
+				`SELECT id FROM tags WHERE name = ? AND category_id = ?`, ct.name, ct.catID,
+			).Scan(&id)
+			if err != nil {
+				continue // unknown tag; nothing to remove
+			}
+			resolved = append(resolved, resolvedTag{id, ct.name})
+		}
+	}
+	if len(resolved) == 0 {
+		s.jobs.Complete(fmt.Sprintf("nothing to %s (no matching tags)", op))
+		return
+	}
+
+	label, summary := "tagging", "Tagged"
+	if op == "remove" {
+		label, summary = "untagging", "Untagged"
+	}
+
+	ctx := s.jobs.Context()
+	total := len(ids)
+	processed, applied := 0, 0
+	cancelled := false
+	affectedTags := map[int64]struct{}{}
+	for _, t := range resolved {
+		affectedTags[t.id] = struct{}{}
+	}
+
+	s.jobs.Update(0, total, fmt.Sprintf("%s 0/%d…", label, total))
+	for i, id := range ids {
+		if ctx.Err() != nil {
+			cancelled = true
+			break
+		}
+		for _, t := range resolved {
+			if op == "add" {
+				added, err := s.tagSvc().AddTagToImageReportingDup(id, t.id, false, nil, "")
+				if err != nil {
+					logx.Warnf("batch-tag add %d/%d: %v", id, t.id, err)
+					continue
+				}
+				if added {
+					applied++
+				}
+			} else {
+				if err := s.tagSvc().RemoveTagFromImage(id, t.id); err != nil {
+					logx.Warnf("batch-tag remove %d/%d: %v", id, t.id, err)
+					continue
+				}
+				applied++
+			}
+		}
+		processed = i + 1
+		if processed%50 == 0 || processed == total {
+			s.jobs.Update(processed, total, fmt.Sprintf("%s %d/%d…", label, processed, total))
+		}
+	}
+
+	if len(affectedTags) > 0 {
+		tagIDs := make([]int64, 0, len(affectedTags))
+		for id := range affectedTags {
+			tagIDs = append(tagIDs, id)
+		}
+		if err := s.tagSvc().RecalcAndPruneIDs(tagIDs); err != nil {
+			logx.Warnf("batch-tag recalc IDs: %v", err)
+		}
+	}
+	s.Active().InvalidateCaches()
+
+	if cancelled {
+		s.jobs.Complete(fmt.Sprintf("%s cancelled (%d/%d processed)", label, processed, total))
+		return
+	}
+	s.jobs.Complete(fmt.Sprintf("%s %d image(s) (%d row change(s)).", summary, processed, applied))
 }
 
 // moveImage relocates the one image at {id} into the requested folder. A `move`
@@ -3159,7 +3421,10 @@ func (s *Server) getImageTagsHandler(w http.ResponseWriter, r *http.Request) {
 // referring gallery so the same shuffle resolves to the same neighbours.
 func (s *Server) findAdjacentImages(currentID int64, queryStr, sortStr, orderStr, seedStr string) (prevID, nextID *int64) {
 	sq := adjacentSearchQuery(queryStr, sortStr, orderStr, seedStr)
-	prevID, nextID, _ = search.ExecuteAdjacent(s.db(), sq, currentID)
+	prevID, nextID, err := search.ExecuteAdjacent(s.db(), sq, currentID)
+	if err != nil {
+		logx.Warnf("findAdjacentImages: %v", err)
+	}
 	return
 }
 
@@ -3169,7 +3434,10 @@ func (s *Server) findAdjacentImages(currentID int64, queryStr, sortStr, orderStr
 // agree with the prev/next arrows they sit next to.
 func (s *Server) findImagePosition(currentID int64, queryStr, sortStr, orderStr, seedStr string) (pos, total int) {
 	sq := adjacentSearchQuery(queryStr, sortStr, orderStr, seedStr)
-	pos, total, _ = search.ExecutePosition(s.db(), sq, currentID)
+	pos, total, err := search.ExecutePosition(s.db(), sq, currentID)
+	if err != nil {
+		logx.Warnf("findImagePosition: %v", err)
+	}
 	return
 }
 

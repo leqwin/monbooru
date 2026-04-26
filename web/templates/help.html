@@ -22,6 +22,7 @@
       <li>Optionally add tags that will be applied to all uploaded files.</li>
       <li>Choose a destination folder (e.g. <code>2026/april</code>) to place the files under; leave blank to save at the gallery root. Missing folders are created automatically.</li>
     </ul>
+    <p>From the gallery, use <strong>Tag all</strong> (next to <em>Delete all</em>) to add or remove a list of tags on every image in the current search, or check a few thumbnails and use <strong>Tag selected</strong> in the batch bar to scope the same dialog to just the selection.</p>
   </section>
 
   <hr class="help-sep">
@@ -117,9 +118,10 @@
     <p>The <a href="/settings">Settings</a> page provides:</p>
     <ul>
       <li><strong>General</strong> - toggle the gallery file watcher, set the max file size, and change the number of images per page.</li>
-      <li><strong>Galleries</strong> - add, rename, switch between, set default, or delete configured galleries.</li>
+      <li><strong>Galleries</strong> - add, rename, switch between, set default, or delete configured galleries. The Add form takes an optional import file (.db / .json / .zip) so a populated gallery can be created in one step. </li>
       <li><strong>Authentication</strong> - set or remove a password, regenerate the API token.</li>
-      <li><strong>Auto-Tagger</strong> - enable one or more taggers (each subfolder of the models directory), set per-tagger confidence thresholds, toggle GPU (CUDA), pick a worker count, and run bulk tagging on untagged or all images. Each row also exposes Run untagged / Run all / Remove auto-tagged scoped to that single tagger.</li>
+      <li><strong>Auto-Tagger</strong> - enable one or more taggers (each subfolder of the models directory), set per-tagger confidence thresholds, toggle GPU (CUDA), pick a worker count, and run bulk tagging on untagged or all images. Each row also exposes Run untagged / Run all / Remove auto-tagged scoped to that single tagger. The "Available to download" subsection lists catalog-shipped taggers with copy-paste shell commands so you can drop them into the models directory without leaving the page.</li>
+      <li><strong>Tags</strong> - bulk tag removal: remove all auto-tags, all user tags, or every tag from the active gallery in one click.</li>
       <li><strong>Maintenance</strong> - prune missing images, clean up orphaned thumbnails, rebuild thumbnails, recalculate tag counts, merge auto-tagged-only general tags into their unique categorized counterparts, re-extract metadata, vacuum the database (runs <code>VACUUM</code> then <code>PRAGMA wal_checkpoint(TRUNCATE)</code> so the WAL-held pages are actually released), and list or remove duplicate file paths.</li>
       <li><strong>Schedule</strong> - opt-in daily automation. Pick a time-of-day (default 01:00) and tick any of: Sync gallery, Remove orphaned thumbnails, Run enabled auto-taggers, Recompute tag counts, Merge general tags, Vacuum database. The scheduler iterates every configured gallery in turn at the chosen time and skips silently when another job is already running.</li>
     </ul>

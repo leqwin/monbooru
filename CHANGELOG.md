@@ -1,5 +1,43 @@
 # Changelog
 
+## [v1.4.0] - 2026-04-26
+
+### Added
+- Import hydrus network and bloombooru exports directly from the gallery import dialog. (images and tags)
+- Add gallery form accepts an optional `.db`/`.json`/`.zip` upload; the new gallery is created and the file imported into it in the same step. Add and merge import now switch the active gallery automatically.
+- Settings → Auto-Tagger lists a catalog of suggested taggers (WD14 SwinV2, JoyTag) with copy-paste install commands relative to the host working directory; `<model_path>/models.json` overrides extend the catalog. Disabled tagger rows expose a Delete button.
+- Batch tag add/remove from search and from selection: a Tag all button next to Delete all in the gallery header and a Tag selected button in the batch bar share a dialog with autocomplete and an Add/Remove radio.
+- Bulk tag removal moved to its own Settings → Tags section so it stays reachable when no on-disk tagger is configured.
+- Settings → General is one form with a single Save.
+- Styled 404 page with a back link instead of bare text.
+- Built-in category Action cells are labelled `(built-in)`.
+
+### Changed
+- Detail image floored at 200 px so tiny files no longer render as a dot.
+- Upload list shows `<1 KiB` for sub-1 KB files instead of `0 KiB`.
+- The `?` thumbnail fallback explains via a hover title why the thumbnail is unavailable.
+- Gallery status reads "N matches" instead of "match N".
+- Download button uses `⤓` to disambiguate from the sort-direction `↓`.
+- Gallery batch action bar reordered: Tag selected sits left of Delete selected; Move/Delete are right-aligned and separated from Tag selected.
+- Add gallery form is single-row with equal-height controls, drops the verbose hint, shows a busy state on submit, and renders a success flash before the page reload. The gallery import dialog drops its redundant hint too.
+
+### Fixed
+- Search/UI: search input blurs on submit and the suggest dropdown is dismissed; stale suggest swaps no longer race the new query; long tag chip names ellipsize on the detail page; the detail breadcrumb back-link stays on one line when the filename is long; the gallery toolbar (Save / Tag all / Delete all) tracks the current search via OOB swap.
+- Search: LIKE metacharacters in tag prefix/substring and folder filters are escaped; malformed queries return 400 instead of being silently parsed away.
+- API: `tag_warnings` are returned from `addImageTags` and surfaced in the upload flash; compat-imported tags are credited to the originating provider instead of always `import`.
+- Auth/audit: settings audit logs record the `clientIP` so reverse-proxy IPs are captured; login backoff is capped at 30 s as the spec documents.
+- Web: `syncTrigger` redirects only to a same-origin Referer; export warns when a gallery file is skipped because its path is unreadable.
+- Tags/gallery: errors propagate from `DeleteCategoryMoveOrDelete`'s delete-all path, `Sync`'s scan loop, and adjacent-image lookups instead of being dropped; orphaned-thumbnail prune bails on a partial id scan rather than deleting valid thumbnails.
+- Config: `ui.page_size` is clamped to its default when a non-positive value is configured.
+
+### Removed
+- `tools/blombooru-export.py` : superseded by the in-app blombooru import.
+
+### Internal
+- Compat layer split into `internal/web/compatibility/` with per-app translators (blombooru, hydrus) self-registering against a package-level provider table. Adding a third format is a new file with one Register call.
+- Performance: cache the general-category id on the gallery context so `parseTagInput` skips a SELECT; narrow `RelatedImages` to the only column the template uses; scope `RecalcAndPrune` to touched tags in bulk removals; add partial indexes on `generation_hash` for both metadata tables.
+- Docs: new migration guide (`docs/MIGRATING.md`)
+
 ## [v1.3.0] - 2026-04-25
 
 ### Added
@@ -102,7 +140,7 @@
 - Auto-tag groups on the image detail page are ordered by confidence and show a percentage next to each tag.
 
 ### Changed
-- Gallery configuration no longer stores `db_path` or `thumbnails_path`. Each gallery lives under `<paths.data_path>/<name>/monbooru.db` + `/thumbnails/`, created on demand. `active_gallery` is renamed to `default_gallery` and only controls the startup pick; the topbar switcher changes the runtime active gallery without persisting. Legacy `[paths]` migration is removed — existing `monbooru.toml` files must be rewritten as `[[galleries]]` entries on a fresh config.
+- Gallery configuration no longer stores `db_path` or `thumbnails_path`. Each gallery lives under `<paths.data_path>/<name>/monbooru.db` + `/thumbnails/`, created on demand. `active_gallery` is renamed to `default_gallery` and only controls the startup pick; the topbar switcher changes the runtime active gallery without persisting. Legacy `[paths]` migration is removed - existing `monbooru.toml` files must be rewritten as `[[galleries]]` entries on a fresh config.
 - Settings → Auto-Tagger section now sits above Authentication.
 - "Delete all" is hidden while a batch-delete selection is in progress, to avoid two conflicting destructive buttons.
 - Sync on large libraries: duplicate hashing and per-file `chown` are skipped; alias lookups and missing-row updates are batched, so idle syncs on 50k+ libraries finish in seconds rather than minutes.

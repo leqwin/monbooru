@@ -304,12 +304,21 @@ func (s *Service) DeleteCategoryMoveOrDelete(id int64, action string, targetID i
 		var tagIDs []int64
 		for rows.Next() {
 			var tid int64
-			rows.Scan(&tid)
+			if scanErr := rows.Scan(&tid); scanErr != nil {
+				rows.Close()
+				return scanErr
+			}
 			tagIDs = append(tagIDs, tid)
+		}
+		if iterErr := rows.Err(); iterErr != nil {
+			rows.Close()
+			return iterErr
 		}
 		rows.Close()
 		for _, tid := range tagIDs {
-			tx.Exec(`DELETE FROM image_tags WHERE tag_id = ?`, tid)
+			if _, err := tx.Exec(`DELETE FROM image_tags WHERE tag_id = ?`, tid); err != nil {
+				return err
+			}
 		}
 		if _, err := tx.Exec(`DELETE FROM tags WHERE category_id = ?`, id); err != nil {
 			return err
@@ -756,57 +765,89 @@ func removeTagFromImageTx(tx *sql.Tx, imageID, tagID int64) error {
 
 // RemoveAllAutoTags deletes every auto-tagged image_tags row across the
 // library. A non-empty taggerNames restricts the deletion to rows whose
-// tagger_name matches. Usage counts are recomputed and zero-usage tags
-// pruned afterwards.
+// tagger_name matches. Affected tag usage counts are recomputed (scoped
+// to the rows we actually touched) and zero-usage tags pruned afterwards.
 func (s *Service) RemoveAllAutoTags(taggerNames []string) (int, error) {
-	var (
-		res sql.Result
-		err error
-	)
-	if len(taggerNames) == 0 {
-		res, err = s.db.Write.Exec(`DELETE FROM image_tags WHERE is_auto = 1`)
-	} else {
+	where := `is_auto = 1`
+	args := []any{}
+	if len(taggerNames) > 0 {
 		placeholders := strings.Repeat("?,", len(taggerNames))
 		placeholders = placeholders[:len(placeholders)-1]
-		args := make([]any, len(taggerNames))
-		for i, n := range taggerNames {
-			args[i] = n
+		where += ` AND tagger_name IN (` + placeholders + `)`
+		for _, n := range taggerNames {
+			args = append(args, n)
 		}
-		res, err = s.db.Write.Exec(
-			`DELETE FROM image_tags WHERE is_auto = 1 AND tagger_name IN (`+placeholders+`)`,
-			args...,
-		)
 	}
+	touched, err := s.collectTagIDs(`SELECT DISTINCT tag_id FROM image_tags WHERE `+where, args...)
+	if err != nil {
+		return 0, err
+	}
+	res, err := s.db.Write.Exec(`DELETE FROM image_tags WHERE `+where, args...)
 	if err != nil {
 		return 0, err
 	}
 	removed, _ := res.RowsAffected()
-	s.RecalcAndPrune()
+	if err := s.RecalcAndPruneIDs(touched); err != nil {
+		return int(removed), err
+	}
 	return int(removed), nil
 }
 
 // RemoveAllUserTags deletes every manual image_tags row across the
-// library, then recomputes usage counts.
+// library, then recomputes usage counts for the touched tags.
 func (s *Service) RemoveAllUserTags() (int, error) {
+	touched, err := s.collectTagIDs(`SELECT DISTINCT tag_id FROM image_tags WHERE is_auto = 0`)
+	if err != nil {
+		return 0, err
+	}
 	res, err := s.db.Write.Exec(`DELETE FROM image_tags WHERE is_auto = 0`)
 	if err != nil {
 		return 0, err
 	}
 	removed, _ := res.RowsAffected()
-	s.RecalcAndPrune()
+	if err := s.RecalcAndPruneIDs(touched); err != nil {
+		return int(removed), err
+	}
 	return int(removed), nil
 }
 
 // RemoveAllTags deletes every image_tags row across the library, both
-// manual and auto-tagged, then recomputes usage counts.
+// manual and auto-tagged, then recomputes usage counts for the touched
+// tags.
 func (s *Service) RemoveAllTags() (int, error) {
+	touched, err := s.collectTagIDs(`SELECT DISTINCT tag_id FROM image_tags`)
+	if err != nil {
+		return 0, err
+	}
 	res, err := s.db.Write.Exec(`DELETE FROM image_tags`)
 	if err != nil {
 		return 0, err
 	}
 	removed, _ := res.RowsAffected()
-	s.RecalcAndPrune()
+	if err := s.RecalcAndPruneIDs(touched); err != nil {
+		return int(removed), err
+	}
 	return int(removed), nil
+}
+
+// collectTagIDs runs the given SELECT and returns the resulting tag_id
+// list. Used by the bulk-removal helpers to scope their post-delete
+// RecalcAndPruneIDs call to the tags actually touched.
+func (s *Service) collectTagIDs(query string, args ...any) ([]int64, error) {
+	rows, err := s.db.Read.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // RemoveUserTagsFromImage drops every manual image_tags row for one
@@ -950,7 +991,10 @@ const relatedGeneralTagsCap = 15
 // my_tags resolves once (general capped to the K rarest, every other
 // category whole); candidates aggregate from image_tags alone with an
 // inner LIMIT; the images row is joined last so is_missing filtering
-// and column fetches cost O(buffer).
+// costs O(buffer). The SELECT only fetches what
+// partials/related_images.html actually consumes (currently `.ID`),
+// since the rest of the row would be unused payload across the SQL
+// boundary.
 func (s *Service) RelatedImages(imageID int64, limit int) ([]models.Image, error) {
 	rows, err := s.db.Read.Query(
 		`WITH my_tags AS (
@@ -974,10 +1018,7 @@ func (s *Service) RelatedImages(imageID int64, limit int) ([]models.Image, error
 		     ORDER BY shared DESC, theirs.image_id DESC
 		     LIMIT ?
 		 )
-		 SELECT i.id, i.sha256, i.canonical_path, i.folder_path, i.file_type,
-		        i.width, i.height, i.file_size, i.is_favorited,
-		        i.source_type, i.ingested_at,
-		        c.shared
+		 SELECT i.id
 		 FROM candidates c
 		 JOIN images i ON i.id = c.image_id
 		 WHERE i.is_missing = 0
@@ -993,21 +1034,9 @@ func (s *Service) RelatedImages(imageID int64, limit int) ([]models.Image, error
 	var out []models.Image
 	for rows.Next() {
 		var img models.Image
-		var isFav int
-		var width, height *int
-		var ingestedAt string
-		var shared int
-		if err := rows.Scan(
-			&img.ID, &img.SHA256, &img.CanonicalPath, &img.FolderPath, &img.FileType,
-			&width, &height, &img.FileSize, &isFav,
-			&img.SourceType, &ingestedAt, &shared,
-		); err != nil {
+		if err := rows.Scan(&img.ID); err != nil {
 			return nil, err
 		}
-		img.IsFavorited = isFav == 1
-		img.Width = width
-		img.Height = height
-		img.IngestedAt, _ = time.Parse(time.RFC3339, ingestedAt)
 		out = append(out, img)
 	}
 	return out, rows.Err()

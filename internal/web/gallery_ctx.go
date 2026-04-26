@@ -26,6 +26,13 @@ type galleryCtx struct {
 	TagSvc         *tags.Service
 	Degraded       bool
 
+	// GeneralCategoryID is the resolved id of the built-in `general`
+	// tag_categories row. parseTagInput hits this every detail-page tag
+	// add, every upload, every batch-tag job; resolving once at open
+	// time saves a SELECT per call. Built-in rows are immutable so no
+	// invalidation is needed.
+	GeneralCategoryID int64
+
 	// Per-gallery caches of queries that scan every visible image. All three
 	// are nilled by InvalidateCaches after any ingest/delete/missing-toggle
 	// so the next reader re-populates from SQLite. visibleCount holds the
@@ -132,14 +139,22 @@ func openGalleryCtx(g config.Gallery) (*galleryCtx, error) {
 		logx.Warnf("gallery %q: path %q unreadable: %v - degraded mode", g.Name, g.GalleryPath, err)
 		degraded = true
 	}
+	var generalID int64
+	if err := database.Read.QueryRow(
+		`SELECT id FROM tag_categories WHERE name = 'general'`,
+	).Scan(&generalID); err != nil {
+		database.Close()
+		return nil, fmt.Errorf("gallery %q: resolve general category: %w", g.Name, err)
+	}
 	return &galleryCtx{
-		Name:           g.Name,
-		GalleryPath:    g.GalleryPath,
-		DBPath:         g.DBPath,
-		ThumbnailsPath: g.ThumbnailsPath,
-		DB:             database,
-		TagSvc:         tags.New(database),
-		Degraded:       degraded,
+		Name:              g.Name,
+		GalleryPath:       g.GalleryPath,
+		DBPath:            g.DBPath,
+		ThumbnailsPath:    g.ThumbnailsPath,
+		DB:                database,
+		TagSvc:            tags.New(database),
+		Degraded:          degraded,
+		GeneralCategoryID: generalID,
 	}, nil
 }
 

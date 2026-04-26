@@ -37,19 +37,17 @@ func TestLoginRateLimiter_FirstRequestAllowed(t *testing.T) {
 func TestLoginRateLimiter_BackoffSequence(t *testing.T) {
 	t.Parallel()
 	// expected[count] = delay after `count` consecutive failures.
-	// Current implementation: 1<<min(count-1,4) seconds, so the sequence is
-	// 1, 2, 4, 8, 16, 16, 16… The README/spec claim "capped at 30s" but the
-	// code caps at 16s because min(count-1,4) caps the exponent at 4. See
-	// TestLoginRateLimiter_SpecDocumentedCapIs30s below for the contract
-	// gap.
+	// Sequence: 1, 2, 4, 8, 16, 32→30 (clamped). 1<<min(count-1,5) seconds
+	// then `if delay > 30s` snaps the last step to 30 s, matching spec
+	// §13.1 / README.
 	expected := map[int]time.Duration{
 		1: 1 * time.Second,
 		2: 2 * time.Second,
 		3: 4 * time.Second,
 		4: 8 * time.Second,
 		5: 16 * time.Second,
-		6: 16 * time.Second, // cap
-		9: 16 * time.Second, // still capped
+		6: 30 * time.Second, // 32→30 cap
+		9: 30 * time.Second, // still capped
 	}
 	for count, delay := range expected {
 		l := newLoginRateLimiter()
@@ -67,14 +65,12 @@ func TestLoginRateLimiter_BackoffSequence(t *testing.T) {
 	}
 }
 
-// TestLoginRateLimiter_SpecDocumentedCapIs30s documents the discrepancy
-// between SPECIFICATIONS §13.1 (and README) which both say the backoff caps
-// at 30 s and the actual implementation which caps at 16 s. See the t.Skip
-// message. Flip the skip and the test will fail until the implementation
-// matches the spec (or the spec is amended to say 16 s).
+// TestLoginRateLimiter_SpecDocumentedCapIs30s pins SPECIFICATIONS §13.1
+// (and the README): the per-IP login backoff caps at 30 s. The shift clamp
+// in check() lets 1<<5=32s through so the explicit `if delay > 30s` clamp
+// fires.
 func TestLoginRateLimiter_SpecDocumentedCapIs30s(t *testing.T) {
 	t.Parallel()
-	t.Skip("BUG: auth.go:205 caps delay at 1<<4=16s via min(count-1,4); spec §13.1 and README say 30s. Change the cap to 5 to reach 32s and let the existing `if delay > 30s { delay = 30s }` clamp it, or amend the spec.")
 	l := newLoginRateLimiter()
 	const ip = "10.0.0.3"
 	seedAttempt(l, ip, 20, time.Now().Add(-29*time.Second))
@@ -500,7 +496,7 @@ func TestCSRFMiddleware_AcceptsHeaderToken(t *testing.T) {
 	srv := newTestServer(t)
 	h := srv.Handler()
 
-	req := httptest.NewRequest("POST", "/settings/ui", strings.NewReader("page_size=25"))
+	req := httptest.NewRequest("POST", "/settings/general", strings.NewReader("page_size=25"))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("X-CSRF-Token", srv.csrfToken("anon"))
 	w := httptest.NewRecorder()
@@ -516,7 +512,7 @@ func TestCSRFMiddleware_AcceptsFormFieldToken(t *testing.T) {
 	h := srv.Handler()
 
 	form := url.Values{"_csrf": {srv.csrfToken("anon")}, "page_size": {"25"}}
-	req := httptest.NewRequest("POST", "/settings/ui", strings.NewReader(form.Encode()))
+	req := httptest.NewRequest("POST", "/settings/general", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -530,7 +526,7 @@ func TestCSRFMiddleware_RejectsMissingToken(t *testing.T) {
 	srv := newTestServer(t)
 	h := srv.Handler()
 
-	req := httptest.NewRequest("POST", "/settings/ui", strings.NewReader("page_size=25"))
+	req := httptest.NewRequest("POST", "/settings/general", strings.NewReader("page_size=25"))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -546,7 +542,7 @@ func TestCSRFMiddleware_RejectsForeignToken(t *testing.T) {
 
 	// A valid token for srvB is invalid for srvA because each server rolls
 	// its own HMAC secret.
-	req := httptest.NewRequest("POST", "/settings/ui", strings.NewReader("page_size=25"))
+	req := httptest.NewRequest("POST", "/settings/general", strings.NewReader("page_size=25"))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("X-CSRF-Token", srvB.csrfToken("anon"))
 	w := httptest.NewRecorder()

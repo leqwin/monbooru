@@ -821,22 +821,50 @@ function handleSuggestKey(e, dropdownId, inputId) {
   }
 }
 
-// Close suggest dropdown when clicking outside
-function initSuggestDismiss(dropdownId, inputId) {
+// Close suggest dropdown when clicking outside, or when the user submits
+// the enclosing form (Enter or the Search button). Without the submit
+// hook the dropdown stays visible on top of the result page until the
+// next outside click.
+//
+// opts.blurOnSubmit: also blur the input on submit. Used for the search
+// form so page-level arrow-key gallery navigation kicks in after Enter
+// without an extra Escape press; the tag/folder dropdowns are designed
+// for repeated entry and keep focus.
+function initSuggestDismiss(dropdownId, inputId, opts) {
   document.addEventListener('click', function(e) {
     var dd = document.getElementById(dropdownId);
     if (dd && !dd.contains(e.target) && e.target.id !== inputId) {
       dd.innerHTML = '';
     }
   });
+  var input = document.getElementById(inputId);
+  var form = input && input.form;
+  if (form) {
+    form.addEventListener('submit', function() {
+      var dd = document.getElementById(dropdownId);
+      if (dd) dd.innerHTML = '';
+      if (opts && opts.blurOnSubmit && input) input.blur();
+    });
+  }
+  // A pending suggest request (debounced 200ms by hx-trigger) can land
+  // after the user submits or moves focus elsewhere; drop the swap if
+  // the input no longer holds focus so the dropdown doesn't get refilled
+  // behind the user's back.
+  var dd0 = document.getElementById(dropdownId);
+  if (dd0) {
+    dd0.addEventListener('htmx:afterSwap', function() {
+      if (document.activeElement !== input) dd0.innerHTML = '';
+    });
+  }
 }
 
 // Initialize all known suggest dropdowns
-initSuggestDismiss('search-suggest', 'search-input');
+initSuggestDismiss('search-suggest', 'search-input', {blurOnSubmit: true});
 initSuggestDismiss('tag-suggest-dropdown', 'tag-input');
 initSuggestDismiss('merge-suggest', 'merge-canon-input');
 initSuggestDismiss('move-selected-suggest', 'move-selected-folder');
 initSuggestDismiss('move-image-suggest', 'move-image-folder');
+initSuggestDismiss('batch-tag-suggest', 'batch-tag-input');
 
 // ---------------------------------------------------------------------------
 // Detail page: separate tags added during the current session from the rest.

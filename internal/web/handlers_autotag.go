@@ -80,6 +80,7 @@ func (s *Server) uploadPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var addedIDs []int64
+	var tagWarnings []string
 	added, dupes, errors, oversized := 0, 0, 0, 0
 	for _, fh := range files {
 		// Enforce the per-file cap up front; the watcher and API handler do the
@@ -134,8 +135,12 @@ func (s *Server) uploadPost(w http.ResponseWriter, r *http.Request) {
 
 		for _, ct := range tagPairs {
 			tag, err := s.tagSvc().GetOrCreateTag(ct.name, ct.catID)
-			if err == nil {
-				s.tagSvc().AddTagToImage(img.ID, tag.ID, false, nil)
+			if err != nil {
+				tagWarnings = append(tagWarnings, ct.name+": "+err.Error())
+				continue
+			}
+			if err := s.tagSvc().AddTagToImage(img.ID, tag.ID, false, nil); err != nil {
+				tagWarnings = append(tagWarnings, ct.name+": "+err.Error())
 			}
 		}
 		addedIDs = append(addedIDs, img.ID)
@@ -155,6 +160,9 @@ func (s *Server) uploadPost(w http.ResponseWriter, r *http.Request) {
 	}
 	if errors > 0 {
 		msg += fmt.Sprintf(", %d error(s)", errors)
+	}
+	if len(tagWarnings) > 0 {
+		msg += fmt.Sprintf(" (%d tag warning(s): %s)", len(tagWarnings), strings.Join(tagWarnings, "; "))
 	}
 	cssClass := "flash-ok"
 	if added == 0 && (errors > 0 || oversized > 0) {

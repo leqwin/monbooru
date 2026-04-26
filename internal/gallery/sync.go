@@ -102,18 +102,26 @@ func Sync(ctx context.Context, database *db.DB, galleryPath, thumbnailsPath stri
 		sha256 string
 	}
 	known := map[string]knownEntry{}
-	if krows, kerr := database.Read.Query(
+	krows, kerr := database.Read.Query(
 		`SELECT ip.path, i.file_size, i.sha256 FROM image_paths ip JOIN images i ON i.id = ip.image_id`,
-	); kerr == nil {
-		for krows.Next() {
-			var p, sha string
-			var sz int64
-			if err := krows.Scan(&p, &sz, &sha); err == nil {
-				known[p] = knownEntry{size: sz, sha256: sha}
-			}
-		}
-		krows.Close()
+	)
+	if kerr != nil {
+		return result, fmt.Errorf("preloading known paths: %w", kerr)
 	}
+	for krows.Next() {
+		var p, sha string
+		var sz int64
+		if err := krows.Scan(&p, &sz, &sha); err != nil {
+			krows.Close()
+			return result, fmt.Errorf("scanning known paths: %w", err)
+		}
+		known[p] = knownEntry{size: sz, sha256: sha}
+	}
+	if err := krows.Err(); err != nil {
+		krows.Close()
+		return result, fmt.Errorf("iterating known paths: %w", err)
+	}
+	krows.Close()
 
 	err := filepath.WalkDir(galleryPath, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -185,18 +193,26 @@ func Sync(ctx context.Context, database *db.DB, galleryPath, thumbnailsPath stri
 		isMissing     int
 	}
 	bySHA := map[string]bySHARow{}
-	if srows, sErr := database.Read.Query(
+	srows, sErr := database.Read.Query(
 		`SELECT id, sha256, canonical_path, is_missing FROM images`,
-	); sErr == nil {
-		for srows.Next() {
-			var r bySHARow
-			var sha string
-			if err := srows.Scan(&r.id, &sha, &r.canonicalPath, &r.isMissing); err == nil {
-				bySHA[sha] = r
-			}
-		}
-		srows.Close()
+	)
+	if sErr != nil {
+		return result, fmt.Errorf("preloading SHA index: %w", sErr)
 	}
+	for srows.Next() {
+		var r bySHARow
+		var sha string
+		if err := srows.Scan(&r.id, &sha, &r.canonicalPath, &r.isMissing); err != nil {
+			srows.Close()
+			return result, fmt.Errorf("scanning SHA index: %w", err)
+		}
+		bySHA[sha] = r
+	}
+	if err := srows.Err(); err != nil {
+		srows.Close()
+		return result, fmt.Errorf("iterating SHA index: %w", err)
+	}
+	srows.Close()
 
 	// reactivated counts silent is_missing=0 updates that don't bump any
 	// SyncResult counter. Needed to decide whether tag counts must be

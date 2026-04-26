@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -178,6 +179,22 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
+// sameOriginReferer returns the Referer when it points at the same Host as
+// r, falling back to "/". Used by handlers that 303-redirect on form submit
+// so a Referer pointing at a different origin can never bounce the user
+// off-site.
+func sameOriginReferer(r *http.Request) string {
+	ref := r.Referer()
+	if ref == "" {
+		return "/"
+	}
+	u, err := url.Parse(ref)
+	if err != nil || u.Host != "" && u.Host != r.Host {
+		return "/"
+	}
+	return ref
+}
+
 // loginRateLimiter tracks failed login attempts per IP with exponential backoff.
 type loginRateLimiter struct {
 	mu       sync.Mutex
@@ -201,15 +218,15 @@ func (l *loginRateLimiter) check(ip string) bool {
 	if !ok {
 		return true
 	}
-	// Exponential backoff: 1s, 2s, 4s, 8s, ... capped at 30s.
+	// Exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s capped at 30s.
 	// Clamp the shift to >= 0 so a future caller seeding count=0 (or any
 	// negative) never trips Go's runtime panic on a negative shift amount.
 	shift := a.count - 1
 	if shift < 0 {
 		shift = 0
 	}
-	if shift > 4 {
-		shift = 4
+	if shift > 5 {
+		shift = 5
 	}
 	delay := time.Duration(1<<shift) * time.Second
 	if delay > 30*time.Second {

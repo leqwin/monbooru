@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "name": "wd-swinv2",
+      "description": "Anime tagger (WD14 SwinV2 v3, ~330 MB)",
+      "files": [
+        { "url": "https://huggingface.co/SmilingWolf/wd-swinv2-tagger-v3/resolve/main/model.onnx", "filename": "model.onnx" },
+        { "url": "https://huggingface.co/SmilingWolf/wd-swinv2-tagger-v3/resolve/main/selected_tags.csv", "filename": "tags.csv" }
+      ]
+    },
+    {
+      "name": "joytag",
+      "description": "Photo / realistic tagger (JoyTag, ~430 MB)",
+      "files": [
+        { "url": "https://huggingface.co/fancyfeast/joytag/resolve/main/model.onnx", "filename": "model.onnx" },
+        { "url": "https://huggingface.co/fancyfeast/joytag/resolve/main/top_tags.txt", "filename": "tags.txt" }
+      ]
+    }
+  ]
+}

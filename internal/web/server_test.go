@@ -578,38 +578,29 @@ func TestUploadPageReturns200(t *testing.T) {
 	}
 }
 
-func TestSettingsGalleryPost(t *testing.T) {
+func TestSettingsGeneralPost(t *testing.T) {
 	srv := newTestServer(t)
 	h := srv.Handler()
 
-	body := "_csrf=" + srv.csrfToken("anon") + "&watch_enabled=on&max_file_size_mb=200"
-	req := httptest.NewRequest("POST", "/settings/gallery", strings.NewReader(body))
+	body := "_csrf=" + srv.csrfToken("anon") +
+		"&watch_enabled=on&max_file_size_mb=200&page_size=60"
+	req := httptest.NewRequest("POST", "/settings/general", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("X-CSRF-Token", srv.csrfToken("anon"))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
-		t.Errorf("settings gallery POST expected 200, got %d", w.Code)
+		t.Errorf("settings general POST expected 200, got %d", w.Code)
 	}
 	if !strings.Contains(w.Body.String(), "Saved") {
 		t.Error("expected 'Saved' flash message")
 	}
-}
-
-func TestSettingsUIPost(t *testing.T) {
-	srv := newTestServer(t)
-	h := srv.Handler()
-
-	body := "_csrf=" + srv.csrfToken("anon") + "&page_size=60"
-	req := httptest.NewRequest("POST", "/settings/ui", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("X-CSRF-Token", srv.csrfToken("anon"))
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("settings UI POST expected 200, got %d", w.Code)
+	if !srv.cfg.Gallery.WatchEnabled {
+		t.Error("WatchEnabled should be true after save")
+	}
+	if srv.cfg.Gallery.MaxFileSizeMB != 200 {
+		t.Errorf("MaxFileSizeMB = %d, want 200", srv.cfg.Gallery.MaxFileSizeMB)
 	}
 	if srv.cfg.UI.PageSize != 60 {
 		t.Errorf("PageSize = %d, want 60", srv.cfg.UI.PageSize)

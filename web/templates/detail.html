@@ -87,7 +87,7 @@
         <button type="button" class="btn-autotag" title="Auto-tag this image"
                 onclick="document.getElementById('autotag-dialog').showModal()">Auto-tag</button>
         {{end}}
-        <a href="/images/{{.Image.ID}}/file" download class="btn-sm" title="Download image">↓</a>
+        <a href="/images/{{.Image.ID}}/file" download class="btn-sm" title="Download image">⤓</a>
         <form id="fav-form" hx-post="/images/{{.Image.ID}}/favorite"
               hx-target="#fav-btn" hx-swap="outerHTML"
               hx-headers='{"X-CSRF-Token":"{{.CSRFToken}}"}' style="display:inline">

@@ -1,0 +1,5 @@
+{{define "partials/save_search_area.html"}}
+{{if .Query}}<button id="save-search-btn" type="button" onclick="document.getElementById('save-search-dialog').showModal()">Save search</button>{{end}}
+{{if and (not .Degraded) (gt .Result.Total 0)}}<button id="tag-search-btn" type="button" onclick="openTagSearchDialog()" title="Add or remove tags on every image in current search">Tag all</button>{{end}}
+{{if and (not .Degraded) (gt .Result.Total 0)}}<button id="delete-search-btn" type="button" class="btn-danger" onclick="openDeleteSearchDialog()" title="Delete all images in current search">Delete all</button>{{end}}
+{{end}}

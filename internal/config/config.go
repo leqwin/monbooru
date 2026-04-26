@@ -336,5 +336,12 @@ func validate(cfg *Config) error {
 	} else if err := ValidateScheduleTime(cfg.Schedule.Time); err != nil {
 		return err
 	}
+	// PageSize must be positive: the API path divides by it
+	// (offset/limit) and would panic on zero. Snap to the documented
+	// default rather than surface a startup error for a user-fixable
+	// config typo.
+	if cfg.UI.PageSize <= 0 {
+		cfg.UI.PageSize = 40
+	}
 	return nil
 }

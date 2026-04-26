@@ -1,8 +1,7 @@
 # Monbooru
 
 Your own self-hosted and lightweight booru.  
-Designed for organizing your local media collection, including AI-generated images (Stable Diffusion, ComfyUI, A1111/Forge).  
-Works fully offline and with no telemetry. Supports ONNX models for local auto-tagging of your collection (WD14, JoyTag...).  
+Designed for organizing your local media collection, including AI-generated images (Stable Diffusion, ComfyUI, A1111/Forge). Works fully offline and with no telemetry. Supports ONNX models for local auto-tagging of your collection (WD14, JoyTag...).  
 
 <table>
   <tr>
@@ -20,16 +19,15 @@ Works fully offline and with no telemetry. Supports ONNX models for local auto-t
 ## Features
 
 - Tag-based gallery with folder tree, favorites, saved searches, related-image suggestions
-- A watcher that picks up new, moved, and deleted files within a few seconds
+- A watcher that picks up new, moved, and deleted files in the gallery within a few seconds; and support for multi-file browser upload
 - Stable Diffusion metadata extraction from A1111/Forge and ComfyUI (prompts, models, seeds, full workflow)
-- Optional auto-tagging with local ONNX models (WD14, JoyTag, or any compatible model), CPU or GPU
+- Optional auto-tagging with local ONNX models (WD14, JoyTag, or any compatible model), CPU or GPU (CUDA)
 - Search with wildcards, OR, exclusions, plus filters on folder, date, size, dimensions, category, generation recipe...
-- Browser upload, multi-file, with tags and a destination folder
-- Batch operations: bulk delete, bulk move (with folder autocomplete), bulk auto-tag, delete-all-search-results
-- Daily maintenance schedule: scheduled sync, auto-tag, recompute counts, merge general tags, and vacuum databases...
+- Batch operations: bulk delete, bulk move, bulk auto-tag, delete-all-search-results, tag-all-search-results / tag-selected (add or remove tags in one go)
 - Create multiple galleries with their own filesystem and switch between them
-- Per-gallery export and import: full backup (.db, .json, .zip with images), or a light format (.json or .zip with images) with only images<->tags map; imports can replace or merge
+- Per-gallery export and import: full backup (.db, .json, .zip with images), or a light format (.json or .zip with images) with only images<->tags map. See [docs/MIGRATING.md](docs/MIGRATING.md) for migrating from another supported booru-style app.
 - REST API for third-party integrations (e.g. adding images to the gallery from an external app)
+- Daily maintenance schedule: scheduled sync, auto-tag, recompute counts, merge general tags, and vacuum databases...
 - Fully offline, no telemetry
 
 ---
@@ -76,7 +74,7 @@ Sort options: newest, file size, random shuffle. Any query can be saved from the
 Five built-in categories (General, Character, Artist, Copyright, Meta), each with its own color. Custom categories with custom colors are also supported.
 
 - Add tags manually or let the auto-tagger do it
-- The same name can live in multiple categories (`character:cat` vs `general:cat`)
+- The same name can live in multiple categories (`character:cat` vs `artist:cat`)
 - Merge tags, rename, move between categories
 - Category-aware autocomplete: typing `artist:` limits suggestions to artist tags
 

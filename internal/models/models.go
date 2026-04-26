@@ -140,7 +140,7 @@ type SavedSearch struct {
 
 type JobState struct {
 	Running    bool
-	JobType    string // "sync" | "autotag"
+	JobType    string // "sync" | "autotag" | "re-extract" | "delete" | "rebuild-thumbs" | "move" | "tag" | "watcher"
 	Total      int
 	Processed  int
 	Message    string

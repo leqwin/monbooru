@@ -5,6 +5,7 @@
     <a href="#general">General</a>
     <a href="#galleries">Galleries</a>
     <a href="#tagger">Tagger</a>
+    <a href="#tags">Tags</a>
     <a href="#auth">Auth</a>
     <a href="#maintenance">Maintenance</a>
     <a href="#schedule">Schedule</a>
@@ -23,10 +24,10 @@
   <section id="general" class="settings-section">
     <h3>General</h3>
     <div id="flash-general"></div>
-    <div class="settings-sub">
-      <h4>Files</h4>
-      <form hx-post="/settings/gallery" hx-target="#flash-general" hx-swap="innerHTML">
-        <input type="hidden" name="_csrf" value="{{$csrf}}">
+    <form hx-post="/settings/general" hx-target="#flash-general" hx-swap="innerHTML">
+      <input type="hidden" name="_csrf" value="{{$csrf}}">
+      <div class="settings-sub">
+        <h4>Files</h4>
         <div class="field">
           <label>
             <input type="checkbox" name="watch_enabled" {{if $cfg.Gallery.WatchEnabled}}checked{{end}}>
@@ -38,20 +39,16 @@
           <input type="number" name="max_file_size_mb" value="{{$cfg.Gallery.MaxFileSizeMB}}" min="1">
           <span class="field-hint">Files larger than this are skipped during sync.</span>
         </div>
-        <button type="submit">Save files settings</button>
-      </form>
-    </div>
-    <div class="settings-sub">
-      <h4>UI</h4>
-      <form hx-post="/settings/ui" hx-target="#flash-general" hx-swap="innerHTML">
-        <input type="hidden" name="_csrf" value="{{$csrf}}">
+      </div>
+      <div class="settings-sub">
+        <h4>UI</h4>
         <div class="field">
           <label>Page size</label>
           <input type="number" name="page_size" value="{{$cfg.UI.PageSize}}" min="1" max="500">
         </div>
-        <button type="submit">Save UI settings</button>
-      </form>
-    </div>
+      </div>
+      <button type="submit">Save</button>
+    </form>
   </section>
 
   <section id="galleries" class="settings-section">
@@ -108,19 +105,50 @@
     </table>
     <div class="settings-sub">
       <h4>Add gallery</h4>
-      <form hx-post="/settings/galleries" hx-target="#flash-galleries" hx-swap="innerHTML" class="add-gallery-form">
+      <form hx-post="/settings/galleries" hx-target="#flash-galleries" hx-swap="innerHTML"
+            hx-encoding="multipart/form-data" class="add-gallery-form"
+            hx-on::before-request="setAddGalleryBusy(this, true)"
+            hx-on::after-request="onAddGalleryResponse(this)">
         <input type="hidden" name="_csrf" value="{{$csrf}}">
-        <div class="field">
+        <div class="field field-name">
           <label>Name</label>
           <input type="text" name="name" required pattern="[A-Za-z0-9_-]+">
         </div>
-        <div class="field">
+        <div class="field field-gallery-path">
           <label>Gallery path</label>
           <input type="text" name="gallery_path" required>
+        </div>
+        <div class="field field-import-file">
+          <label>Import file (optional, .db / .json / .zip)</label>
+          <input type="file" name="import_file" accept=".db,.sqlite,.json,.zip">
         </div>
         <button type="submit">Add</button>
       </form>
     </div>
+    <script>
+    // Disables the submit button and swaps its label while the Add request
+    // is in flight. Without this the user gets no feedback between click
+    // and the post-success reload, and can re-submit.
+    function setAddGalleryBusy(form, busy) {
+      var submit = form.querySelector('button[type=submit]');
+      if (!submit) return;
+      submit.disabled = busy;
+      submit.textContent = busy ? 'Adding…' : 'Add';
+    }
+    // Mirrors the import dialog: server writes the success flash into
+    // #flash-galleries, the form clears, and the page reloads after a short
+    // delay so the new row + active-badge appear without losing the
+    // "Gallery added." message. Errors leave the form populated so the user
+    // can fix the input and retry.
+    function onAddGalleryResponse(form) {
+      setAddGalleryBusy(form, false);
+      var flash = document.getElementById('flash-galleries');
+      if (flash && flash.querySelector('.flash-ok')) {
+        form.reset();
+        setTimeout(function(){ window.location.reload(); }, 1500);
+      }
+    }
+    </script>
   </section>
 
   <dialog id="gallery-rename-dialog">
@@ -206,7 +234,6 @@
       <div class="field">
         <label><input type="radio" name="mode" value="merge"> Merge: add new images and tags from the uploaded file</label>
       </div>
-      <p class="field-hint">With a .db or .json upload (no images bundled), only tags on matching images are applied — in both modes.</p>
       <p id="gallery-import-danger" class="confirm-dialog-danger">Destructive: replaces the current database. If the uploaded file is a .zip with images, the source folder is replaced as well.</p>
       <div class="field">
         <label>File (.db, .json, or .zip)</label>
@@ -394,7 +421,7 @@
             <td><strong>{{.Name}}</strong></td>
             <td>
               <input type="hidden" name="tagger_names" value="{{.Name}}">
-              {{if not .Available}}<span class="status-dim" title="Unavailable">—</span>
+              {{if not .Available}}<span class="status-dim" title="Unavailable">-</span>
               {{else if .Enabled}}<span class="status-ok" title="Enabled">✓</span>
               {{else}}<span class="status-err" title="Disabled">✗</span>{{end}}
             </td>
@@ -432,6 +459,14 @@
                         hx-post="/settings/tagger/{{.Name}}/enable" hx-target="#flash-tagger" hx-swap="innerHTML"
                         hx-vals='{"_csrf":"{{$csrf}}"}'>Enable</button>
                 {{end}}
+                {{if not .Enabled}}
+                <button type="button" class="btn-sm btn-danger"
+                        hx-post="/settings/tagger/{{.Name}}/delete" hx-target="#flash-tagger" hx-swap="innerHTML"
+                        hx-vals='{"_csrf":"{{$csrf}}"}'
+                        hx-confirm="Delete tagger {{.Name}}?"
+                        data-confirm-danger="The folder under model_path will be permanently removed from disk."
+                        data-confirm-ok="Delete">Delete</button>
+                {{end}}
               </div>
             </td>
           </tr>
@@ -464,22 +499,66 @@
       </div>
     </div>
     {{end}}
+    {{else}}
+    <p class="field-hint">No tagger subfolders found in <code>{{$cfg.Paths.ModelPath}}</code>. Use the table below to drop one in.</p>
+    {{end}}
+
+    {{$ghosts := index . "CatalogGhosts"}}
+    {{if $ghosts}}
+    <div class="settings-sub">
+      <h4>Available to download</h4>
+      <p class="field-hint">Monbooru fetches no models itself. Pick a tagger and run the suggested command on the host; reload this page once it finishes. Edit <code>{{$cfg.Paths.ModelPath}}/models.json</code> to add or override entries.</p>
+      <table class="tagger-table">
+        <thead>
+          <tr><th>Tagger</th><th>Description</th><th>Status</th><th>Actions</th></tr>
+        </thead>
+        <tbody>
+          {{range $ghosts}}
+          <tr>
+            <td><strong>{{.Name}}</strong></td>
+            <td>{{.Description}}</td>
+            <td><span class="status-dim">not downloaded</span></td>
+            <td><button type="button" class="btn-sm" onclick="document.getElementById('tagger-cmd-{{.Name}}').showModal()">Show download commands</button></td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{range $ghosts}}
+    <dialog id="tagger-cmd-{{.Name}}">
+      <p><strong>{{.Name}}</strong> - {{.Description}}</p>
+      <p class="field-hint">Run one of the commands below on the host, then reload this page.</p>
+      <p><strong>Direct host install</strong> <span class="field-hint">(run inside <code>{{$cfg.Paths.ModelPath}}</code>)</span></p>
+      <pre class="code-block"><code>{{.HostCommand}}</code></pre>
+      <p><strong>Docker (monbooru container)</strong></p>
+      <pre class="code-block"><code>{{.DockerCommand}}</code></pre>
+      <div class="dialog-actions">
+        <button type="button" onclick="this.closest('dialog').close()">Close</button>
+      </div>
+    </dialog>
+    {{end}}
+    {{end}}
+  </section>
+
+  <section id="tags" class="settings-section">
+    <h3>Tags</h3>
+    <div id="flash-tags"></div>
     <div class="settings-sub">
       <h4>Bulk tag removal</h4>
       <div class="tagger-bulk-actions">
-        <form hx-post="/settings/tagger/remove-autotagged" hx-target="#flash-tagger" hx-swap="innerHTML"
+        <form hx-post="/settings/tagger/remove-autotagged" hx-target="#flash-tags" hx-swap="innerHTML"
               hx-confirm="Remove every auto-tag from every image? Manual tags are kept."
               data-confirm-ok="Remove">
           <input type="hidden" name="_csrf" value="{{$csrf}}">
           <button type="submit" class="btn-warning">Remove all auto-tags</button>
         </form>
-        <form hx-post="/settings/tagger/remove-user-tags" hx-target="#flash-tagger" hx-swap="innerHTML"
+        <form hx-post="/settings/tagger/remove-user-tags" hx-target="#flash-tags" hx-swap="innerHTML"
               hx-confirm="Remove every user (manual) tag from every image? Auto-tags are kept."
               data-confirm-ok="Remove">
           <input type="hidden" name="_csrf" value="{{$csrf}}">
           <button type="submit" class="btn-warning">Remove all user tags</button>
         </form>
-        <form hx-post="/settings/tagger/remove-all-tags" hx-target="#flash-tagger" hx-swap="innerHTML"
+        <form hx-post="/settings/tagger/remove-all-tags" hx-target="#flash-tags" hx-swap="innerHTML"
               hx-confirm="Remove EVERY tag (user and auto) from every image? This cannot be undone."
               data-confirm-ok="Remove">
           <input type="hidden" name="_csrf" value="{{$csrf}}">
@@ -487,9 +566,6 @@
         </form>
       </div>
     </div>
-    {{else}}
-    <p class="field-hint">No tagger subfolders found in <code>{{$cfg.Paths.ModelPath}}</code>. Create one directory per tagger with <code>model.onnx</code> and <code>tags.csv</code> inside, then reload this page.</p>
-    {{end}}
   </section>
 
   <section id="auth" class="settings-section">

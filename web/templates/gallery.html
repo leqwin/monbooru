@@ -32,23 +32,21 @@
     <button type="button" id="random-sort-btn" class="{{if eq .Sort "random"}}active{{end}}"
             onclick="applyRandomSort()" title="{{if eq .Sort "random"}}Re-shuffle{{else}}Random order{{end}}">⇄</button>
   </form>
-  <div id="save-search-area">
-    {{if .Query}}<button id="save-search-btn" type="button" onclick="document.getElementById('save-search-dialog').showModal()">Save search</button>{{end}}
-    {{if and (not .Degraded) (gt .Result.Total 0)}}<button id="delete-search-btn" type="button" class="btn-danger" onclick="openDeleteSearchDialog()" title="Delete all images in current search">Delete all</button>{{end}}
-  </div>
+  <div id="save-search-area">{{template "partials/save_search_area.html" .}}</div>
 </div>
 
-<div id="gallery-status" class="status-bar">match <span id="result-count" class="result-count">{{.Result.Total}}</span></div>
+<div id="gallery-status" class="status-bar"><span id="result-count" class="result-count">{{.Result.Total}}</span> {{plural .Result.Total "match" "matches"}}</div>
 
 <div id="batch-bar" class="batch-bar hidden">
   <button onclick="selectAll()">Select all</button>
+  <button onclick="clearSelection()">Cancel</button>
   <span id="batch-count">0 selected</span>
   <form id="batch-delete-form">
     <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+    <button type="button" class="batch-bar-right" onclick="openTagSelectedDialog()">Tag selected</button>
+    <button type="button" class="batch-bar-rest" onclick="openMoveSelectedDialog()">Move selected</button>
     <button type="button" class="btn-danger" onclick="batchDeleteSelected()">Delete selected</button>
-    <button type="button" onclick="openMoveSelectedDialog()">Move selected</button>
   </form>
-  <button onclick="clearSelection()">Cancel</button>
 </div>
 
 <div id="gallery-grid">
@@ -96,6 +94,40 @@
     <button type="button" class="btn-danger" onclick="confirmDeleteSelected()">Delete</button>
     <button type="button" onclick="document.getElementById('delete-selected-dialog').close()">Cancel</button>
   </div>
+</dialog>
+
+<!-- Tag dialog (shared by Tag all and Tag selected) -->
+<dialog id="batch-tag-dialog">
+  <p>
+    <span id="batch-tag-scope-label">Tag</span>
+    <strong id="batch-tag-count-display"></strong>
+    <span id="batch-tag-noun"></span>
+  </p>
+  <form id="batch-tag-form" onsubmit="event.preventDefault(); confirmBatchTag();">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+    <input type="hidden" name="scope" id="batch-tag-scope">
+    <div class="field batch-tag-radios">
+      <label><input type="radio" name="op" value="add" checked> Add tags</label>
+      <label><input type="radio" name="op" value="remove"> Remove tags</label>
+    </div>
+    <div class="field" style="position:relative">
+      <label>Tags (space-separated, <code>category:name</code> for non-general)</label>
+      <input type="text" name="tags" id="batch-tag-input" class="upload-wide-input" data-multi-tags="1"
+             placeholder="Add tag… (category:name or plain name)" autocomplete="off"
+             hx-get="/internal/tags/suggest"
+             hx-trigger="input changed delay:200ms"
+             hx-target="#batch-tag-suggest"
+             hx-swap="innerHTML"
+             hx-vals='js:{tag: document.getElementById("batch-tag-input").value.split(/\s+/).pop()}'
+             onkeydown="handleSuggestKey(event, 'batch-tag-suggest', 'batch-tag-input')">
+      <div id="batch-tag-suggest" class="suggest-dropdown tag-suggest-dropdown"></div>
+    </div>
+    <div id="batch-tag-flash"></div>
+    <div class="dialog-actions">
+      <button type="submit">Apply</button>
+      <button type="button" onclick="document.getElementById('batch-tag-dialog').close()">Cancel</button>
+    </div>
+  </form>
 </dialog>
 
 <!-- Move selected dialog -->
@@ -219,6 +251,106 @@ function confirmMoveSelected() {
     }
   }).catch(function() {
     if (flash) flash.innerHTML = '<div class="flash flash-err">Move request failed.</div>';
+  });
+}
+
+// Open the Tag dialog scoped to the current search. The match count is read
+// from the same #result-count span the Delete-all dialog uses, and the
+// scope/op fields are reset so reopening keeps the dialog clean.
+function openTagSearchDialog() {
+  var rcEl = document.querySelector('.result-count');
+  var n = 0;
+  if (rcEl) {
+    var m = rcEl.textContent.match(/(\d+)/);
+    if (m) n = parseInt(m[1], 10);
+  }
+  resetBatchTagDialog();
+  document.getElementById('batch-tag-scope').value = 'search';
+  document.getElementById('batch-tag-scope-label').textContent = 'Tag';
+  document.getElementById('batch-tag-count-display').textContent = n;
+  document.getElementById('batch-tag-noun').textContent = (n === 1 ? 'image' : 'images') + ' in current search';
+  document.getElementById('batch-tag-dialog').showModal();
+  document.getElementById('batch-tag-input').focus();
+}
+
+// Open the Tag dialog scoped to the checked thumbnails. Mirrors openTagSearchDialog
+// but reads ids from .thumb-checkbox:checked at submit time.
+function openTagSelectedDialog() {
+  var checked = document.querySelectorAll('.thumb-checkbox:checked');
+  if (checked.length === 0) return;
+  resetBatchTagDialog();
+  document.getElementById('batch-tag-scope').value = 'selection';
+  document.getElementById('batch-tag-scope-label').textContent = 'Tag';
+  document.getElementById('batch-tag-count-display').textContent = checked.length;
+  document.getElementById('batch-tag-noun').textContent = 'selected ' + (checked.length === 1 ? 'image' : 'images');
+  document.getElementById('batch-tag-dialog').showModal();
+  document.getElementById('batch-tag-input').focus();
+}
+
+function resetBatchTagDialog() {
+  var input = document.getElementById('batch-tag-input');
+  if (input) input.value = '';
+  var sg = document.getElementById('batch-tag-suggest');
+  if (sg) sg.innerHTML = '';
+  var flash = document.getElementById('batch-tag-flash');
+  if (flash) flash.innerHTML = '';
+  var add = document.querySelector('#batch-tag-form input[name="op"][value="add"]');
+  if (add) add.checked = true;
+}
+
+function confirmBatchTag() {
+  var form = document.getElementById('batch-tag-form');
+  if (!form) return;
+  var scope = document.getElementById('batch-tag-scope').value;
+  var op = (form.querySelector('input[name="op"]:checked') || {}).value;
+  var tags = (document.getElementById('batch-tag-input').value || '').trim();
+  var flash = document.getElementById('batch-tag-flash');
+  if (flash) flash.innerHTML = '';
+  if (!tags) {
+    if (flash) flash.innerHTML = '<div class="flash flash-err">No tags provided.</div>';
+    return;
+  }
+  var csrfEl = form.querySelector('[name="_csrf"]');
+  var csrf = csrfEl ? csrfEl.value : '';
+  var parts = ['_csrf=' + encodeURIComponent(csrf),
+               'scope=' + encodeURIComponent(scope),
+               'op=' + encodeURIComponent(op),
+               'tags=' + encodeURIComponent(tags)];
+  if (scope === 'search') {
+    var si = document.getElementById('search-input');
+    var q = si ? si.value : '';
+    var sortEl = document.getElementById('search-sort');
+    var orderEl = document.querySelector('#search-form select[name="order"]');
+    parts.push('q=' + encodeURIComponent(q));
+    parts.push('sort=' + encodeURIComponent(sortEl ? sortEl.value : 'newest'));
+    parts.push('order=' + encodeURIComponent(orderEl ? orderEl.value : 'desc'));
+  } else {
+    var checked = document.querySelectorAll('.thumb-checkbox:checked');
+    if (checked.length === 0) {
+      if (flash) flash.innerHTML = '<div class="flash flash-err">No images selected.</div>';
+      return;
+    }
+    Array.prototype.forEach.call(checked, function(cb) {
+      parts.push('ids=' + encodeURIComponent(cb.value));
+    });
+  }
+  fetch('/internal/batch-tag', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRF-Token': csrf},
+    body: parts.join('&')
+  }).then(function(res) {
+    if (res.ok) {
+      document.getElementById('batch-tag-dialog').close();
+      if (scope === 'selection') clearSelection();
+      _pendingGalleryReload = true;
+      refreshJobStatus();
+    } else {
+      res.text().then(function(t) {
+        if (flash) flash.innerHTML = t || '<div class="flash flash-err">Tag operation failed.</div>';
+      });
+    }
+  }).catch(function() {
+    if (flash) flash.innerHTML = '<div class="flash flash-err">Request failed.</div>';
   });
 }
 

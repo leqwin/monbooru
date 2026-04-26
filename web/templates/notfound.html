@@ -1,0 +1,13 @@
+{{define "notfound.html"}}
+{{template "layout_head" .}}
+<div id="sidebar-inner"></div>
+{{template "layout_mid" .}}
+
+<div id="notfound-page">
+  <h2>404 - not found</h2>
+  <p class="field-hint">The page or image you asked for doesn't exist (anymore).</p>
+  <p><a href="/">← Back to gallery</a></p>
+</div>
+
+{{template "layout_end" .}}
+{{end}}

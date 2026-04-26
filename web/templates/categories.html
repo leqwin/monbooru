@@ -46,6 +46,8 @@
           <button class="btn-danger btn-sm btn-delete-category"
                   data-id="{{.ID}}" data-name="{{.Name}}"
                   data-csrf="{{$csrf}}">×</button>
+          {{else}}
+          <span class="field-hint">(built-in)</span>
           {{end}}
         </td>
       </tr>

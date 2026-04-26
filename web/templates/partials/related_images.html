@@ -7,7 +7,7 @@
     <a href="/images/{{.ID}}?ref={{$.SourceID}}&back_q={{$.BackQuery}}&back_sort={{$.BackSort}}&back_order={{$.BackOrder}}{{if $.BackPage}}&back_page={{$.BackPage}}{{end}}{{if $.BackSeed}}&back_seed={{$.BackSeed}}{{end}}"
        class="related-mini-card" title="Image {{.ID}}">
       <img src="/thumbnails/{{$.ActiveGallery}}/{{.ID}}.jpg" alt="image {{.ID}}" loading="lazy"
-           onerror="this.parentElement.innerHTML='?'">
+           onerror="this.parentElement.innerHTML='<span class=thumb-fail title=&quot;preview unavailable&quot;>?</span>'">
     </a>
     {{end}}
   </div>

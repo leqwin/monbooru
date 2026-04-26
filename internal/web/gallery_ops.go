@@ -312,17 +312,66 @@ func (s *Server) gallerySwitchHandler(w http.ResponseWriter, r *http.Request) {
 // settingsGallery*Post handlers write a flash on error and fire HX-Refresh on
 // success. The refresh reloads the whole page, so a success-path flash would
 // never render; the page itself is the confirmation.
+//
+// The Add form accepts an optional file upload; when present the new gallery
+// is created first and then ImportGallery is called against it, so the user
+// can spin up a populated gallery in one step. ImportGallery refuses the
+// active and default gallery as targets, but a freshly-added one is neither,
+// so the import is always permitted. On import failure the gallery stays in
+// place (empty) - the user can retry from its row or delete it.
 func (s *Server) settingsGalleriesPost(w http.ResponseWriter, r *http.Request) {
-	if !parseFormOK(w, r) {
+	// The form ships as multipart/form-data so the optional `import_file`
+	// field rides along; cap the body to match the standalone import flow.
+	const maxImport = 16 << 30
+	r.Body = http.MaxBytesReader(w, r.Body, maxImport)
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		writeFlash(w, "err", "bad form data: "+err.Error())
 		return
 	}
-	name := r.FormValue("name")
-	path := r.FormValue("gallery_path")
+	name := strings.TrimSpace(r.FormValue("name"))
+	path := strings.TrimSpace(r.FormValue("gallery_path"))
 	if err := s.AddGallery(name, path); err != nil {
 		writeFlash(w, "err", err.Error())
 		return
 	}
-	w.Header().Set("HX-Refresh", "true")
+
+	// Optional import. The file field is named to match the standalone
+	// import dialog (`import_file` here vs `file` there) so the form layout
+	// stays clear at-a-glance: name / path / optional import_file.
+	file, fh, err := r.FormFile("import_file")
+	if err == http.ErrMissingFile {
+		// No import - switch to the new gallery so creating a gallery
+		// behaves like importing into one (which already calls SwitchGallery).
+		if switchErr := s.SwitchGallery(name); switchErr != nil {
+			logx.Infof("gallery %q: post-add switch skipped: %v", name, switchErr)
+		}
+		writeFlash(w, "ok", "Gallery "+name+" added.")
+		return
+	}
+	if err != nil {
+		writeFlash(w, "err", "Gallery created. Import failed reading upload: "+err.Error())
+		return
+	}
+	defer file.Close()
+	if fh.Size == 0 {
+		if switchErr := s.SwitchGallery(name); switchErr != nil {
+			logx.Infof("gallery %q: post-add switch skipped: %v", name, switchErr)
+		}
+		writeFlash(w, "ok", "Gallery "+name+" added.")
+		return
+	}
+	format := formatFromExt(fh.Filename)
+	if format == "" {
+		writeFlash(w, "err", "Gallery created. Import failed: file must be .db, .json, or .zip.")
+		return
+	}
+	// ImportGallery itself calls SwitchGallery on success, so the gallery
+	// becomes active without an extra step here.
+	if err := s.ImportGallery(name, format, file); err != nil {
+		writeFlash(w, "err", "Gallery created. Import failed: "+err.Error())
+		return
+	}
+	writeFlash(w, "ok", "Gallery "+name+" added and imported.")
 }
 
 func (s *Server) settingsGalleryRenamePost(w http.ResponseWriter, r *http.Request) {

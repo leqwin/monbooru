@@ -465,7 +465,8 @@ func (h *Handler) searchImages(w http.ResponseWriter, r *http.Request) {
 
 	expr, parseErr := search.Parse(queryStr)
 	if parseErr != nil {
-		logx.Warnf("searchImages parse: %v", parseErr)
+		apiError(w, http.StatusBadRequest, "invalid_request", "invalid search query: "+parseErr.Error())
+		return
 	}
 	sq := search.Query{
 		Expr:  expr,
@@ -536,25 +537,33 @@ func (h *Handler) addImageTags(w http.ResponseWriter, r *http.Request) {
 	}
 	source := strings.TrimSpace(body.Source)
 
+	var tagWarnings []string
 	for _, tagName := range body.Tags {
 		catID, bareName, err := h.resolveCategoryTag(g, tagName)
 		if err != nil {
-			logx.Warnf("api addImageTags resolve %q: %v", tagName, err)
+			tagWarnings = append(tagWarnings, "tag "+tagName+": "+err.Error())
 			continue
 		}
 		tag, err := g.TagSvc.GetOrCreateTag(bareName, catID)
 		if err != nil {
-			logx.Warnf("api addImageTags GetOrCreate: %v", err)
+			tagWarnings = append(tagWarnings, "tag "+tagName+": "+err.Error())
 			continue
 		}
 		if err := g.TagSvc.AddTagToImageFromTagger(id, tag.ID, false, nil, source); err != nil {
-			logx.Warnf("api addImageTags AddTag: %v", err)
+			tagWarnings = append(tagWarnings, "tag "+tagName+": "+err.Error())
 		}
 	}
 
 	resp, err := h.buildImageResponse(g, id)
 	if err != nil {
 		apiError(w, http.StatusNotFound, "not_found", "image not found")
+		return
+	}
+	if len(tagWarnings) > 0 {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"tags":         resp.Tags,
+			"tag_warnings": tagWarnings,
+		})
 		return
 	}
 	writeJSON(w, http.StatusOK, resp.Tags)

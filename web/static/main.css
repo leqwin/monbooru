@@ -471,6 +471,13 @@ button.footer-gallery:hover { color: var(--fg); }
   justify-content: center;
   color: var(--fg-dim);
   font-size: 24px;
+  cursor: help;
+}
+/* related-images mini-grid uses a smaller `?` glyph; the cursor signal
+   plus the title attribute on hover is the same as .thumb-placeholder. */
+.thumb-fail {
+  color: var(--fg-dim);
+  cursor: help;
 }
 
 .thumb-overlay {
@@ -552,6 +559,9 @@ button.footer-gallery:hover { color: var(--fg); }
   margin-bottom: 12px;
 }
 #batch-bar.visible { display: flex; }
+#batch-delete-form { display: flex; gap: 8px; flex: 1; }
+.batch-bar-right { margin-left: auto; }
+.batch-bar-rest { margin-left: 24px; }
 
 /* Detail page */
 .detail-main {
@@ -899,7 +909,7 @@ dialog .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
   line-height: 1.4;
 }
 .nav-arrow:hover { color: var(--fg); border-color: var(--fg-dim); text-decoration: none; }
-.back-link { color: var(--fg-dim); font-size: 13px; text-decoration: none; }
+.back-link { color: var(--fg-dim); font-size: 13px; text-decoration: none; flex-shrink: 0; }
 .back-link:hover { color: var(--fg); }
 .detail-actions { display: flex; gap: 8px; align-items: center; }
 .detail-filename {
@@ -908,6 +918,7 @@ dialog .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
+  flex: 1;
 }
 .btn-autotag {
   color: var(--indigo);
@@ -937,6 +948,7 @@ dialog .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
   margin-bottom: 16px;
 }
 .detail-img {
+  min-width: 200px;
   max-width: 100%;
   max-height: 70vh;
   display: inline-block;
@@ -958,6 +970,7 @@ dialog .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
 .gen-details summary:hover { color: var(--fg); }
 .gen-meta { margin-top: 8px; }
 .gen-text { white-space: pre-wrap; font-family: monospace; font-size: 11px; margin: 0; max-height: 200px; overflow-y: auto; }
+.code-block { background: var(--bg-alt, #1a1a1a); border: 1px solid var(--border); padding: 6px 8px; margin: 4px 0 8px; font-size: 11px; white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; }
 .node-list-details { margin-top: 8px; }
 .node-list { max-height: 400px; overflow-y: auto; margin-top: 6px; font-size: 11px; }
 .node-entry { border-top: 1px solid var(--border); padding: 4px 0; }
@@ -1029,6 +1042,17 @@ dialog .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
   background: var(--bg);
 }
 .btn-warning:hover { background: var(--warning); color: var(--bg); border-color: var(--warning); }
+/* Subdued sibling of .btn-warning. Same hue, smaller weight, dim border;
+   used for the partial-removal buttons next to the wide "Remove all
+   tags" so a slip is less likely to nuke the wrong subset. */
+.btn-warning-subtle {
+  color: var(--warning);
+  border-color: var(--border);
+  background: var(--bg);
+  font-size: 11px;
+  padding: 2px 6px;
+}
+.btn-warning-subtle:hover { border-color: var(--warning); }
 .btn-success {
   color: var(--success);
   border-color: var(--success);
@@ -1049,7 +1073,17 @@ dialog .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
 }
 .tag-item::before { content: "["; }
 .tag-item::after  { content: "]"; }
-.tag-chip-name { color: inherit; text-decoration: none; }
+.tag-item { max-width: 100%; }
+.tag-chip-name {
+  color: inherit;
+  text-decoration: none;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+  vertical-align: bottom;
+}
 .tag-chip-name:hover { text-decoration: underline; }
 .auto-badge { font-size: 10px; color: var(--fg-dim); border: 1px solid var(--border); padding: 0 2px; margin-left: 2px; }
 .auto-conf { font-size: 10px; color: var(--fg-dim); margin-left: 2px; }
@@ -1140,8 +1174,8 @@ dialog .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
   gap: 6px;
 }
 .detail-meta-nav { display: flex; gap: 8px; align-items: center; }
-.detail-pos { color: var(--fg-dim); font-size: 13px; white-space: nowrap; }
-.detail-nav-sep { color: var(--fg-dim); font-size: 13px; user-select: none; }
+.detail-pos { color: var(--fg-dim); font-size: 13px; white-space: nowrap; flex-shrink: 0; }
+.detail-nav-sep { color: var(--fg-dim); font-size: 13px; user-select: none; flex-shrink: 0; }
 
 /* Detail sidebar inner */
 .detail-sidebar-inner { padding: 8px 0; }
@@ -1178,10 +1212,15 @@ dialog .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
 .gallery-switch-list li { padding: 4px 0; }
 .gallery-switch-current { color: var(--fg-dim); }
 
-.add-gallery-form { display: grid; grid-template-columns: 8em minmax(18em, 30em); gap: 4px 8px; align-items: center; max-width: 40em; }
-.add-gallery-form .field { display: contents; }
-.add-gallery-form .field label { color: var(--fg-dim); font-size: 13px; }
-.add-gallery-form button[type=submit] { grid-column: 2; justify-self: start; margin-top: 4px; }
+.add-gallery-form { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: flex-end; }
+.add-gallery-form .field { margin-bottom: 0; min-width: 0; }
+.add-gallery-form .field-name        { flex: 1 1 8em; }
+.add-gallery-form .field-gallery-path{ flex: 2 1 16em; }
+.add-gallery-form .field-import-file { flex: 1 1 14em; }
+.add-gallery-form .field label { color: var(--fg-dim); font-size: 11px; }
+.add-gallery-form .field input[type="text"], .add-gallery-form .field input[type="file"] { width: 100%; max-width: none; box-sizing: border-box; height: 28px; line-height: 20px; padding: 3px 8px; }
+.add-gallery-form .field input[type="file"] { padding: 3px 4px; font-size: 12px; }
+.add-gallery-form button[type=submit] { flex: 0 0 auto; height: 28px; box-sizing: border-box; }
 
 .btn-set-default { color: #aa66cc; border-color: #aa66cc; }
 .btn-set-default:hover { color: #c99bdd; border-color: #c99bdd; }
@@ -1363,6 +1402,11 @@ dialog .field input[type="text"].upload-wide-input { width: 100%; min-width: 420
 
 /* Field hint text */
 .field-hint { font-size: 11px; color: var(--fg-dim); margin: 4px 0 8px; }
+
+/* Batch tag dialog: radios on one line so the dialog stays small. Overrides
+   the default block-level .field label stacking. */
+.batch-tag-radios { display: flex; gap: 12px; }
+.batch-tag-radios label { display: inline; margin-bottom: 0; }
 
 /* Settings sub sections */
 .settings-sub { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); }
