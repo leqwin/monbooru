@@ -6,7 +6,9 @@
             hx-delete="/images/{{.ImageID}}/tags"
             hx-target="#image-tags"
             hx-swap="outerHTML"
-            hx-headers='{"X-CSRF-Token":"{{.CSRFToken}}"}'>Remove all tags</button>
+            hx-headers='{"X-CSRF-Token":"{{.CSRFToken}}"}'
+            hx-confirm="Remove all tags from this image?"
+            data-confirm-ok="Remove">Remove all tags</button>
     {{end}}
     {{if .HasUserTags}}
     <button class="btn-warning-subtle"
@@ -41,7 +43,7 @@
       <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
       <div class="field" style="position:relative">
         <input type="text" name="folder" id="move-image-folder" class="upload-wide-input"
-               placeholder="e.g. april/15 (blank = gallery root)" autocomplete="off"
+               placeholder="Destination path... (blank = gallery root)" autocomplete="off"
                hx-get="/internal/folders/suggest"
                hx-trigger="input changed delay:200ms"
                hx-target="#move-image-suggest"

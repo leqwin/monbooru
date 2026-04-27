@@ -629,13 +629,8 @@ func (s *Server) base(r *http.Request, nav, title string) baseData {
 	if cx != nil {
 		degraded = cx.Degraded
 		visible, _ = cx.VisibleCount()
-		if cx.DB != nil {
-			// Both queries are covered by existing partial indexes and run
-			// in sub-millisecond time on realistic libraries. Errors are
-			// swallowed: the footer shows 0 rather than blocking the page.
-			cx.DB.Read.QueryRow(`SELECT COUNT(*) FROM tags WHERE is_alias = 0`).Scan(&tagCount) //nolint:errcheck
-			cx.DB.Read.QueryRow(`SELECT COUNT(*) FROM saved_searches`).Scan(&savedCount)       //nolint:errcheck
-		}
+		tagCount, _ = cx.TagCount()
+		savedCount, _ = cx.SavedCount()
 	}
 	// Copy the gallery list so template rendering never dereferences the map
 	// under a concurrent mutation (the middleware lock is scoped to the

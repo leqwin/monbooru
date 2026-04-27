@@ -115,7 +115,7 @@ If no tagger is enabled, auto-tagging is simply disabled. The rest of the app wo
 
 The default image is CPU-only (~210 MB). For GPU inference, switch to the `-cuda` image (~2.3 GB), pass the GPU into the container the usual way, then enable **Settings → Auto-Tagger → Use GPU (CUDA)** (or set `MONBOORU_TAGGER_USE_CUDA=true`).
 
-The current mode (GPU or CPU) is shown as a badge in the Auto-Tagger section. The `-cuda` image also runs on CPU when the toggle is off, so switching between the two does not require a rebuild. Worker count is configurable in Settings (default 16); increase it on GPU if preprocessing becomes the bottleneck.
+The current mode (GPU or CPU) is shown as a badge in the Auto-Tagger section. The `-cuda` image also runs on CPU when the toggle is off, so switching between the two does not require a rebuild. Worker count is configurable in Settings (default 8); increase it on GPU if preprocessing becomes the bottleneck.
 
 ---
 

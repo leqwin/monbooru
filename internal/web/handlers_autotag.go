@@ -198,6 +198,56 @@ func (s *Server) uploadPost(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`<div class="flash ` + cssClass + `">` + html.EscapeString(msg) + `</div>`))
 }
 
+// bulkTaggerRow is one row in the Settings → Tag actions → Bulk
+// auto-tagging actions table. CanRun is true for taggers currently
+// enabled+available (full action set); when false we still surface the
+// row so the user can clean leftover image_tags rows produced by that
+// tagger before disabling/removing it.
+type bulkTaggerRow struct {
+	Name   string
+	CanRun bool
+}
+
+// bulkTaggerRows returns the taggers shown in the Bulk auto-tagging
+// actions table: every enabled+available tagger (with all three actions),
+// plus every disabled / unavailable / orphaned tagger that still has
+// at least one auto-tag row in image_tags (with Remove only). Orphaned
+// names — present in image_tags but no longer in the configured tagger
+// set — are surfaced so users can purge them after a folder rename.
+func (s *Server) bulkTaggerRows(discovered []tagger.TaggerStatus) []bulkTaggerRow {
+	canRun := map[string]bool{}
+	var out []bulkTaggerRow
+	for _, t := range discovered {
+		if t.Enabled && t.Available {
+			canRun[t.Name] = true
+			out = append(out, bulkTaggerRow{Name: t.Name, CanRun: true})
+		}
+	}
+	autoNames := map[string]bool{}
+	if cx := s.Active(); cx != nil {
+		if names, err := cx.AutoTaggerNames(); err == nil {
+			for _, n := range names {
+				autoNames[n] = true
+			}
+		}
+	}
+	configured := map[string]bool{}
+	for _, t := range discovered {
+		configured[t.Name] = true
+		if canRun[t.Name] || !autoNames[t.Name] {
+			continue
+		}
+		out = append(out, bulkTaggerRow{Name: t.Name, CanRun: false})
+	}
+	for n := range autoNames {
+		if configured[n] {
+			continue
+		}
+		out = append(out, bulkTaggerRow{Name: n, CanRun: false})
+	}
+	return out
+}
+
 // removeAutotaggedPost deletes every auto-tagged image_tags row across the
 // library. An optional tagger_name form field restricts the deletion to
 // rows produced by that one tagger.

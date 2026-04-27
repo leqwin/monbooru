@@ -100,6 +100,8 @@ CREATE INDEX IF NOT EXISTS idx_tags_active_usage ON tags(usage_count DESC, name)
 CREATE INDEX IF NOT EXISTS idx_image_tags_tag    ON image_tags(tag_id);
 CREATE INDEX IF NOT EXISTS idx_image_tags_image  ON image_tags(image_id);
 CREATE INDEX IF NOT EXISTS idx_image_tags_user_tag ON image_tags(tag_id) WHERE is_auto = 0;
+CREATE INDEX IF NOT EXISTS idx_image_tags_auto_tagger ON image_tags(tagger_name)
+    WHERE is_auto = 1 AND tagger_name IS NOT NULL AND tagger_name != '';
 CREATE INDEX IF NOT EXISTS idx_images_sha256     ON images(sha256);
 CREATE INDEX IF NOT EXISTS idx_images_ingested   ON images(ingested_at DESC);
 CREATE INDEX IF NOT EXISTS idx_images_favorited  ON images(is_favorited);
@@ -108,6 +110,7 @@ CREATE INDEX IF NOT EXISTS idx_images_missing    ON images(is_missing);
 CREATE INDEX IF NOT EXISTS idx_images_folder     ON images(folder_path);
 CREATE INDEX IF NOT EXISTS idx_images_folder_visible ON images(folder_path) WHERE is_missing = 0;
 CREATE INDEX IF NOT EXISTS idx_images_filesize_visible ON images(file_size DESC, id DESC) WHERE is_missing = 0;
+CREATE INDEX IF NOT EXISTS idx_images_ingested_visible ON images(ingested_at DESC, id DESC) WHERE is_missing = 0;
 CREATE INDEX IF NOT EXISTS idx_image_paths_image ON image_paths(image_id);
 CREATE INDEX IF NOT EXISTS idx_sd_metadata_genhash      ON sd_metadata(generation_hash)      WHERE generation_hash IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_comfyui_metadata_genhash ON comfyui_metadata(generation_hash) WHERE generation_hash IS NOT NULL;

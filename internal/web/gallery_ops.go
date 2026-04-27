@@ -268,6 +268,39 @@ func (s *Server) galleryList() []config.Gallery {
 	return out
 }
 
+// galleryRow pairs a gallery with cheap per-gallery counts surfaced in the
+// Settings → Galleries table. Counts read from the gallery's own DB so
+// inactive galleries report their own state rather than the active one.
+type galleryRow struct {
+	config.Gallery
+	Images int
+	Tags   int
+}
+
+// galleryRows returns the same name-sorted list as galleryList plus per-row
+// counts. Counts come from the per-gallery atomic caches so the warm steady
+// state is two atomic loads per row; cold rows pay one query each, then stay
+// warm until InvalidateCaches drops them. Errors degrade to zero so a
+// transient failure on one gallery never blanks the whole table.
+func (s *Server) galleryRows() []galleryRow {
+	galleries := s.galleryList()
+	out := make([]galleryRow, len(galleries))
+	for i, g := range galleries {
+		out[i].Gallery = g
+		cx := s.contexts[g.Name]
+		if cx == nil || cx.DB == nil {
+			continue
+		}
+		if n, err := cx.VisibleCount(); err == nil {
+			out[i].Images = n
+		}
+		if n, err := cx.TagCount(); err == nil {
+			out[i].Tags = n
+		}
+	}
+	return out
+}
+
 func writeFlash(rw http.ResponseWriter, class, msg string) {
 	rw.Write([]byte(`<div class="flash flash-` + class + `">` + html.EscapeString(msg) + `</div>`))
 }

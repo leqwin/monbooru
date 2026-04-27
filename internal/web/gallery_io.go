@@ -20,10 +20,8 @@ import (
 
 // safeArchiveDest joins a relative archive path under root and returns the
 // resolved absolute destination, rejecting paths that escape root through
-// `..` segments or absolute roots. Replaces the older
-// `strings.Contains(rel, "..")` substring check, which both rejected legal
-// names like "foo..bar.ext" and didn't actually exercise the same path
-// containment helper the upload/move flows use.
+// `..` segments or absolute roots. Routes through gallery.PathInside so a
+// legal name like "foo..bar.ext" isn't caught by a `..` substring check.
 func safeArchiveDest(root, rel string) (string, error) {
 	if filepath.IsAbs(rel) {
 		return "", fmt.Errorf("absolute archive entry path")
@@ -312,8 +310,7 @@ func (s *Server) ExportGalleryArchive(name, format string, w io.Writer) error {
 // as `gallery/<relative_path>` entries in zw, using zip.Store for the
 // already-compressed image payloads. A missing root surfaces as an empty
 // section (degraded mode) so the inner db/json still rides along for a
-// headers-only restore. Shared by ExportGalleryArchive and
-// ExportGalleryLight, which used to carry near-identical walkers.
+// headers-only restore.
 func writeGalleryFilesToZip(zw *zip.Writer, galleryPath string) error {
 	if _, err := os.Stat(galleryPath); err != nil {
 		logx.Warnf("export: gallery path %q unreadable; archive will not include gallery files: %v", galleryPath, err)

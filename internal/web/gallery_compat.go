@@ -7,20 +7,15 @@ import (
 	"github.com/leqwin/monbooru/internal/web/compatibility"
 )
 
-// detectCompatFormat is a thin alias over compatibility.Detect kept so
-// the call sites in gallery_io.go and gallery_merge.go stay readable.
-// Importing the compatibility package here also runs its providers'
-// init() functions, registering the per-application translators.
+// Importing the compatibility package here runs its providers' init()
+// functions, registering the per-application translators.
 func detectCompatFormat(files []*zip.File) string {
 	return compatibility.Detect(files)
 }
 
-// replaceFromCompatArchive translates a foreign-format zip and routes
-// through the same wipe+extract+ingest path the native light replacer
-// uses. The compat package's Manifest/Files shapes mirror lightManifest
-// 1:1, so the boundary conversion is a single field copy. The provider
-// name (`format`) is propagated to applyLightReplace so the detail page
-// credits the originating app instead of the generic "import" bucket.
+// replaceFromCompatArchive routes a foreign-format zip through the native
+// light-replacer path. format is propagated to applyLightReplace so the
+// detail page credits the originating app instead of the generic "import".
 func replaceFromCompatArchive(files []*zip.File, format, dbPath, thumbsPath, galleryPath string) error {
 	result, err := compatibility.Translate(files, format)
 	if err != nil {
@@ -33,9 +28,8 @@ func replaceFromCompatArchive(files []*zip.File, format, dbPath, thumbsPath, gal
 	)
 }
 
-// mergeFromCompatArchive translates a foreign-format zip and applies its
-// records through the existing zip-merge path: tags onto pre-existing
-// SHAs, ingest-and-tag for new SHAs that ride along as zip entries.
+// mergeFromCompatArchive routes a foreign-format zip through the zip-merge
+// path: tags onto existing SHAs, ingest-and-tag for new SHAs.
 func mergeFromCompatArchive(cx *galleryCtx, files []*zip.File, format string) error {
 	result, err := compatibility.Translate(files, format)
 	if err != nil {
@@ -57,10 +51,8 @@ func mergeFromCompatArchive(cx *galleryCtx, files []*zip.File, format string) er
 	return nil
 }
 
-// toLightManifest converts the compat-package shape into the
-// lightManifest the apply path consumes. Version is stamped to the
-// current galleryExportVersion since the in-memory translation has no
-// notion of an on-disk format version.
+// Version is stamped to galleryExportVersion since the in-memory
+// translation has no notion of an on-disk format version.
 func toLightManifest(m compatibility.Manifest) lightManifest {
 	out := lightManifest{
 		Version: galleryExportVersion,
@@ -76,8 +68,6 @@ func toLightManifest(m compatibility.Manifest) lightManifest {
 	return out
 }
 
-// translatedFilesFromCompat sorts the {rel → file} map deterministically
-// and rewraps it as the slice applyLightReplace consumes.
 func translatedFilesFromCompat(in map[string]*zip.File) []translatedFile {
 	rels := make([]string, 0, len(in))
 	for r := range in {

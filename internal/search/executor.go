@@ -64,15 +64,29 @@ func Execute(database *db.DB, q Query) (*models.SearchResult, error) {
 		}
 	}
 
+	// Unfiltered visible gallery: pin the dedicated partial sort indexes.
+	// Without the hint SQLite picks idx_images_missing then materialises a
+	// temp B-tree for ORDER BY, costing ~30 ms at page 1 and ~200 ms deep
+	// in the offset on a 100K-image library.
+	indexHint := ""
+	if q.Expr == nil && !hasMissingFilter {
+		switch q.Sort {
+		case "filesize":
+			indexHint = " INDEXED BY idx_images_filesize_visible"
+		case "", "newest":
+			indexHint = " INDEXED BY idx_images_ingested_visible"
+		}
+	}
+
 	dataSQL := fmt.Sprintf(
 		`SELECT i.id, i.sha256, i.canonical_path, i.folder_path, i.file_type,
 		        i.width, i.height, i.file_size, i.is_missing, i.is_favorited,
 		        i.auto_tagged_at, i.source_type, i.origin, i.ingested_at
-		 FROM images i
+		 FROM images i%s
 		 WHERE %s
 		 %s
 		 LIMIT ? OFFSET ?`,
-		where, orderClause,
+		indexHint, where, orderClause,
 	)
 
 	dataArgs := make([]any, len(args), len(args)+2)
@@ -369,6 +383,15 @@ func SidebarTagsWithGlobalCount(database *db.DB, imageIDs []int64) ([]models.Tag
 	return out, rows.Err()
 }
 
+// suggestCandidateCap bounds how many prefix/substring-matching tags are
+// considered before computing the per-tag combination count. On 100k+
+// galleries a popular prefix like "re" can match thousands of tags;
+// without a cap the executor joined image_tags ⋈ images for every match
+// just to discard all but the top 10. Bounding by global usage_count is
+// safe because COUNT(DISTINCT i.id) ≤ tags.usage_count, so a candidate
+// outside the cap cannot outrank one inside it on combo count.
+const suggestCandidateCap = 200
+
 // SuggestTagsWithFilter returns up to limit tags matching prefix that
 // also co-occur with at least one image matching expr. UsageCount on
 // each returned tag carries the combination count (expr AND the
@@ -391,43 +414,61 @@ func SuggestTagsWithFilter(database *db.DB, expr Expr, prefix, categoryName stri
 	}
 
 	// Two-pass: prefix matches first (ranked by combo count), then
-	// substring matches until limit is hit.
+	// substring matches until limit is hit. Each pass first picks up to
+	// suggestCandidateCap tags by global usage_count, then computes the
+	// combination count only for that bounded set.
 	prefixPat := prefix + "%"
 	substrPat := "%" + prefix + "%"
 
-	baseSQL := `SELECT t.id, t.name, tc.name, tc.color, COUNT(DISTINCT i.id) AS combo
-	            FROM tags t
-	            JOIN tag_categories tc ON tc.id = t.category_id
-	            JOIN image_tags it ON it.tag_id = t.id
-	            JOIN images i ON i.id = it.image_id
-	            WHERE t.is_alias = 0
-	              AND t.name LIKE ?
-	              %s
-	              AND %s
-	            GROUP BY t.id
+	// ctx materialises the context-image set once via the same WHERE
+	// clause Execute uses; each candidate then probes image_tags filtered
+	// by `image_id IN ctx` instead of joining images and running an
+	// EXISTS subquery per row. The image_tags PK makes (image_id, tag_id)
+	// unique, so COUNT(it.image_id) within a group fixed at one tag_id
+	// equals the original COUNT(DISTINCT i.id).
+	baseSQL := `WITH ctx AS (
+	                SELECT i.id AS image_id FROM images i WHERE %s
+	            ),
+	            cand AS (
+	                SELECT id, category_id, usage_count
+	                FROM tags
+	                WHERE is_alias = 0
+	                  AND name LIKE ?
+	                  %s
+	                ORDER BY usage_count DESC
+	                LIMIT ?
+	            )
+	            SELECT c.id, t.name, tc.name, tc.color, COUNT(it.image_id) AS combo
+	            FROM cand c
+	            JOIN tags t ON t.id = c.id
+	            JOIN tag_categories tc ON tc.id = c.category_id
+	            JOIN image_tags it ON it.tag_id = c.id
+	                              AND it.image_id IN (SELECT image_id FROM ctx)
+	            GROUP BY c.id
 	            HAVING combo > 0
-	            ORDER BY combo DESC, t.usage_count DESC
+	            ORDER BY combo DESC, c.usage_count DESC
 	            LIMIT ?`
 
 	catClause := ""
 	catArgs := []any{}
 	if categoryName != "" {
-		catClause = "AND tc.name = ?"
+		catClause = "AND category_id = (SELECT id FROM tag_categories WHERE name = ?)"
 		catArgs = []any{categoryName}
 	}
 
 	run := func(pat string, prior []models.Tag, remaining int, nameNotLike string) ([]models.Tag, error) {
 		extra := catClause
-		qargs := make([]any, 0, 3+len(args)+len(catArgs))
+		qargs := make([]any, 0, 4+len(args)+len(catArgs))
+		qargs = append(qargs, args...)
 		qargs = append(qargs, pat)
 		qargs = append(qargs, catArgs...)
 		if nameNotLike != "" {
-			extra = extra + " AND t.name NOT LIKE ?"
+			extra = extra + " AND name NOT LIKE ?"
 			qargs = append(qargs, nameNotLike)
 		}
-		qargs = append(qargs, args...)
+		qargs = append(qargs, suggestCandidateCap)
 		qargs = append(qargs, remaining)
-		rows, err := database.Read.Query(fmt.Sprintf(baseSQL, extra, where), qargs...)
+		rows, err := database.Read.Query(fmt.Sprintf(baseSQL, where, extra), qargs...)
 		if err != nil {
 			return prior, err
 		}

@@ -1,5 +1,36 @@
 # Changelog
 
+## [v1.4.1] - 2026-04-27
+
+### Added
+- Tag names accept `?`, `>`, `<`, `=`, `^`.
+- Enabled auto-taggers whose model files have gone missing are auto-disabled at startup instead of failing silently at inference time.
+- Settings → Auto-Tagger: per-tagger download instructions. 
+- Detail page: "Remove all tags" confirms before running.
+- Auto-tag picker on the detail and upload pages is a radio list rather than a dropdown.
+
+### Changed
+- Schedule defaults: `run_auto_taggers` is `false` so freshly-installed instances don't auto-run taggers on every cycle; 
+- Gallery import dialog defaults to Merge.
+- Settings → General reshuffled into side-by-side rows: Files / UI, GPU / Parallel workers, Password / API token; Schedule checks render as a 2x3 grid; tags filters are clickable buttons rather than dropdowns; the tags-page filter submit is inline with a shorter label; auto-tagger actions are grouped under "Tag actions"; copy in Tag actions and Auto-Tagger sections is tightened.
+- Galleries table: Info column renamed to Content and the saved-count dropped; per-action columns; actions right-aligned; Add gallery moved into a dialog opened by a button below the table.
+- Auto-Tagger table: Disable column renamed to Enable; Downloaded moved left of Enabled; Status column width reserved so active and default badges stay side by side; tagger name column widened, status columns shrunk; bulk auto-tagging columns right-aligned and compacted.
+- Detail page: columns stack on narrow viewports; "Tag all" is hidden while thumbnails are selected; a separator sits between Tag selected and Move selected.
+- Upload UI: drop zone enlarged with bottom fields split into two columns; drop-zone prompt centered; reset button subdued.
+- Built-in category Action cells expose a labelled Delete button instead of a generic icon.
+- Dialog placeholders and microcopy refreshed across the UI; the batch-tag dialog placeholder spells out Add/remove.
+
+### Fixed
+- Auto-Tagger: emoticon-only labels (`:3`, `:o`-style) survive `sanitizeLabel` instead of being dropped; `_unsupported_<idx>` placeholder labels are filtered at inference time.
+- Recalc and merge-general-tags invalidate the affected caches so stale counts don't survive a tag rewrite.
+- Search-suggest hover is suppressed until the mouse moves, so the dropdown no longer lights up under a stationary cursor.
+- Upload action buttons stay fixed when the auto-tag picker reveals, instead of shifting.
+- Add-gallery dialog fields stack on their own lines so long paths don't overflow.
+- Settings action headers align with the buttons in their column; settings tables wrap in a scroll container so they stay readable on narrow viewports.
+
+### Internal
+- Performance: per-gallery distinct-tagger and tag/saved-count caches; `SuggestTagsWithFilter` materialises its filter context once and caps candidate tags before combo counting; partial index pinned for the unfiltered-newest sort; partial index on `is_missing=0`; index on `image_tags(tagger_name)` for `is_auto=1` distinct scans; lazy sidebar URLs carry page IDs; the `DiscoverTaggers` walk is shared between settings and bulk-tagger rows.
+
 ## [v1.4.0] - 2026-04-26
 
 ### Added

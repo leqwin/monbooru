@@ -23,8 +23,9 @@ var (
 	// Allowed tag name characters. The colon is kept despite doubling
 	// as the category:tag separator; the parser falls back to a literal
 	// tag when the prefix is neither a filter keyword nor a known
-	// category.
-	tagNameRe = regexp.MustCompile(`^[a-z0-9_()!@#$.~+:\-]+$`)
+	// category. The emoticon-set (?, <, >, =, ^) is permitted so names
+	// like `>_<`, `=3`, `<3`, `^_^`, and `nani?` round-trip end-to-end.
+	tagNameRe = regexp.MustCompile(`^[a-z0-9_()!@#$.~+:?<>=^\-]+$`)
 
 	// #rgb or #rrggbb. Anything else gets ZgotmplZ'd in the template's
 	// CSS context, so reject it up front with a useful error.
@@ -360,18 +361,21 @@ func ValidateTagName(name string) (string, error) {
 	}
 
 	if !tagNameRe.MatchString(name) {
-		return "", fmt.Errorf("%w: contains invalid characters (allowed: a-z 0-9 _ ( ) ! @ # $ . ~ + - :)", ErrInvalidTagName)
+		return "", fmt.Errorf("%w: contains invalid characters (allowed: a-z 0-9 _ ( ) ! @ # $ . ~ + - : ? < > = ^)", ErrInvalidTagName)
 	}
 
-	allPunct := true
+	// Reject names made entirely of separator-class punctuation (e.g. "---")
+	// while still admitting emoticon-only tags like ">_<", "^_^", "<3".
+	hasContent := false
 	for _, r := range name {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			allPunct = false
+		if unicode.IsLetter(r) || unicode.IsDigit(r) ||
+			r == '?' || r == '<' || r == '>' || r == '=' || r == '^' {
+			hasContent = true
 			break
 		}
 	}
-	if allPunct {
-		return "", fmt.Errorf("%w: name must contain at least one letter or digit", ErrInvalidTagName)
+	if !hasContent {
+		return "", fmt.Errorf("%w: name must contain at least one letter, digit, or emoticon character", ErrInvalidTagName)
 	}
 
 	return name, nil

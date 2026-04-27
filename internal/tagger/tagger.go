@@ -51,6 +51,12 @@ var wd14RatingTags = map[string]bool{
 type tagLabel struct {
 	name       string
 	categoryID int // WD14 category ID
+	// placeholder is true when the label-file row had no usable name
+	// (e.g. only punctuation) and the slot was filled with an
+	// `_unsupported_<idx>` stub to keep the slice index aligned with
+	// the model's output channels. Inference must skip these slots so
+	// the stub never becomes a real tag.
+	placeholder bool
 }
 
 // IsAvailable reports whether at least one enabled tagger has its files.
@@ -317,10 +323,13 @@ func RunWithTaggers(ctx context.Context, database *db.DB, cfg *config.Config, id
 				if idx >= len(lt.labels) {
 					continue
 				}
+				label := lt.labels[idx]
+				if label.placeholder {
+					continue
+				}
 				if score < threshold || score < 0.001 {
 					continue
 				}
-				label := lt.labels[idx]
 				var catID int64
 				if wd14RatingTags[label.name] {
 					catID = metaCatID
@@ -718,9 +727,11 @@ func loadLabelsCSV(f io.Reader) ([]tagLabel, error) {
 			continue
 		}
 		catID, _ := strconv.Atoi(strings.TrimSpace(rec[2]))
+		name, ok := sanitizeLabel(rec[1], len(labels))
 		labels = append(labels, tagLabel{
-			name:       sanitizeLabel(rec[1], len(labels)),
-			categoryID: catID,
+			name:        name,
+			categoryID:  catID,
+			placeholder: !ok,
 		})
 	}
 	return labels, nil
@@ -735,9 +746,11 @@ func loadLabelsText(f io.Reader) ([]tagLabel, error) {
 		if strings.TrimSpace(raw) == "" {
 			continue
 		}
+		name, ok := sanitizeLabel(raw, len(labels))
 		labels = append(labels, tagLabel{
-			name:       sanitizeLabel(raw, len(labels)),
-			categoryID: 0,
+			name:        name,
+			categoryID:  0,
+			placeholder: !ok,
 		})
 	}
 	if err := scanner.Err(); err != nil {
@@ -752,8 +765,10 @@ func loadLabelsText(f io.Reader) ([]tagLabel, error) {
 // trip unchanged. A label that empties out becomes
 // `_unsupported_<idx>` so the slice index keeps its 1:1 mapping with
 // the model's output channels - dropping the entry would shift every
-// later label and corrupt downstream attribution.
-func sanitizeLabel(raw string, idx int) string {
+// later label and corrupt downstream attribution. The returned bool is
+// false in that fallback case so callers can flag the slot as a
+// placeholder and skip emission at inference time.
+func sanitizeLabel(raw string, idx int) (string, bool) {
 	s := strings.ToLower(strings.TrimSpace(raw))
 	var b strings.Builder
 	b.Grow(len(s))
@@ -763,7 +778,9 @@ func sanitizeLabel(raw string, idx int) string {
 			r >= '0' && r <= '9',
 			r == '_' || r == '(' || r == ')' || r == '!' ||
 				r == '@' || r == '#' || r == '$' || r == '.' ||
-				r == '~' || r == '+' || r == '-' || r == ':':
+				r == '~' || r == '+' || r == '-' || r == ':' ||
+				r == '?' || r == '<' || r == '>' || r == '=' ||
+				r == '^':
 			b.WriteRune(r)
 		case r == ' ' || r == '\t':
 			b.WriteByte('_')
@@ -773,17 +790,21 @@ func sanitizeLabel(raw string, idx int) string {
 	if len(out) > 200 {
 		out = out[:200]
 	}
-	hasAlphanum := false
+	// Match ValidateTagName: emoticon-only labels like "??", ">_<", "^_^"
+	// are accepted alongside alphanumeric ones; only pure separator-class
+	// punctuation drops to the placeholder slot.
+	hasContent := false
 	for _, r := range out {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
-			hasAlphanum = true
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') ||
+			r == '?' || r == '<' || r == '>' || r == '=' || r == '^' {
+			hasContent = true
 			break
 		}
 	}
-	if !hasAlphanum {
-		return fmt.Sprintf("_unsupported_%d", idx)
+	if !hasContent {
+		return fmt.Sprintf("_unsupported_%d", idx), false
 	}
-	return out
+	return out, true
 }
 
 // sharedLibPath finds the ONNX Runtime shared library. ORT_LIB_PATH

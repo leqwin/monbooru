@@ -58,9 +58,9 @@
       {{if .RefURL}}
       <a href="{{.RefURL}}" class="back-link">← Previous image</a>
       {{else if or .BackQuery .BackSort}}
-      <a href="/?q={{.BackQuery}}&sort={{.BackSort}}&order={{.BackOrder}}{{if .BackPage}}&page={{.BackPage}}{{end}}{{if .BackSeed}}&seed={{.BackSeed}}{{end}}#img-{{.Image.ID}}" class="back-link">← Images</a>
+      <a href="/?q={{.BackQuery}}&sort={{.BackSort}}&order={{.BackOrder}}{{if .BackPage}}&page={{.BackPage}}{{end}}{{if .BackSeed}}&seed={{.BackSeed}}{{end}}#img-{{.Image.ID}}" class="back-link">← Back</a>
       {{else}}
-      <a href="/#img-{{.Image.ID}}" class="back-link">← Images</a>
+      <a href="/#img-{{.Image.ID}}" class="back-link">← Back</a>
       {{end}}
       {{if gt .PositionTotal 0}}
       <span class="detail-nav-sep">·</span>
@@ -107,13 +107,10 @@
           hx-swap="innerHTML"
           hx-headers='{"X-CSRF-Token":"{{.CSRFToken}}"}'
           hx-on::after-request="if(event.detail.successful)document.getElementById('autotag-dialog').close()">
-      <p>Auto-tag this image. Pick which tagger to run (blank = all enabled taggers).</p>
+      <p>Auto-tag this image. Pick which tagger to run.</p>
       <div class="field">
-        <label>Tagger</label>
-        <select name="tagger_name" class="autotag-picker">
-          <option value="">All enabled taggers</option>
-          {{range .EnabledTaggers}}<option value="{{.Name}}">{{.Name}}</option>{{end}}
-        </select>
+        <label style="display:block"><input type="radio" name="tagger_name" value="" checked> All enabled taggers</label>
+        {{range .EnabledTaggers}}<label style="display:block"><input type="radio" name="tagger_name" value="{{.Name}}"> {{.Name}}</label>{{end}}
       </div>
       <div class="dialog-actions">
         <button type="submit">Auto-tag</button>
@@ -150,7 +147,7 @@
                 hx-target="#image-tags"
                 hx-swap="outerHTML">
             <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
-            <input type="text" name="tag" id="tag-input" placeholder="Add tag… (category:name or plain name)" autocomplete="off"
+            <input type="text" name="tag" id="tag-input" placeholder="Add tag(s)..." autocomplete="off"
                    hx-get="/internal/tags/suggest"
                    hx-trigger="input changed delay:200ms"
                    hx-target="#tag-suggest-dropdown"

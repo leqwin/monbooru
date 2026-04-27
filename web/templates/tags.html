@@ -1,28 +1,49 @@
 {{define "tags.html"}}
 {{template "layout_head" .}}
+{{$prefix := .Prefix}}
+{{$sort := .Sort}}
+{{$catID := .CategoryID}}
+{{$origin := .Origin}}
 <div id="sidebar-inner">
   <div class="sidebar-section">
     <h3>Filter</h3>
-    <form hx-get="/tags" hx-target="body" hx-push-url="true">
-      <input type="text" name="q" value="{{.Prefix}}" placeholder="Search tags…">
-      <select name="sort">
-        <option value="usage" {{if eq (.Sort) "usage"}}selected{{end}}>By usage</option>
-        <option value="name"  {{if eq (.Sort) "name"}}selected{{end}}>By name</option>
-      </select>
-      <select name="cat">
-        <option value="">All categories</option>
-        {{range .Categories}}
-        <option value="{{.ID}}" {{if eq (printf "%d" .ID) $.CategoryID}}selected{{end}}>{{.Name}}</option>
-        {{end}}
-      </select>
-      <select name="origin">
-        <option value=""      {{if eq (.Origin) ""}}selected{{end}}>All origins</option>
-        <option value="user"  {{if eq (.Origin) "user"}}selected{{end}}>User</option>
-        <option value="auto"  {{if eq (.Origin) "auto"}}selected{{end}}>Auto</option>
-        <option value="alias" {{if eq (.Origin) "alias"}}selected{{end}}>Alias</option>
-      </select>
-      <button type="submit">Filter</button>
+    <form action="/tags" method="get" class="tags-filter-row">
+      <input type="text" name="q" value="{{$prefix}}" placeholder="Search tags…">
+      <input type="hidden" name="sort"   value="{{$sort}}">
+      <input type="hidden" name="cat"    value="{{$catID}}">
+      <input type="hidden" name="origin" value="{{$origin}}">
+      <button type="submit">OK</button>
     </form>
+
+    <div class="filter-group">
+      <span class="filter-label">Sort</span>
+      <a class="filter-btn{{if eq $sort "usage"}} active{{end}}"
+         href="/tags?q={{$prefix}}&sort=usage&cat={{$catID}}&origin={{$origin}}">By usage</a>
+      <a class="filter-btn{{if eq $sort "name"}} active{{end}}"
+         href="/tags?q={{$prefix}}&sort=name&cat={{$catID}}&origin={{$origin}}">By name</a>
+    </div>
+
+    <div class="filter-group">
+      <span class="filter-label">Category</span>
+      <a class="filter-btn{{if eq $catID ""}} active{{end}}"
+         href="/tags?q={{$prefix}}&sort={{$sort}}&cat=&origin={{$origin}}">All</a>
+      {{range .Categories}}
+      <a class="filter-btn{{if eq (printf "%d" .ID) $catID}} active{{end}}"
+         href="/tags?q={{$prefix}}&sort={{$sort}}&cat={{.ID}}&origin={{$origin}}">{{.Name}}</a>
+      {{end}}
+    </div>
+
+    <div class="filter-group">
+      <span class="filter-label">Origin</span>
+      <a class="filter-btn{{if eq $origin ""}} active{{end}}"
+         href="/tags?q={{$prefix}}&sort={{$sort}}&cat={{$catID}}&origin=">All</a>
+      <a class="filter-btn{{if eq $origin "user"}} active{{end}}"
+         href="/tags?q={{$prefix}}&sort={{$sort}}&cat={{$catID}}&origin=user">User</a>
+      <a class="filter-btn{{if eq $origin "auto"}} active{{end}}"
+         href="/tags?q={{$prefix}}&sort={{$sort}}&cat={{$catID}}&origin=auto">Auto</a>
+      <a class="filter-btn{{if eq $origin "alias"}} active{{end}}"
+         href="/tags?q={{$prefix}}&sort={{$sort}}&cat={{$catID}}&origin=alias">Alias</a>
+    </div>
   </div>
 </div>
 {{template "layout_mid" .}}

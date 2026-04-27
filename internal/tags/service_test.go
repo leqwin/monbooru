@@ -782,6 +782,19 @@ func TestValidateTagName_ValidSpecialChars(t *testing.T) {
 	}
 }
 
+// Emoticon-class characters round-trip so booru-style tags like ">_<", "<3",
+// "=3", "^_^", and "nani?" are usable end-to-end.
+func TestValidateTagName_AllowsEmoticonChars(t *testing.T) {
+	_, svc := setupTestDB(t)
+	catID := generalCategoryID(t, svc)
+
+	for _, name := range []string{">_<", "<3", "=3", "=w=", "^_^", "^o^", "nani?", ":<", ":>"} {
+		if _, err := svc.GetOrCreateTag(name, catID); err != nil {
+			t.Errorf("GetOrCreateTag(%q) error: %v", name, err)
+		}
+	}
+}
+
 func TestDeleteCategory_DeletesEmpty(t *testing.T) {
 	_, svc := setupTestDB(t)
 

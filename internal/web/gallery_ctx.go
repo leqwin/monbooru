@@ -33,14 +33,16 @@ type galleryCtx struct {
 	// invalidation is needed.
 	GeneralCategoryID int64
 
-	// Per-gallery caches of queries that scan every visible image. All three
-	// are nilled by InvalidateCaches after any ingest/delete/missing-toggle
-	// so the next reader re-populates from SQLite. visibleCount holds the
-	// count of is_missing=0 images as a pointer so "not cached" is
-	// distinguishable from "cached zero".
-	folderTree   atomic.Pointer[[]gallery.FolderNode]
-	sourceCounts atomic.Pointer[gallery.SourceCounts]
-	visibleCount atomic.Pointer[int]
+	// Per-gallery caches of queries that scan every visible image. All are
+	// nilled by InvalidateCaches after any ingest/delete/missing-toggle so
+	// the next reader re-populates from SQLite. The int counts are pointers
+	// so "not cached" is distinguishable from "cached zero".
+	folderTree      atomic.Pointer[[]gallery.FolderNode]
+	sourceCounts    atomic.Pointer[gallery.SourceCounts]
+	visibleCount    atomic.Pointer[int]
+	tagCount        atomic.Pointer[int]
+	savedCount      atomic.Pointer[int]
+	autoTaggerNames atomic.Pointer[[]string]
 
 	watcherCancel context.CancelFunc
 	watcherDone   chan struct{}
@@ -48,7 +50,9 @@ type galleryCtx struct {
 
 // InvalidateCaches drops the folder-tree and visible-count caches. Call after
 // any mutation that changes which images are visible (ingest, delete, sync
-// mark-missing, watcher remove).
+// mark-missing, watcher remove). Tag and saved-search counts are dropped too:
+// the same image-mutation paths typically change those, and the Settings
+// page's per-gallery cells need them fresh.
 func (cx *galleryCtx) InvalidateCaches() {
 	if cx == nil {
 		return
@@ -56,6 +60,9 @@ func (cx *galleryCtx) InvalidateCaches() {
 	cx.folderTree.Store(nil)
 	cx.sourceCounts.Store(nil)
 	cx.visibleCount.Store(nil)
+	cx.tagCount.Store(nil)
+	cx.savedCount.Store(nil)
+	cx.autoTaggerNames.Store(nil)
 }
 
 // FolderTree returns the cached tree or builds one on demand. The cache is
@@ -101,17 +108,82 @@ func (cx *galleryCtx) VisibleCount() (int, error) {
 	return n, nil
 }
 
-// warmCaches primes FolderTree, SourceCounts, and VisibleCount so the first
-// user-facing sidebar/gallery request doesn't pay the cold aggregation scan.
-// Errors are ignored: the lazy path in each accessor still recomputes on
-// demand if the warm failed.
+// TagCount returns the cached count of non-alias tags or queries it on demand.
+// Surfaced in the Settings galleries table and the layout footer; uncached the
+// query runs once per render per gallery, which adds up on multi-gallery boxes.
+func (cx *galleryCtx) TagCount() (int, error) {
+	if p := cx.tagCount.Load(); p != nil {
+		return *p, nil
+	}
+	var n int
+	if err := cx.DB.Read.QueryRow(`SELECT COUNT(*) FROM tags WHERE is_alias = 0`).Scan(&n); err != nil {
+		return 0, err
+	}
+	cx.tagCount.Store(&n)
+	return n, nil
+}
+
+// SavedCount returns the cached count of saved searches or queries it on
+// demand. Same role as TagCount on the Settings page and footer.
+func (cx *galleryCtx) SavedCount() (int, error) {
+	if p := cx.savedCount.Load(); p != nil {
+		return *p, nil
+	}
+	var n int
+	if err := cx.DB.Read.QueryRow(`SELECT COUNT(*) FROM saved_searches`).Scan(&n); err != nil {
+		return 0, err
+	}
+	cx.savedCount.Store(&n)
+	return n, nil
+}
+
+// AutoTaggerNames returns the sorted set of distinct tagger_name values
+// found in image_tags (auto rows only). Cached because the Settings page
+// renders this on every load and the underlying DISTINCT scan dominates
+// response time on multi-million-row image_tags tables. Invalidated by
+// InvalidateCaches alongside the other per-gallery aggregations.
+func (cx *galleryCtx) AutoTaggerNames() ([]string, error) {
+	if p := cx.autoTaggerNames.Load(); p != nil {
+		return *p, nil
+	}
+	rows, err := cx.DB.Read.Query(
+		`SELECT DISTINCT tagger_name FROM image_tags
+		 WHERE is_auto = 1 AND tagger_name IS NOT NULL AND tagger_name != ''
+		 ORDER BY tagger_name`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		names = append(names, n)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	cx.autoTaggerNames.Store(&names)
+	return names, nil
+}
+
+// warmCaches primes the per-gallery aggregations so the first user-facing
+// sidebar/gallery/settings request doesn't pay the cold scan. Errors are
+// ignored: the lazy path in each accessor still recomputes on demand if the
+// warm failed.
 func (cx *galleryCtx) warmCaches() {
 	if cx == nil || cx.DB == nil {
 		return
 	}
-	cx.FolderTree()   //nolint:errcheck
-	cx.SourceCounts() //nolint:errcheck
-	cx.VisibleCount() //nolint:errcheck
+	cx.FolderTree()      //nolint:errcheck
+	cx.SourceCounts()    //nolint:errcheck
+	cx.VisibleCount()    //nolint:errcheck
+	cx.TagCount()        //nolint:errcheck
+	cx.SavedCount()      //nolint:errcheck
+	cx.AutoTaggerNames() //nolint:errcheck
 }
 
 // openGalleryCtx opens the DB and creates the thumbnails directory. The

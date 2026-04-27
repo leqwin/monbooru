@@ -109,9 +109,6 @@ button:hover { border-color: var(--accent); }
 #footer a { color: var(--fg-dim); }
 #footer a:hover { color: var(--fg); }
 .footer-gallery { color: var(--accent); }
-/* The gallery name doubles as the switcher when more than one gallery is
-   configured; strip the browser's <button> chrome so it reads as status
-   text, not a chunky toolbar button. */
 button.footer-gallery {
   background: none;
   border: none;
@@ -128,9 +125,6 @@ button.footer-gallery:hover { color: var(--fg); }
   gap: 12px;
   margin-left: 16px;
 }
-/* Symmetric vertical padding + a transparent border-bottom keep every nav
-   item the same height, so recoloring the border on .active highlights the
-   current page without shifting the baseline text up or down. */
 #nav a {
   color: var(--fg-dim);
   font-size: 13px;
@@ -383,8 +377,6 @@ button.footer-gallery:hover { color: var(--fg); }
   flex: 1;
   min-width: 0;
 }
-/* A ">" command-prompt glyph anchored inside the search input reinforces
-   that the field takes a query expression, not a free-text filter. */
 .search-input-wrap::before {
   content: ">";
   position: absolute;
@@ -422,9 +414,6 @@ button.footer-gallery:hover { color: var(--fg); }
 .result-count { color: var(--fg); }
 #save-search-area { flex-shrink: 0; }
 
-/* Status bar: a single-line context strip under the gallery header and a
-   matching treatment on the detail topbar. Dashed bottom border is the
-   shared signature. */
 .status-bar {
   font-size: 12px;
   color: var(--fg-dim);
@@ -473,8 +462,6 @@ button.footer-gallery:hover { color: var(--fg); }
   font-size: 24px;
   cursor: help;
 }
-/* related-images mini-grid uses a smaller `?` glyph; the cursor signal
-   plus the title attribute on hover is the same as .thumb-placeholder. */
 .thumb-fail {
   color: var(--fg-dim);
   cursor: help;
@@ -559,9 +546,9 @@ button.footer-gallery:hover { color: var(--fg); }
   margin-bottom: 12px;
 }
 #batch-bar.visible { display: flex; }
-#batch-delete-form { display: flex; gap: 8px; flex: 1; }
+#batch-delete-form { display: flex; gap: 8px; flex: 1; align-items: center; }
 .batch-bar-right { margin-left: auto; }
-.batch-bar-rest { margin-left: 24px; }
+.batch-bar-sep { display: inline-block; width: 1px; height: 22px; background: var(--fg-dim); margin: 0 12px; align-self: center; flex-shrink: 0; }
 
 /* Detail page */
 .detail-main {
@@ -585,11 +572,8 @@ button.footer-gallery:hover { color: var(--fg); }
 }
 .meta-table th { color: var(--fg-dim); width: 100px; word-break: normal; }
 
-/* Dotted-leader layout for key-value rows (label + value separated by a
-   dotted fill, BIOS/manpage style). Scoped to rows with a <th> so the
-   aliases table (two <td> cells per row, no <th>) keeps its bordered
-   tabular layout. The <th> and <td> sit on an opaque --bg background that
-   hides the absolutely-positioned dots where the label and value sit. */
+/* Dotted-leader rows. :has(> th) skips the aliases table so it keeps the
+   bordered layout; cells sit on opaque --bg to mask the underlying dots. */
 .meta-table tr:has(> th) {
   display: flex;
   align-items: baseline;
@@ -724,7 +708,9 @@ details summary:hover { color: var(--fg); }
   border: 1px solid var(--border);
   padding: 16px;
   margin-bottom: 16px;
+  min-width: 0;
 }
+.table-scroll { overflow-x: auto; max-width: 100%; }
 .settings-section h2 {
   font-size: 14px;
   margin-bottom: 12px;
@@ -746,6 +732,19 @@ details summary:hover { color: var(--fg); }
 
 .settings-sub { margin-bottom: 12px; }
 .settings-sub h4 { font-size: 12px; color: var(--fg-dim); margin-bottom: 6px; }
+.settings-cols { display: flex; gap: 24px; flex-wrap: wrap; }
+.settings-cols > .settings-sub { flex: 1 1 240px; min-width: 0; }
+.settings-cols > .field { flex: 1 1 220px; min-width: 0; }
+.schedule-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 24px; margin-bottom: 12px; }
+.schedule-grid .field { margin-bottom: 0; }
+
+.tags-filter-row { display: flex; gap: 4px; align-items: center; padding: 0 8px; }
+.tags-filter-row input[type="text"] { flex: 1; min-width: 0; }
+.filter-group { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin: 6px 0; padding: 0 8px; }
+.filter-group .filter-label { font-size: 11px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: 1px; margin-right: 6px; flex-basis: 100%; }
+.filter-btn { font-size: 12px; padding: 2px 8px; border: 1px solid var(--border); background: var(--bg-input); color: var(--fg-dim); text-decoration: none; line-height: 1.4; }
+.filter-btn:hover { color: var(--fg); border-color: var(--fg-dim); text-decoration: none; }
+.filter-btn.active { color: var(--accent); border-color: var(--accent); }
 .field { margin-bottom: 8px; }
 .field label { display: block; font-size: 12px; color: var(--fg-dim); margin-bottom: 2px; }
 .field input[type="text"], .field input[type="number"], .field input[type="password"] { width: 100%; max-width: 300px; }
@@ -825,14 +824,6 @@ dialog .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
   display: inline-block;
 }
 .source-badge-sub { color: var(--fg-dim); border-color: var(--border); }
-
-/* Detail page - two-column layout. Padding is deliberately omitted: the
-   surrounding #content already supplies 16px, so the search bar, topbar, and
-   right-column meta panel line up with the gallery frame (search bar left
-   edge matches the gallery's; meta panel right edge matches the topbar sync
-   button's). */
-#detail-page {
-}
 
 .detail-body {
   display: flex;
@@ -1027,9 +1018,6 @@ dialog .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
   cursor: pointer;
 }
 .btn-sm:hover { color: var(--fg); border-color: var(--fg-dim); }
-/* Destructive actions (.btn-danger) are solid-filled so they stand out
-   from the dark-surface borders of every other button. Hover inverts
-   back to the transparent/red-text form for a visible affordance. */
 .btn-danger {
   color: var(--bg);
   border-color: var(--error);
@@ -1042,9 +1030,7 @@ dialog .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
   background: var(--bg);
 }
 .btn-warning:hover { background: var(--warning); color: var(--bg); border-color: var(--warning); }
-/* Subdued sibling of .btn-warning. Same hue, smaller weight, dim border;
-   used for the partial-removal buttons next to the wide "Remove all
-   tags" so a slip is less likely to nuke the wrong subset. */
+/* Subdued so a slip next to "Remove all tags" doesn't nuke the wrong subset. */
 .btn-warning-subtle {
   color: var(--warning);
   border-color: var(--border);
@@ -1062,9 +1048,7 @@ dialog .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
 
 /* Tag list partial */
 .tag-list { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 10px; }
-/* Tag chip: [name×] with brackets colored by the li's inherited category
-   color. .auto-conf/.tag-remove-btn keep their explicit dim color so only
-   the link text + brackets carry the category hue. */
+/* Brackets via ::before/::after inherit the category color from the li. */
 .tag-item {
   display: inline-flex;
   align-items: center;
@@ -1148,6 +1132,11 @@ dialog .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
   text-align: left;
 }
 .suggest-item:hover { background: var(--bg-input); }
+/* After an htmx swap the cursor may already be over a freshly-rendered
+   suggestion; the JS-tagged `suggest-fresh` class suppresses :hover until
+   the user actually moves the mouse, so the item doesn't look "selected"
+   when only kbd-focused is honoured by Enter. */
+.suggest-dropdown.suggest-fresh .suggest-item:hover { background: var(--bg-surface); }
 .suggest-name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
 .suggest-count { color: var(--fg-dim); font-size: 11px; }
 
@@ -1203,24 +1192,75 @@ dialog .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
 .tagger-table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
 .tagger-table th { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); font-weight: normal; color: var(--fg-dim); }
 .tagger-table td { padding: 4px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+/* The Bulk auto-tagging table (in #tags, 4 cols): Tagger absorbs leftover;
+   Run untagged / Run all / Remove auto-tagged shrink to fit and right-align
+   so the action buttons cluster at the table edge instead of floating in
+   the middle of wide cells. */
+section#tags .tagger-table th:nth-child(2),
+section#tags .tagger-table td:nth-child(2),
+section#tags .tagger-table th:nth-child(3),
+section#tags .tagger-table td:nth-child(3),
+section#tags .tagger-table th:nth-child(4),
+section#tags .tagger-table td:nth-child(4) { width: 1%; white-space: nowrap; text-align: right; }
+/* Header padding matches the auto-tagger table so labels sit above
+   the button text rather than the button's outer border. */
+section#tags .tagger-table th:nth-child(2),
+section#tags .tagger-table th:nth-child(3),
+section#tags .tagger-table th:nth-child(4) { padding-right: 17px; }
+/* The Auto-Tagger configuration table (7 cols): Tagger absorbs leftover
+   horizontal space; Instructions / Downloaded / Enabled / Confidence
+   shrink to fit and stay left-aligned right after it; Enable / Delete
+   pin to the right edge with a fixed gap before them. */
+section#tagger .tagger-table th:nth-child(2),
+section#tagger .tagger-table td:nth-child(2),
+section#tagger .tagger-table th:nth-child(3),
+section#tagger .tagger-table td:nth-child(3),
+section#tagger .tagger-table th:nth-child(4),
+section#tagger .tagger-table td:nth-child(4),
+section#tagger .tagger-table th:nth-child(5),
+section#tagger .tagger-table td:nth-child(5) { width: 1%; white-space: nowrap; text-align: left; }
+section#tagger .tagger-table th:nth-child(6),
+section#tagger .tagger-table td:nth-child(6),
+section#tagger .tagger-table th:nth-child(7),
+section#tagger .tagger-table td:nth-child(7) { width: 1%; white-space: nowrap; text-align: right; }
+/* Visual gap between Confidence and the action columns. Relying on
+   table-layout: auto to distribute leftover between columns isn't
+   predictable across browsers, so use a fixed left padding instead. */
+section#tagger .tagger-table th:nth-child(6),
+section#tagger .tagger-table td:nth-child(6) { padding-left: 32px; }
+/* Header text aligns to the cell padding edge, but the button text is
+   offset further by the button's own border + horizontal padding. Pad
+   the header right edge to match so "Enable"/"Delete" line up vertically
+   with the button text below. 17px = 8px cell padding + 1px border +
+   8px btn-sm padding-right. */
+section#tagger .tagger-table th:nth-child(6),
+section#tagger .tagger-table th:nth-child(7) { padding-right: 17px; }
+/* Divider row between supported (catalog) and unsupported (user-only)
+   tagger rows. Reads as a quiet caption, not a data row. */
+section#tagger .tagger-table tr.tagger-sep td { color: var(--fg-dim); font-size: 12px; padding-top: 8px; }
 
 .gallery-table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
 .gallery-table th { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); font-weight: normal; color: var(--fg-dim); }
 .gallery-table td { padding: 4px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
 .gallery-table code { color: var(--fg-dim); font-size: 12px; }
+.gallery-info { color: var(--fg-dim); font-size: 11px; white-space: nowrap; }
+/* Reserve enough horizontal space in the Status column for "active" + "default"
+   to sit side by side, so the column width stays stable as that pair toggles. */
+.gallery-table .gallery-status-cell { white-space: nowrap; min-width: 120px; }
+/* Action columns (Switch, Set default, Rename, Export, Import, Delete) cluster
+   on the right edge: shrink to fit and right-align. Cols 1-4 take leftover. */
+.gallery-table th:nth-child(n+5),
+.gallery-table td:nth-child(n+5) { width: 1%; white-space: nowrap; text-align: right; }
+/* See the matching note on .tagger-table headers: pad the action-column
+   header right edge so the label sits directly above the button text. */
+.gallery-table th:nth-child(n+5) { padding-right: 17px; }
 .gallery-switch-list { list-style: none; padding: 0; margin: 0 0 12px 0; }
 .gallery-switch-list li { padding: 4px 0; }
 .gallery-switch-current { color: var(--fg-dim); }
 
-.add-gallery-form { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: flex-end; }
-.add-gallery-form .field { margin-bottom: 0; min-width: 0; }
-.add-gallery-form .field-name        { flex: 1 1 8em; }
-.add-gallery-form .field-gallery-path{ flex: 2 1 16em; }
-.add-gallery-form .field-import-file { flex: 1 1 14em; }
-.add-gallery-form .field label { color: var(--fg-dim); font-size: 11px; }
-.add-gallery-form .field input[type="text"], .add-gallery-form .field input[type="file"] { width: 100%; max-width: none; box-sizing: border-box; height: 28px; line-height: 20px; padding: 3px 8px; }
-.add-gallery-form .field input[type="file"] { padding: 3px 4px; font-size: 12px; }
-.add-gallery-form button[type=submit] { flex: 0 0 auto; height: 28px; box-sizing: border-box; }
+/* Add-gallery dialog uses the standard .field block layout (label on its own
+   line, input below, fields stacked) so each row reads cleanly inside the
+   modal instead of squeezing onto one wrapped strip. */
 
 .btn-set-default { color: #aa66cc; border-color: #aa66cc; }
 .btn-set-default:hover { color: #c99bdd; border-color: #c99bdd; }
@@ -1242,14 +1282,29 @@ dialog .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
 .upload-page .field input[type="text"].upload-wide-input { max-width: none; width: 100%; }
 dialog .field input[type="text"].upload-wide-input { width: 100%; min-width: 420px; max-width: none; }
 .upload-tags-wrap { position: relative; }
-.upload-actions { display: flex; gap: 8px; margin-top: 8px; }
+/* The action buttons sit in a third column so toggling the autotag picker
+   doesn't shift them - the grid row may grow taller, but their column stays
+   put on the right. */
+.upload-actions { display: flex; flex-direction: column; gap: 8px; }
 .upload-drop-zone {
   border: 1px dashed var(--border);
   padding: 12px;
   background: var(--bg-input);
+  min-height: 220px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+.upload-drop-prompt { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.upload-cols { display: grid; grid-template-columns: 1fr 1fr auto; gap: 16px; }
+.upload-col { min-width: 0; }
+@media (max-width: 700px) {
+  .upload-cols { grid-template-columns: 1fr; }
+  .upload-actions { flex-direction: row; }
 }
 .upload-drop-zone.drag-over { border-color: var(--fg); background: var(--bg); }
-.upload-drop-hint { color: var(--fg-dim); font-size: 12px; display: block; margin-bottom: 6px; }
+.upload-drop-hint { color: var(--fg-dim); font-size: 12px; }
 .upload-file-list { list-style: none; margin: 6px 0 0; padding: 0; font-size: 12px; color: var(--fg-dim); }
 .upload-file-list li { padding: 1px 0; }
 .related-images { margin-top: 12px; }
@@ -1297,6 +1352,16 @@ dialog .field input[type="text"].upload-wide-input { width: 100%; min-width: 420
 }
 
 /* Responsive */
+/* Detail page: stack the image column above the metadata column once the
+   meta panel (420px) plus the gap can no longer fit next to a usable image
+   width. Without this the meta panel overlaps the image area on narrow
+   viewports. */
+@media (max-width: 960px) {
+  .detail-body { flex-direction: column; }
+  .detail-meta-col { width: 100%; }
+  .detail-topbar-right { width: auto; }
+}
+
 @media (max-width: 768px) {
   #sidebar {
     display: none;
@@ -1371,6 +1436,7 @@ dialog .field input[type="text"].upload-wide-input { width: 100%; min-width: 420
 /* Save search area */
 #gallery-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 #save-search-area { margin-left: auto; }
+.save-search-terms { color: var(--accent); font-style: italic; }
 
 /* Search suggest dropdown (gallery search bar) */
 #search-suggest {

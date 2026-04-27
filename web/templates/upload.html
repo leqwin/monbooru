@@ -20,45 +20,53 @@
     <div class="field">
       <label>Files</label>
       <div id="upload-drop-zone" class="upload-drop-zone">
-        <span class="upload-drop-hint">Drop files here or use the button.</span>
-        <button type="button" id="upload-pick-btn" class="btn-sm">Choose files</button>
+        <div class="upload-drop-prompt">
+          <span class="upload-drop-hint">Drop files here or use the button.</span>
+          <button type="button" id="upload-pick-btn" class="btn-sm">Choose files</button>
+        </div>
         <input type="file" name="files" id="upload-file-input" multiple accept="{{.AcceptFileTypes}}" hidden>
         <ul id="upload-file-list" class="upload-file-list"></ul>
       </div>
     </div>
-    <div class="field">
-      <label>Destination folder (optional)</label>
-      <input type="text" name="folder" id="upload-folder-input" class="upload-wide-input" placeholder="e.g. april/15 (blank = gallery root)" autocomplete="off">
-      <span class="field-hint">Missing folders and subfolders are created automatically.</span>
-    </div>
-    <div class="field">
-      <label>Add the following tags to these images (optional, space-separated)</label>
-      <div class="upload-tags-wrap">
-        <input type="text" name="tags" id="upload-tags-input" class="upload-wide-input" data-multi-tags="1" placeholder="e.g. character:hakurei_reimu" autocomplete="off"
-               hx-get="/internal/tags/suggest"
-               hx-trigger="input changed delay:200ms"
-               hx-target="#upload-tags-suggest"
-               hx-swap="innerHTML"
-               hx-vals='js:{tag: document.getElementById("upload-tags-input").value.split(/\s+/).pop()}'
-               onkeydown="handleSuggestKey(event, 'upload-tags-suggest', 'upload-tags-input')">
-        <div id="upload-tags-suggest" class="suggest-dropdown tag-suggest-dropdown"></div>
+    <div class="upload-cols">
+      <div class="upload-col">
+        <div class="field">
+          <label>Destination folder (optional)</label>
+          <input type="text" name="folder" id="upload-folder-input" class="upload-wide-input" placeholder="Destination path... (leave blank for gallery root)" autocomplete="off">
+          <span class="field-hint">Missing folders and subfolders are created automatically.</span>
+        </div>
       </div>
-    </div>
-    <div class="field">
-      <label>
-        <input type="checkbox" name="autotag" id="upload-autotag"{{if not .TaggerAvailable}} disabled{{end}}>
-        Auto-tag uploaded files after upload{{if not .TaggerAvailable}} <span class="field-hint">(auto-tagger unavailable)</span>{{end}}
-      </label>
-      {{if .EnabledTaggers}}
-      <select name="tagger_name" id="upload-tagger-picker" class="autotag-picker" hidden>
-        <option value="">All enabled taggers</option>
-        {{range .EnabledTaggers}}<option value="{{.Name}}">{{.Name}}</option>{{end}}
-      </select>
-      {{end}}
-    </div>
-    <div class="upload-actions">
-      <button type="submit" id="upload-submit-btn">Upload</button>
-      <button type="reset" id="upload-reset-btn">Reset form</button>
+      <div class="upload-col">
+        <div class="field">
+          <label>Add the following tags to these images (optional, space-separated)</label>
+          <div class="upload-tags-wrap">
+            <input type="text" name="tags" id="upload-tags-input" class="upload-wide-input" data-multi-tags="1" placeholder="e.g. character:hakurei_reimu 1girl hair_bow" autocomplete="off"
+                   hx-get="/internal/tags/suggest"
+                   hx-trigger="input changed delay:200ms"
+                   hx-target="#upload-tags-suggest"
+                   hx-swap="innerHTML"
+                   hx-vals='js:{tag: document.getElementById("upload-tags-input").value.split(/\s+/).pop()}'
+                   onkeydown="handleSuggestKey(event, 'upload-tags-suggest', 'upload-tags-input')">
+            <div id="upload-tags-suggest" class="suggest-dropdown tag-suggest-dropdown"></div>
+          </div>
+        </div>
+        <div class="field">
+          <label>
+            <input type="checkbox" name="autotag" id="upload-autotag"{{if not .TaggerAvailable}} disabled{{end}}>
+            Auto-tag uploaded files after upload{{if not .TaggerAvailable}} <span class="field-hint">(auto-tagger unavailable)</span>{{end}}
+          </label>
+          {{if .EnabledTaggers}}
+          <div id="upload-tagger-picker" class="autotag-picker" hidden>
+            <label style="display:block"><input type="radio" name="tagger_name" value="" checked> All enabled taggers</label>
+            {{range .EnabledTaggers}}<label style="display:block"><input type="radio" name="tagger_name" value="{{.Name}}"> {{.Name}}</label>{{end}}
+          </div>
+          {{end}}
+        </div>
+      </div>
+      <div class="upload-actions">
+        <button type="submit" id="upload-submit-btn">Upload</button>
+        <button type="reset" id="upload-reset-btn" class="btn-sm">Reset form</button>
+      </div>
     </div>
   </form>
 

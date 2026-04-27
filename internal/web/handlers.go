@@ -229,6 +229,11 @@ func (s *Server) galleryHandler(w http.ResponseWriter, r *http.Request) {
 	// aggregation. Search/pagination HTMX responses still need the sidebar
 	// content in the same payload because gallery_htmx.html OOB-swaps it into
 	// the live page.
+	ids := make([]int64, 0, len(result.Results))
+	for _, img := range result.Results {
+		ids = append(ids, img.ID)
+	}
+
 	var (
 		sidebarTags   []models.Tag
 		folderTree    []gallery.FolderNode
@@ -236,10 +241,6 @@ func (s *Server) galleryHandler(w http.ResponseWriter, r *http.Request) {
 		savedSearches []models.SavedSearch
 	)
 	if htmxGridTarget {
-		ids := make([]int64, 0, len(result.Results))
-		for _, img := range result.Results {
-			ids = append(ids, img.ID)
-		}
 		sidebarTags, folderTree, sourceCounts, savedSearches = s.sidebarLoad(ids)
 	}
 
@@ -262,7 +263,7 @@ func (s *Server) galleryHandler(w http.ResponseWriter, r *http.Request) {
 		s.renderTemplate(w, "partials/gallery_htmx.html", data)
 		return
 	}
-	data.SidebarURL = buildSidebarURL(queryStr, sortStr, orderStr, pageStr, q.Get("seed"))
+	data.SidebarURL = buildSidebarURL(queryStr, sortStr, orderStr, pageStr, q.Get("seed"), ids)
 	s.renderTemplate(w, "gallery.html", data)
 }
 
@@ -322,51 +323,62 @@ func (s *Server) sidebarLoad(pageImageIDs []int64) ([]models.Tag, []gallery.Fold
 func (s *Server) gallerySidebar(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	queryStr := q.Get("q")
-	sortStr := q.Get("sort")
-	if sortStr == "" {
-		sortStr = "newest"
-	}
-	orderStr := q.Get("order")
-	if orderStr == "" {
-		orderStr = "desc"
-	}
-	page := 1
-	if p, err := strconv.Atoi(q.Get("page")); err == nil && p > 0 {
-		page = p
-	}
-	var randomSeed int64
-	if sortStr == "random" {
-		if seed, err := strconv.ParseInt(q.Get("seed"), 10, 64); err == nil {
-			randomSeed = seed
+
+	// galleryHandler piggy-backs the page's image IDs on the lazy-load URL
+	// so we don't re-run search.Execute just to enumerate them. A direct
+	// hit (no ids param at all) falls back to the search call so the
+	// endpoint still works on its own.
+	var ids []int64
+	if q.Has("ids") {
+		if raw := q.Get("ids"); raw != "" {
+			ids = make([]int64, 0, strings.Count(raw, ",")+1)
+			for _, s := range strings.Split(raw, ",") {
+				if id, err := strconv.ParseInt(s, 10, 64); err == nil {
+					ids = append(ids, id)
+				}
+			}
+		}
+	} else {
+		sortStr := q.Get("sort")
+		if sortStr == "" {
+			sortStr = "newest"
+		}
+		orderStr := q.Get("order")
+		if orderStr == "" {
+			orderStr = "desc"
+		}
+		page := 1
+		if p, err := strconv.Atoi(q.Get("page")); err == nil && p > 0 {
+			page = p
+		}
+		var randomSeed int64
+		if sortStr == "random" {
+			if seed, err := strconv.ParseInt(q.Get("seed"), 10, 64); err == nil {
+				randomSeed = seed
+			}
+		}
+		expr, _ := search.Parse(queryStr)
+		sq := search.Query{
+			Expr:       expr,
+			Sort:       sortStr,
+			Order:      orderStr,
+			RandomSeed: randomSeed,
+			Page:       page,
+			Limit:      s.cfg.UI.PageSize,
+			SkipCount:  true,
+		}
+		result, err := search.Execute(s.db(), sq)
+		if err != nil {
+			logx.Errorf("sidebar search: %v", err)
+			http.Error(w, "search error", http.StatusInternalServerError)
+			return
+		}
+		ids = make([]int64, 0, len(result.Results))
+		for _, img := range result.Results {
+			ids = append(ids, img.ID)
 		}
 	}
 
-	expr, _ := search.Parse(queryStr)
-	// Sidebar render only needs the page's image IDs to build per-page tag
-	// aggregation; Total is never surfaced. Skipping COUNT(*) cuts the work
-	// on filtered searches where the count pass is itself a full filter
-	// evaluation.
-	sq := search.Query{
-		Expr:       expr,
-		Sort:       sortStr,
-		Order:      orderStr,
-		RandomSeed: randomSeed,
-		Page:       page,
-		Limit:      s.cfg.UI.PageSize,
-		SkipCount:  true,
-	}
-
-	result, err := search.Execute(s.db(), sq)
-	if err != nil {
-		logx.Errorf("sidebar search: %v", err)
-		http.Error(w, "search error", http.StatusInternalServerError)
-		return
-	}
-
-	ids := make([]int64, 0, len(result.Results))
-	for _, img := range result.Results {
-		ids = append(ids, img.ID)
-	}
 	sidebarTags, folderTree, sourceCounts, savedSearches := s.sidebarLoad(ids)
 
 	s.renderTemplate(w, "partials/sidebar_content.html", map[string]any{
@@ -435,7 +447,11 @@ func (s *Server) sidebarBrowse(w http.ResponseWriter, r *http.Request) {
 // buildSidebarURL constructs the URL the #sidebar-inner placeholder hx-gets
 // on full-page gallery renders, mirroring buildGalleryURL's encoding style
 // so the sidebar handler sees the same q/sort/order/page/seed the page does.
-func buildSidebarURL(q, sort, order, page, seed string) string {
+// ids carries the page's image IDs as a comma-separated list so
+// gallerySidebar can skip re-running search.Execute. The param is always
+// set (even when empty) because absence is the signal for a direct URL hit
+// that must fall back to the search call.
+func buildSidebarURL(q, sort, order, page, seed string, ids []int64) string {
 	v := url.Values{}
 	if q != "" {
 		v.Set("q", q)
@@ -452,9 +468,14 @@ func buildSidebarURL(q, sort, order, page, seed string) string {
 	if seed != "" {
 		v.Set("seed", seed)
 	}
-	if len(v) == 0 {
-		return "/internal/sidebar"
+	var sb strings.Builder
+	for i, id := range ids {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteString(strconv.FormatInt(id, 10))
 	}
+	v.Set("ids", sb.String())
 	return "/internal/sidebar?" + v.Encode()
 }
 
@@ -1364,19 +1385,28 @@ func (s *Server) categoriesHandler(w http.ResponseWriter, r *http.Request) {
 	s.renderTemplate(w, "categories.html", data)
 }
 
-// catalogRow is the per-template render shape for a downloadable tagger.
-// Commands are precomputed server-side so the template stays free of shell
-// quoting concerns; both forms are passed since the user picks the right
-// one for their deployment shape (host vs docker exec).
-type catalogRow struct {
-	Name          string
-	Description   string
-	HostCommand   string
-	DockerCommand string
+// taggerRow is the per-template render shape for one row of the
+// Auto-Tagger settings table. It unifies installed taggers and catalog
+// ghosts so the template iterates a single list. Supported rows (i.e.
+// in the catalog) carry precomputed host + docker install snippets so
+// the Instructions cell can open a per-row dialog without the template
+// touching shell quoting.
+type taggerRow struct {
+	Name                string
+	Description         string
+	Available           bool
+	Reason              string
+	Enabled             bool
+	ConfidenceThreshold float64
+	Installed           bool
+	Supported           bool
+	HostCommand         string
+	DockerCommand       string
 }
 
 func (s *Server) settingsHandler(w http.ResponseWriter, r *http.Request) {
 	base := s.base(r, "settings", "Settings - Monbooru")
+	s.disableUnavailableTaggers()
 	taggers := tagger.AvailableTaggers(s.cfg)
 	enabledCount := 0
 	for _, t := range taggers {
@@ -1384,46 +1414,76 @@ func (s *Server) settingsHandler(w http.ResponseWriter, r *http.Request) {
 			enabledCount++
 		}
 	}
-	// Catalog ghosts: catalog entries whose subfolder isn't on disk yet, so
-	// the row appears in the Settings table with a "Show download commands"
-	// button. Already-installed catalog names skip this list (their on-disk
-	// row is the canonical one).
+	// Build a unified row list: catalog-backed rows (installed-and-in-catalog
+	// plus catalog entries whose subfolder isn't on disk yet) come first as
+	// "supported"; user-only installed taggers (not in the catalog) come last
+	// as "unsupported". The template renders a separator between the two
+	// groups when both are non-empty.
+	modelPath := s.cfg.Paths.ModelPath
+	catalog := tagger.LoadCatalog(modelPath)
+	catalogByName := map[string]tagger.CatalogEntry{}
+	for _, e := range catalog {
+		catalogByName[e.Name] = e
+	}
 	taggerNames := map[string]bool{}
 	for _, t := range taggers {
 		taggerNames[t.Name] = true
 	}
-	modelPath := s.cfg.Paths.ModelPath
-	var catalogGhosts []catalogRow
-	for _, e := range tagger.LoadCatalog(modelPath) {
+	var supportedRows, unsupportedRows []taggerRow
+	for _, t := range taggers {
+		row := taggerRow{
+			Name:                t.Name,
+			Available:           t.Available,
+			Reason:              t.Reason,
+			Enabled:             t.Enabled,
+			ConfidenceThreshold: t.ConfidenceThreshold,
+			Installed:           true,
+		}
+		if e, ok := catalogByName[t.Name]; ok {
+			row.Supported = true
+			row.Description = e.Description
+			row.HostCommand = e.HostCommand()
+			row.DockerCommand = e.DockerCommand("monbooru")
+			supportedRows = append(supportedRows, row)
+		} else {
+			unsupportedRows = append(unsupportedRows, row)
+		}
+	}
+	for _, e := range catalog {
 		if taggerNames[e.Name] {
 			continue
 		}
-		catalogGhosts = append(catalogGhosts, catalogRow{
+		supportedRows = append(supportedRows, taggerRow{
 			Name:          e.Name,
 			Description:   e.Description,
+			Supported:     true,
 			HostCommand:   e.HostCommand(),
 			DockerCommand: e.DockerCommand("monbooru"),
 		})
 	}
+	taggerRows := append(supportedRows, unsupportedRows...)
 	data := map[string]any{
-		"Title":          base.Title,
-		"ActiveNav":      base.ActiveNav,
-		"CSRFToken":      base.CSRFToken,
-		"AuthEnabled":    base.AuthEnabled,
-		"Degraded":       base.Degraded,
-		"Version":        base.Version,
-		"RepoURL":        base.RepoURL,
-		"Variant":        base.Variant,
-		"ActiveGallery":  base.ActiveGallery,
-		"Galleries":      s.galleryList(),
-		"VisibleCount":   base.VisibleCount,
-		"TagCount":       base.TagCount,
-		"SavedCount":     base.SavedCount,
-		"Config":         s.cfg,
-		"Taggers":        taggers,
-		"EnabledCount":   enabledCount,
-		"CatalogGhosts":  catalogGhosts,
-		"ScheduleStatus": s.ScheduleStatus(),
+		"Title":             base.Title,
+		"ActiveNav":         base.ActiveNav,
+		"CSRFToken":         base.CSRFToken,
+		"AuthEnabled":       base.AuthEnabled,
+		"Degraded":          base.Degraded,
+		"Version":           base.Version,
+		"RepoURL":           base.RepoURL,
+		"Variant":           base.Variant,
+		"ActiveGallery":     base.ActiveGallery,
+		"Galleries":         s.galleryRows(),
+		"VisibleCount":      base.VisibleCount,
+		"TagCount":          base.TagCount,
+		"SavedCount":        base.SavedCount,
+		"Config":            s.cfg,
+		"Taggers":           taggers,
+		"EnabledCount":      enabledCount,
+		"TaggerRows":        taggerRows,
+		"SupportedCount":    len(supportedRows),
+		"UnsupportedCount":  len(unsupportedRows),
+		"BulkTaggerRows":    s.bulkTaggerRows(taggers),
+		"ScheduleStatus":    s.ScheduleStatus(),
 	}
 	s.renderTemplate(w, "settings.html", data)
 }
@@ -1620,6 +1680,32 @@ func (s *Server) settingsTaggerDisablePost(w http.ResponseWriter, r *http.Reques
 	logx.Infof("settings: tagger %q disabled", name)
 	w.Header().Set("HX-Refresh", "true")
 	w.Write([]byte(`<div class="flash flash-ok">Tagger ` + html.EscapeString(name) + ` disabled.</div>`))
+}
+
+// disableUnavailableTaggers flips Enabled to false on any configured tagger
+// whose model files have gone missing on disk. Persists the result so a
+// re-downloaded model has to be re-enabled deliberately rather than firing
+// off a half-broken job.
+func (s *Server) disableUnavailableTaggers() {
+	available := map[string]bool{}
+	for _, t := range tagger.DiscoverTaggers(s.cfg) {
+		available[t.Name] = t.Available
+	}
+	s.cfgMu.Lock()
+	changed := false
+	for i, t := range s.cfg.Tagger.Taggers {
+		if t.Enabled && !available[t.Name] {
+			s.cfg.Tagger.Taggers[i].Enabled = false
+			changed = true
+			logx.Infof("settings: auto-disabled tagger %q (files missing)", t.Name)
+		}
+	}
+	s.cfgMu.Unlock()
+	if changed {
+		if err := s.saveConfig(); err != nil {
+			logx.Warnf("auto-disable taggers: save config: %v", err)
+		}
+	}
 }
 
 // settingsTaggerDeletePost removes a tagger entry from the config and wipes
@@ -1885,6 +1971,7 @@ func (s *Server) pruneOrphanedThumbnailsPost(w http.ResponseWriter, r *http.Requ
 
 func (s *Server) recalcTagsPost(w http.ResponseWriter, r *http.Request) {
 	updated, pruned := s.tagSvc().RecalcAndPruneCount()
+	s.Active().InvalidateCaches()
 	w.Write([]byte(fmt.Sprintf(
 		`<div class="flash flash-ok">Recalculated %d tag count(s); pruned %d unused tag(s).</div>`,
 		updated, pruned,
@@ -1897,6 +1984,7 @@ func (s *Server) mergeGeneralTagsPost(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<div class="flash flash-err">` + html.EscapeString(err.Error()) + `</div>`))
 		return
 	}
+	s.Active().InvalidateCaches()
 	w.Write([]byte(fmt.Sprintf(
 		`<div class="flash flash-ok">Merged %d general tag(s) into categorized counterparts.</div>`,
 		merged,
@@ -2561,7 +2649,23 @@ func (s *Server) renameCategoryPost(w http.ResponseWriter, r *http.Request) {
 
 
 func (s *Server) helpHandler(w http.ResponseWriter, r *http.Request) {
-	s.renderTemplate(w, "help.html", s.base(r, "help", "Help - Monbooru"))
+	base := s.base(r, "help", "Help - Monbooru")
+	data := map[string]any{
+		"Title":         base.Title,
+		"ActiveNav":     base.ActiveNav,
+		"CSRFToken":     base.CSRFToken,
+		"AuthEnabled":   base.AuthEnabled,
+		"Degraded":      base.Degraded,
+		"Version":       base.Version,
+		"RepoURL":       base.RepoURL,
+		"Variant":       base.Variant,
+		"ActiveGallery": base.ActiveGallery,
+		"Galleries":     base.Galleries,
+		"VisibleCount":  base.VisibleCount,
+		"TagCount":      base.TagCount,
+		"SavedCount":    base.SavedCount,
+	}
+	s.renderTemplate(w, "help.html", data)
 }
 
 // notFoundHandler renders a styled 404 for any unmatched GET path. The
@@ -3174,10 +3278,9 @@ func (s *Server) deleteFolderPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Share the gallery-root validator that also powers the upload path so
-	// `foo..bar` (legal filename) is no longer rejected by a substring
-	// check, while a sibling directory that shares the gallery prefix
-	// (`/data/gallery_backup`) is still refused via filepath.Rel.
+	// Reuse the gallery-root validator from the upload path: filepath.Rel
+	// rejects sibling directories that share the gallery prefix (e.g.
+	// `/data/gallery_backup`) without false-positiving on `foo..bar`.
 	absPath, err := gallery.ResolveSubdir(s.galleryPath(), folderPath)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)

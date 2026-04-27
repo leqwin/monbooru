@@ -442,7 +442,8 @@ func TestSettingsRendersImportExportColumn(t *testing.T) {
 	}
 	body := w.Body.String()
 	checks := []string{
-		`<th>Import/Export</th>`,
+		`<th>Export</th>`,
+		`<th>Import</th>`,
 		`btn-gallery-export`,
 		`btn-gallery-import`,
 		`id="gallery-export-dialog"`,

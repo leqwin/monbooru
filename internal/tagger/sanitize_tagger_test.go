@@ -18,8 +18,9 @@ func TestSanitizeLabel_PreservesColon(t *testing.T) {
 		{"rating:general", "rating:general"},
 	}
 	for _, c := range cases {
-		if got := sanitizeLabel(c.in, 0); got != c.want {
-			t.Errorf("sanitizeLabel(%q) = %q, want %q", c.in, got, c.want)
+		got, ok := sanitizeLabel(c.in, 0)
+		if got != c.want || !ok {
+			t.Errorf("sanitizeLabel(%q) = (%q, %v), want (%q, true)", c.in, got, ok, c.want)
 		}
 	}
 }
@@ -28,9 +29,25 @@ func TestSanitizeLabel_PreservesColon(t *testing.T) {
 // invariant that a label made of only disallowed runes (or of
 // punctuation with no alphanumerics) is replaced by an
 // `_unsupported_<idx>` placeholder so slice indices stay aligned
-// with the model's output channels.
+// with the model's output channels. The `ok` return is false so the
+// caller can flag the slot as a placeholder and skip it at emission.
 func TestSanitizeLabel_PlaceholderForAllPunct(t *testing.T) {
-	if got := sanitizeLabel(":::", 7); got != "_unsupported_7" {
-		t.Errorf("sanitizeLabel(%q, 7) = %q, want _unsupported_7", ":::", got)
+	got, ok := sanitizeLabel(":::", 7)
+	if got != "_unsupported_7" || ok {
+		t.Errorf("sanitizeLabel(%q, 7) = (%q, %v), want (_unsupported_7, false)", ":::", got, ok)
+	}
+}
+
+// TestSanitizeLabel_AllowsEmoticonLabels keeps the auto-tagger label
+// pipeline in sync with ValidateTagName: emoticon-class characters
+// (?, <, >, =, ^) count as content so labels like "??", ">_<", "^_^",
+// "<3", "=3" survive instead of dropping to the placeholder slot.
+func TestSanitizeLabel_AllowsEmoticonLabels(t *testing.T) {
+	cases := []string{"??", ">_<", "^_^", "<3", "=3", "=w=", "nani?"}
+	for _, in := range cases {
+		got, ok := sanitizeLabel(in, 0)
+		if got != in || !ok {
+			t.Errorf("sanitizeLabel(%q) = (%q, %v), want (%q, true)", in, got, ok, in)
+		}
 	}
 }

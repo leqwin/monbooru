@@ -1,8 +1,6 @@
 'use strict';
 
-// ---------------------------------------------------------------------------
 // Keyboard navigation
-// ---------------------------------------------------------------------------
 document.addEventListener('keydown', function(e) {
   const tag = e.target.tagName.toLowerCase();
   const isInput = tag === 'input' || tag === 'textarea' || tag === 'select' || e.target.isContentEditable;
@@ -160,11 +158,8 @@ document.body.addEventListener('delete-go-back', function(e) {
   if (fallback) window.location.href = fallback;
 });
 
-// ---------------------------------------------------------------------------
-// Gallery focus restore: when returning from a detail page via a back-link
-// carrying #img-N, focus the matching thumbnail so the arrow-key cursor
-// picks up where the user left off.
-// ---------------------------------------------------------------------------
+// Returning from a detail page via a back-link with #img-N restores the
+// arrow-key cursor on the matching thumbnail.
 function restoreGalleryFocusFromHash() {
   var m = window.location.hash.match(/^#img-(\d+)$/);
   if (!m) return;
@@ -178,9 +173,7 @@ function restoreGalleryFocusFromHash() {
 }
 document.addEventListener('DOMContentLoaded', restoreGalleryFocusFromHash);
 
-// ---------------------------------------------------------------------------
 // Video hover preview swap (with error fallback to avoid "?" on hover fail)
-// ---------------------------------------------------------------------------
 document.addEventListener('mouseover', function(e) {
   const card = e.target.closest('.thumb-card');
   if (!card) return;
@@ -209,9 +202,7 @@ document.addEventListener('mouseout', function(e) {
   img.onerror = null;
 });
 
-// ---------------------------------------------------------------------------
 // Sidebar tag filter (client-side substring match, no HTMX)
-// ---------------------------------------------------------------------------
 document.addEventListener('input', function(e) {
   if (e.target.id !== 'sidebar-filter') return;
   const q = e.target.value.toLowerCase();
@@ -232,9 +223,7 @@ document.addEventListener('input', function(e) {
   if (err) err.remove();
 });
 
-// ---------------------------------------------------------------------------
 // Sidebar tag-add-btn: append tag to current search query
-// ---------------------------------------------------------------------------
 document.addEventListener('click', function(e) {
   const btn = e.target.closest('.tag-add-btn');
   if (!btn) return;
@@ -251,9 +240,7 @@ document.addEventListener('click', function(e) {
   else if (form) form.submit();
 });
 
-// ---------------------------------------------------------------------------
 // Category collapse in sidebar
-// ---------------------------------------------------------------------------
 document.addEventListener('click', function(e) {
   const btn = e.target.closest('.cat-collapse');
   if (!btn) return;
@@ -266,9 +253,7 @@ document.addEventListener('click', function(e) {
   btn.textContent = collapsed ? '▾' : '▸';
 });
 
-// ---------------------------------------------------------------------------
 // Batch selection: show/hide batch bar and keep checkboxes visible
-// ---------------------------------------------------------------------------
 document.addEventListener('change', function(e) {
   if (!e.target.classList.contains('thumb-checkbox')) return;
   updateBatchBar();
@@ -282,9 +267,12 @@ function updateBatchBar() {
   if (grid) grid.classList.toggle('batch-active', checked.length > 0);
   const countEl = document.getElementById('batch-count');
   if (countEl) countEl.textContent = checked.length + ' selected';
-  // Hide the header's Delete-all so users aiming for Delete-selected can't misclick.
+  // Hide the header's Delete-all and Tag-all so users aiming for the
+  // batch-bar equivalents can't misclick.
   const delAll = document.getElementById('delete-search-btn');
   if (delAll) delAll.hidden = checked.length > 0;
+  const tagAll = document.getElementById('tag-search-btn');
+  if (tagAll) tagAll.hidden = checked.length > 0;
 }
 
 function clearSelection() {
@@ -324,14 +312,9 @@ function refreshJobStatus() {
   window.htmx.ajax('GET', '/internal/job/status', {target: '#job-status', swap: 'outerHTML'});
 }
 
-// ---------------------------------------------------------------------------
-// Shared confirmation dialog. Replaces native confirm() and hx-confirm with
-// the same <dialog> modal style used by rename/save-search/etc.
-//   showConfirm(message, onOk, danger?)  - explicit callers (fetch handlers)
-//   htmx:confirm event listener          - intercepts hx-confirm attributes
-// An hx-confirm element may set data-confirm-danger="..." for a second,
-// red-tinted line of warning text (same pattern as the bulk-delete dialog).
-// ---------------------------------------------------------------------------
+// Shared confirmation dialog: replaces native confirm() and intercepts
+// hx-confirm via the htmx:confirm event listener below. The triggering
+// element may set data-confirm-danger for a red-tinted second warning line.
 function showConfirm(message, onOk, danger, okLabel) {
   var dlg = document.getElementById('confirm-dialog');
   if (!dlg) { if (window.confirm(message)) onOk(); return; }
@@ -353,11 +336,8 @@ document.body.addEventListener('htmx:confirm', function(e) {
   showConfirm(e.detail.question, function() { e.detail.issueRequest(true); }, ds.confirmDanger, ds.confirmOk);
 });
 
-// ---------------------------------------------------------------------------
-// Page jump: clicking the "Page X / Y" button opens a dialog to navigate to a
-// specific page. Handles both the gallery (HTMX-driven pagination) and the
-// tags page (full-page navigation) by setting ?page= on the current URL.
-// ---------------------------------------------------------------------------
+// Page jump: dialog that sets ?page= on the current URL. Works for both
+// the HTMX gallery and the full-page tags pagination.
 document.addEventListener('click', function(e) {
   var btn = e.target.closest('.page-jump');
   if (!btn) return;
@@ -389,18 +369,14 @@ function submitPageJump() {
   window.location.href = u.toString();
 }
 
-// ---------------------------------------------------------------------------
 // Sidebar toggle (narrow viewports)
-// ---------------------------------------------------------------------------
 document.addEventListener('click', function(e) {
   if (!e.target.id || e.target.id !== 'sidebar-toggle') return;
   const sidebar = document.getElementById('sidebar');
   if (sidebar) sidebar.classList.toggle('open');
 });
 
-// ---------------------------------------------------------------------------
 // Folder tree: expand/collapse with cookie persistence
-// ---------------------------------------------------------------------------
 function getFolderCookie() {
   var m = document.cookie.match(/monbooru_folders=([^;]*)/);
   if (!m) return new Set();
@@ -513,9 +489,7 @@ document.addEventListener('DOMContentLoaded', initFolderTree);
 // but since we use btn.onclick (not addEventListener) no duplicate handlers accumulate.
 document.addEventListener('htmx:afterSettle', initFolderTree);
 
-// ---------------------------------------------------------------------------
 // Tag suggest (detail page + merge dialog): apply selected suggestion
-// ---------------------------------------------------------------------------
 function applyTagSuggest(btn) {
   var tagName = btn.dataset.tagName;
   if (!tagName) return;
@@ -549,11 +523,8 @@ function applyTagSuggest(btn) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Folder suggest: apply selected folder path to the input that opened the dropdown.
-// Used by the move-image and move-selected dialogs. Keeps focus on the input so
-// the user can keep typing; the dialog's submit button finishes the move.
-// ---------------------------------------------------------------------------
+// Folder suggest (move-image and move-selected dialogs): keeps focus on the
+// input so the user can keep typing.
 function applyFolderSuggest(btn) {
   var folder = btn.dataset.folderPath;
   if (folder == null) return;
@@ -568,9 +539,7 @@ function applyFolderSuggest(btn) {
   input.focus();
 }
 
-// ---------------------------------------------------------------------------
 // Search suggest: apply selected suggestion to search input
-// ---------------------------------------------------------------------------
 function applySearchSuggest(tagName) {
   var si = document.getElementById('search-input');
   if (!si) return;
@@ -593,9 +562,7 @@ function applySearchSuggest(tagName) {
   si.focus();
 }
 
-// ---------------------------------------------------------------------------
 // Auto-reload gallery/tags after job completes; auto-clear status after 30s
-// ---------------------------------------------------------------------------
 var _jobAutoClearTimer = null;
 // FinishedAt the current auto-clear timer was armed against; re-armed on newer
 // surface events so rolling watcher activity doesn't trip the dismiss mid-batch
@@ -767,7 +734,6 @@ function dismissJobStatus() {
   _lastWatcherNotices = -1;
   _jobAutoClearFinishedAt = '';
   if (_jobAutoClearTimer) { clearTimeout(_jobAutoClearTimer); _jobAutoClearTimer = null; }
-  // Call backend to clear job state, then clear the UI
   var csrf = getCSRFToken();
   fetch('/internal/job/dismiss', {
     method: 'POST',
@@ -794,9 +760,7 @@ function cancelJobStatus() {
   }).catch(function() {});
 }
 
-// ---------------------------------------------------------------------------
-// Shared suggest-dropdown keyboard navigation (used by search, tag input, merge)
-// ---------------------------------------------------------------------------
+// Shared suggest-dropdown keyboard navigation (search, tag input, merge)
 function handleSuggestKey(e, dropdownId, inputId) {
   var dd = document.getElementById(dropdownId);
   if (!dd) return;
@@ -850,15 +814,23 @@ function initSuggestDismiss(dropdownId, inputId, opts) {
   // after the user submits or moves focus elsewhere; drop the swap if
   // the input no longer holds focus so the dropdown doesn't get refilled
   // behind the user's back.
+  //
+  // Also tag the dropdown as `suggest-fresh` after every swap so the CSS
+  // can suppress the :hover highlight until the user actually moves the
+  // mouse over it - otherwise an item happening to land under the cursor's
+  // previous position appears "selected" without the user picking it.
   var dd0 = document.getElementById(dropdownId);
   if (dd0) {
     dd0.addEventListener('htmx:afterSwap', function() {
-      if (document.activeElement !== input) dd0.innerHTML = '';
+      if (document.activeElement !== input) { dd0.innerHTML = ''; return; }
+      dd0.classList.add('suggest-fresh');
+    });
+    dd0.addEventListener('mousemove', function() {
+      dd0.classList.remove('suggest-fresh');
     });
   }
 }
 
-// Initialize all known suggest dropdowns
 initSuggestDismiss('search-suggest', 'search-input', {blurOnSubmit: true});
 initSuggestDismiss('tag-suggest-dropdown', 'tag-input');
 initSuggestDismiss('merge-suggest', 'merge-canon-input');
@@ -866,13 +838,10 @@ initSuggestDismiss('move-selected-suggest', 'move-selected-folder');
 initSuggestDismiss('move-image-suggest', 'move-image-folder');
 initSuggestDismiss('batch-tag-suggest', 'batch-tag-input');
 
-// ---------------------------------------------------------------------------
-// Detail page: separate tags added during the current session from the rest.
-// The "just-added" list is populated from tags that appear after initial load
-// and is cleared on full page reload.
-// ---------------------------------------------------------------------------
-var _initialTagIDs = null;   // Set of tag IDs present on first load
-var _addedTagOrder = [];     // Tag IDs in the order the user added them during this session
+// Detail page: tags added in the current session are split into a "just-added"
+// list and reset on full page reload.
+var _initialTagIDs = null;
+var _addedTagOrder = [];
 
 function captureInitialTags(container) {
   if (_initialTagIDs !== null) return;
@@ -940,9 +909,7 @@ document.addEventListener('DOMContentLoaded', function() {
   if (el) captureInitialTags(el);
 });
 
-// ---------------------------------------------------------------------------
 // Save search: update hidden query field when dialog opens
-// ---------------------------------------------------------------------------
 document.addEventListener('click', function(e) {
   if (e.target.id !== 'save-search-btn') return;
   var si = document.getElementById('search-input');

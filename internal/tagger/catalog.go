@@ -69,10 +69,8 @@ func LoadCatalog(modelPath string) []CatalogEntry {
 	return out
 }
 
-// HostCommand renders the `mkdir + curl` chain a user runs on the host when
-// monbooru runs directly there (no docker). Paths are relative to the model
-// path (the dialog tells the user to cd there first); URLs and the entry
-// subfolder are single-quoted so any awkward characters survive intact.
+// HostCommand renders the `mkdir + curl` chain a user runs on the host
+// (no docker). Paths are relative to the model path.
 func (c CatalogEntry) HostCommand() string {
 	parts := []string{"mkdir -p " + shellSingleQuote(c.Name)}
 	for _, f := range c.Files {
@@ -82,11 +80,9 @@ func (c CatalogEntry) HostCommand() string {
 	return strings.Join(parts, " && \\\n")
 }
 
-// DockerCommand renders a single-line `docker exec <container> sh -c '...'`
-// chain that drops the model files into the container's /models mount.
-// Container name defaults to "monbooru" when blank, matching the shipped
-// docker-compose.yml. The inner sh -c body is single-quoted; any internal
-// quotes are escaped via the standard '\'' trick.
+// DockerCommand renders a `docker exec <container> sh -c '...'` chain that
+// drops model files into the container's /models mount. Container name
+// defaults to "monbooru" (matching the shipped docker-compose.yml).
 func (c CatalogEntry) DockerCommand(containerName string) string {
 	if containerName == "" {
 		containerName = "monbooru"

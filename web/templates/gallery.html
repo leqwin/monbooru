@@ -44,7 +44,8 @@
   <form id="batch-delete-form">
     <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
     <button type="button" class="batch-bar-right" onclick="openTagSelectedDialog()">Tag selected</button>
-    <button type="button" class="batch-bar-rest" onclick="openMoveSelectedDialog()">Move selected</button>
+    <span class="batch-bar-sep" aria-hidden="true"></span>
+    <button type="button" onclick="openMoveSelectedDialog()">Move selected</button>
     <button type="button" class="btn-danger" onclick="batchDeleteSelected()">Delete selected</button>
   </form>
 </div>
@@ -60,10 +61,10 @@
         hx-swap="innerHTML">
     <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
     <input type="hidden" name="query" id="save-search-query" value="{{.Query}}">
-    <p>Save search: <code id="save-search-preview">{{.Query}}</code></p>
+    <p>Save search:<br><code id="save-search-preview" class="save-search-terms">{{.Query}}</code></p>
     <div class="field">
       <label>Name</label>
-      <input type="text" name="name" id="save-search-name" placeholder="My search" required
+      <input type="text" name="name" id="save-search-name" placeholder="Search name" required
              onkeydown="if(event.key==='Enter'){event.preventDefault();this.closest('form').requestSubmit();}">
     </div>
     <div id="save-search-result"></div>
@@ -113,7 +114,7 @@
     <div class="field" style="position:relative">
       <label>Tags (space-separated, <code>category:name</code> for non-general)</label>
       <input type="text" name="tags" id="batch-tag-input" class="upload-wide-input" data-multi-tags="1"
-             placeholder="Add tag… (category:name or plain name)" autocomplete="off"
+             placeholder="Add/remove tag(s)..." autocomplete="off"
              hx-get="/internal/tags/suggest"
              hx-trigger="input changed delay:200ms"
              hx-target="#batch-tag-suggest"
@@ -133,11 +134,12 @@
 <!-- Move selected dialog -->
 <dialog id="move-selected-dialog">
   <p>Move <strong id="move-selected-count">0</strong> selected <span id="move-selected-noun">images</span> to folder:</p>
+  <p class="field-hint">Path (leave blank for gallery root)</p>
   <form id="move-selected-form" onsubmit="event.preventDefault(); confirmMoveSelected();">
     <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
     <div class="field" style="position:relative">
       <input type="text" name="folder" id="move-selected-folder" class="upload-wide-input"
-             placeholder="e.g. april/15 (blank = gallery root)" autocomplete="off"
+             placeholder="Destination path..." autocomplete="off"
              hx-get="/internal/folders/suggest"
              hx-trigger="input changed delay:200ms"
              hx-target="#move-selected-suggest"

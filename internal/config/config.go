@@ -113,7 +113,7 @@ func Default() *Config {
 			WatchEnabled:  true,
 			MaxFileSizeMB: 500,
 		},
-		Tagger: TaggerConfig{Parallel: 16},
+		Tagger: TaggerConfig{Parallel: 8},
 		Auth: AuthConfig{
 			SessionLifetimeDays: 7,
 		},
@@ -127,7 +127,7 @@ func Default() *Config {
 			Time:             "01:00",
 			SyncGallery:      true,
 			RemoveOrphans:    true,
-			RunAutoTaggers:   true,
+			RunAutoTaggers:   false,
 			RecomputeTags:    true,
 			MergeGeneralTags: true,
 			VacuumDB:         true,
