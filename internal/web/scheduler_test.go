@@ -12,8 +12,6 @@ import (
 	"github.com/leqwin/monbooru/internal/gallery"
 )
 
-// --- nextScheduledFire -----------------------------------------------------
-
 func TestNextScheduledFire_TodayStillAhead(t *testing.T) {
 	t.Parallel()
 	srv := newTestServer(t)
@@ -77,8 +75,6 @@ func TestNextScheduledFire_InvalidTimeReturnsFalse(t *testing.T) {
 	}
 }
 
-// --- parseScheduleTime -----------------------------------------------------
-
 func TestParseScheduleTime_Table(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -115,8 +111,6 @@ func TestParseScheduleTime_Table(t *testing.T) {
 		})
 	}
 }
-
-// --- scheduledRemoveOrphans ------------------------------------------------
 
 // seedImage inserts a minimal image row through gallery.Ingest so the Go
 // ingestion pipeline (including thumbnail generation) runs.
@@ -182,8 +176,6 @@ func TestScheduledRemoveOrphans_RemovesStrayFiles(t *testing.T) {
 	}
 }
 
-// --- scheduledRecalcTags ---------------------------------------------------
-
 func TestScheduledRecalcTags_FixesBadCounts(t *testing.T) {
 	srv := newTestServer(t)
 	id := seedImage(t, srv, "recalc.png", 12, 12)
@@ -214,8 +206,6 @@ func TestScheduledRecalcTags_FixesBadCounts(t *testing.T) {
 	}
 }
 
-// --- scheduledMergeGeneral -------------------------------------------------
-
 func TestScheduledMergeGeneral_MergesAutoGeneralIntoCategorized(t *testing.T) {
 	srv := newTestServer(t)
 	id := seedImage(t, srv, "merge.png", 10, 10)
@@ -242,8 +232,6 @@ func TestScheduledMergeGeneral_MergesAutoGeneralIntoCategorized(t *testing.T) {
 	}
 }
 
-// --- scheduledVacuum -------------------------------------------------------
-
 func TestScheduledVacuum_Runs(t *testing.T) {
 	srv := newTestServer(t)
 	seedImage(t, srv, "vac.png", 8, 8)
@@ -262,8 +250,6 @@ func TestScheduledVacuum_Runs(t *testing.T) {
 		t.Errorf("row count = %d, want 1", count)
 	}
 }
-
-// --- scheduledSync ---------------------------------------------------------
 
 func TestScheduledSync_IngestsNewFiles(t *testing.T) {
 	srv := newTestServer(t)
@@ -286,8 +272,6 @@ func TestScheduledSync_IngestsNewFiles(t *testing.T) {
 	}
 }
 
-// --- ScheduleStatus --------------------------------------------------------
-
 // TestScheduleStatus_RecordsLastRun pins that runScheduledActions populates
 // schedLastRun so the Schedule settings section can show "Last run: …".
 func TestScheduleStatus_RecordsLastRun(t *testing.T) {
@@ -309,12 +293,10 @@ func TestScheduleStatus_RecordsLastRun(t *testing.T) {
 	}
 }
 
-// --- runScheduledActions dispatch order ------------------------------------
-
-// TestRunScheduledActions_SkipsWhenJobRunning pins the guard in
-// scheduler.go:99 that refuses to fire when a user-triggered job is already
-// holding the job manager. Without this, a manual sync could be racing a
-// scheduled run.
+// TestRunScheduledActions_SkipsWhenJobRunning pins the BeginSchedule guard:
+// scheduled actions must not fire when a user-triggered job is already
+// holding the job manager, otherwise a manual sync could race a scheduled
+// run.
 func TestRunScheduledActions_SkipsWhenJobRunning(t *testing.T) {
 	srv := newTestServer(t)
 	// Turn every schedule flag on so the actions would run if reached.

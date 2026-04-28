@@ -230,10 +230,10 @@ func TestExtract_JPEG(t *testing.T) {
 
 func TestExtract_JPEG_NonExistent(t *testing.T) {
 	t.Parallel()
-	// Extract swallows every IO error silently (sd.go:16 comment "silently
-	// skip") so a missing file produces (nil, nil, nil). Pin that contract:
-	// the ingest pipeline relies on the extractor never failing so an image
-	// without metadata still lands with source_type='none'.
+	// Extract swallows every IO error silently so a missing file produces
+	// (nil, nil, nil). The ingest pipeline relies on this: an image without
+	// readable metadata still lands with source_type='none' rather than
+	// failing the ingest.
 	sd, comfy, err := Extract("/nonexistent/path/image.jpg", "jpeg")
 	if err != nil {
 		t.Errorf("Extract on missing file should swallow errors silently, got %v", err)
@@ -325,8 +325,6 @@ func TestParseComfyWorkflow_UnknownNodes(t *testing.T) {
 		t.Error("expected nil when no known nodes found")
 	}
 }
-
-// --- extractFromPNG and extractComfyUI direct tests ---
 
 func TestExtractFromPNG_WithParameters(t *testing.T) {
 	paramText := "a beautiful prompt\nNegative prompt: ugly\nSteps: 20, Sampler: Euler, CFG scale: 7, Seed: 42, Model: mymodel"

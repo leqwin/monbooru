@@ -154,8 +154,9 @@ func TestGalleryHTMXPartialReturnsGrid(t *testing.T) {
 }
 
 func TestGalleryEmptyFolderDialogRendered(t *testing.T) {
-	// Empty folders are now deleted automatically without a dialog prompt.
-	// The empty_folder query param is no longer used; verify the page still loads.
+	// Empty folders are deleted automatically without a dialog prompt;
+	// verify the page still loads cleanly when no `empty_folder` param is
+	// supplied.
 	srv := newTestServer(t)
 	h := srv.Handler()
 

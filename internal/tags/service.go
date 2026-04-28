@@ -109,35 +109,51 @@ func RecalcAndPruneDB(database *db.DB) {
 // A naïve correlated-subquery UPDATE recomputes the count twice per
 // tag and dominates sync time on tag-heavy libraries. This impl zeros
 // out tags whose remaining usages all point at missing images, then
-// fills in the rest with one GROUP BY pass over image_tags.
+// fills in the rest with one GROUP BY pass over image_tags, chunked
+// by tag_id range so the single writer is released between chunks.
 func RecalcAndPruneDBCount(database *db.DB) (updated int64, pruned int64) {
-	if res, err := database.Write.Exec(`
-		UPDATE tags SET usage_count = 0
-		WHERE usage_count != 0
-		  AND NOT EXISTS (
-		      SELECT 1 FROM image_tags it
-		      JOIN images i ON i.id = it.image_id
-		      WHERE it.tag_id = tags.id AND i.is_missing = 0
-		  )
-	`); err == nil {
-		n, _ := res.RowsAffected()
-		updated += n
+	const chunkSize = 2000
+
+	var maxID int64
+	if err := database.Read.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM tags`).Scan(&maxID); err != nil {
+		return
 	}
-	if res, err := database.Write.Exec(`
-		UPDATE tags SET usage_count = c.cnt
-		FROM (
-		    SELECT it.tag_id, COUNT(*) AS cnt FROM image_tags it
-		    JOIN images i ON i.id = it.image_id
-		    WHERE i.is_missing = 0
-		    GROUP BY it.tag_id
-		) c
-		WHERE c.tag_id = tags.id AND tags.usage_count != c.cnt
-	`); err == nil {
-		n, _ := res.RowsAffected()
-		updated += n
-	}
-	if res, err := database.Write.Exec(`DELETE FROM tags WHERE usage_count <= 0`); err == nil {
-		pruned, _ = res.RowsAffected()
+
+	for start := int64(0); start <= maxID; start += chunkSize {
+		end := start + chunkSize
+		if res, err := database.Write.Exec(`
+			UPDATE tags SET usage_count = 0
+			WHERE usage_count != 0
+			  AND id >= ? AND id < ?
+			  AND NOT EXISTS (
+			      SELECT 1 FROM image_tags it
+			      JOIN images i ON i.id = it.image_id
+			      WHERE it.tag_id = tags.id AND i.is_missing = 0
+			  )
+		`, start, end); err == nil {
+			n, _ := res.RowsAffected()
+			updated += n
+		}
+		if res, err := database.Write.Exec(`
+			UPDATE tags SET usage_count = c.cnt
+			FROM (
+			    SELECT it.tag_id, COUNT(*) AS cnt FROM image_tags it
+			    JOIN images i ON i.id = it.image_id
+			    WHERE i.is_missing = 0 AND it.tag_id >= ? AND it.tag_id < ?
+			    GROUP BY it.tag_id
+			) c
+			WHERE c.tag_id = tags.id AND tags.usage_count != c.cnt
+		`, start, end); err == nil {
+			n, _ := res.RowsAffected()
+			updated += n
+		}
+		if res, err := database.Write.Exec(
+			`DELETE FROM tags WHERE usage_count <= 0 AND id >= ? AND id < ?`,
+			start, end,
+		); err == nil {
+			n, _ := res.RowsAffected()
+			pruned += n
+		}
 	}
 	return
 }
@@ -184,8 +200,6 @@ func (s *Service) RecalcAndPruneIDs(ids []int64) error {
 	}
 	return nil
 }
-
-// --- Category methods ---
 
 func (s *Service) ListCategories() ([]models.TagCategory, error) {
 	rows, err := s.db.Read.Query(
@@ -345,8 +359,6 @@ func (s *Service) DeleteCategoryMoveOrDelete(id int64, action string, targetID i
 
 	return tx.Commit()
 }
-
-// --- Tag methods ---
 
 // ValidateTagName lowercases + trims name and checks it against the
 // documented allowlist. Returns the normalised name or an
@@ -616,8 +628,6 @@ func (s *Service) GetTag(id int64) (*models.Tag, error) {
 	t.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
 	return &t, nil
 }
-
-// --- Image tag methods ---
 
 func (s *Service) GetImageTags(imageID int64) ([]models.ImageTag, error) {
 	rows, err := s.db.Read.Query(
@@ -987,18 +997,26 @@ func (s *Service) RemoveAllTagsFromImage(imageID int64) error {
 // signal worth the scan even when common.
 const relatedGeneralTagsCap = 15
 
+// relatedMaxTagUsage drops seed tags whose global usage_count exceeds
+// the cap. A tag carried by more than this many images doesn't add
+// discriminative signal - the candidate set it brings in is mostly
+// noise - and on a 1M-image library it's the difference between a 2 s
+// GROUP BY and a sub-second one. Seed images whose every tag is
+// over-cap render an empty related panel rather than a slow one.
+const relatedMaxTagUsage = 10000
+
 // RelatedImages returns up to limit images that share the most tags
 // with imageID, ranked by shared tag count. The source image, missing
 // images, and meta-only matches are excluded.
 //
 // Staged so the images join only runs against the top-N candidates:
-// my_tags resolves once (general capped to the K rarest, every other
-// category whole); candidates aggregate from image_tags alone with an
-// inner LIMIT; the images row is joined last so is_missing filtering
-// costs O(buffer). The SELECT only fetches what
-// partials/related_images.html actually consumes (currently `.ID`),
-// since the rest of the row would be unused payload across the SQL
-// boundary.
+// my_tags resolves once (general capped to the K rarest, popular tags
+// dropped via relatedMaxTagUsage so the candidate scan stays bounded);
+// candidates aggregate from image_tags alone with an inner LIMIT; the
+// images row is joined last so is_missing filtering costs O(buffer).
+// The SELECT only fetches what partials/related_images.html actually
+// consumes (currently `.ID`), since the rest of the row would be
+// unused payload across the SQL boundary.
 func (s *Service) RelatedImages(imageID int64, limit int) ([]models.Image, error) {
 	rows, err := s.db.Read.Query(
 		`WITH my_tags AS (
@@ -1010,6 +1028,7 @@ func (s *Service) RelatedImages(imageID int64, limit int) ([]models.Image, error
 		         JOIN tags t ON t.id = it.tag_id
 		         JOIN tag_categories tc ON tc.id = t.category_id
 		         WHERE it.image_id = ? AND tc.name != 'meta'
+		           AND t.usage_count <= ?
 		     )
 		     WHERE cat_name != 'general' OR rn <= ?
 		 ),
@@ -1028,7 +1047,7 @@ func (s *Service) RelatedImages(imageID int64, limit int) ([]models.Image, error
 		 WHERE i.is_missing = 0
 		 ORDER BY c.shared DESC, c.image_id DESC
 		 LIMIT ?`,
-		imageID, relatedGeneralTagsCap, imageID, limit*3+10, limit,
+		imageID, relatedMaxTagUsage, relatedGeneralTagsCap, imageID, limit*2+5, limit,
 	)
 	if err != nil {
 		return nil, err

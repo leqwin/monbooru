@@ -53,23 +53,37 @@ func Execute(database *db.DB, q Query) (*models.SearchResult, error) {
 	offset := (page - 1) * limit
 
 	var total int
+	fastEmpty := false
 	switch {
 	case q.SkipCount:
 	case q.PresetTotal != nil:
 		total = *q.PresetTotal
 	default:
+		// usage_count is maintained as the visible-image count for the
+		// canonical, so a single positive literal tag matches COUNT(*)
+		// exactly without scanning images.
+		if !hasMissingFilter {
+			if n, ok := fastTagTotal(database, q.Expr); ok {
+				total = n
+				fastEmpty = n == 0
+				break
+			}
+		}
 		countSQL := "SELECT COUNT(*) FROM images i WHERE " + where
 		if err := database.Read.QueryRow(countSQL, args...).Scan(&total); err != nil {
 			return nil, fmt.Errorf("count query: %w", err)
 		}
 	}
 
-	// Unfiltered visible gallery: pin the dedicated partial sort indexes.
-	// Without the hint SQLite picks idx_images_missing then materialises a
-	// temp B-tree for ORDER BY, costing ~30 ms at page 1 and ~200 ms deep
-	// in the offset on a 100K-image library.
+	if fastEmpty {
+		return &models.SearchResult{Page: page, Limit: limit, Total: 0}, nil
+	}
+
+	// Pin the partial sort index when nothing in the query has its own
+	// more-selective index. Without the hint SQLite picks
+	// idx_images_missing and materialises a temp B-tree for ORDER BY.
 	indexHint := ""
-	if q.Expr == nil && !hasMissingFilter {
+	if !hasMissingFilter && (q.Expr == nil || isPureTagExpr(q.Expr)) {
 		switch q.Sort {
 		case "filesize":
 			indexHint = " INDEXED BY idx_images_filesize_visible"
@@ -134,6 +148,281 @@ func Execute(database *db.DB, q Query) (*models.SearchResult, error) {
 		Total:   total,
 		Results: images,
 	}, nil
+}
+
+// isPureTagExpr reports whether expr is composed only of tag-style
+// predicates - TagExpr leaves and the cat:/category-qualified
+// FilterExpr leaves. Mixed expressions (fav, source, folder, ...)
+// have their own selective column indexes that the planner picks.
+func isPureTagExpr(expr Expr) bool {
+	switch e := expr.(type) {
+	case AndExpr:
+		return isPureTagExpr(e.Left) && isPureTagExpr(e.Right)
+	case OrExpr:
+		return isPureTagExpr(e.Left) && isPureTagExpr(e.Right)
+	case NotExpr:
+		return isPureTagExpr(e.Expr)
+	case TagExpr:
+		return true
+	case FilterExpr:
+		// keys whose buildFilterExpr branch emits image_tags EXISTS.
+		return e.Key == "cat" || !IsFilterKeyword(e.Key)
+	}
+	return false
+}
+
+// fastTagTotal returns a visible-image count for an Expr by reading
+// tags.usage_count instead of EXISTS-scanning image_tags. ok=false
+// falls back to COUNT(*) for shapes the helper can't bound.
+//
+// Recognised shapes (each delegates to a fastCount* helper):
+//   - TagExpr literal, no wildcard, single canonical - exact.
+//   - TagExpr wildcard - sum over canonicals; upper bound when an image
+//     carries more than one matching tag.
+//   - NotExpr{TagExpr literal, no wildcard} - exact.
+//   - AndExpr/OrExpr of recognised sub-shapes - min/sum, both upper bounds.
+//   - FilterExpr{cat:X} - sum over category; upper bound.
+//   - FilterExpr where Key is a real tag category and Val is the tag
+//     name (e.g. character:miku) - exact.
+//
+// The upper-bound shapes (wildcard, And, Or, cat:X) are gated by
+// fastApproxThreshold: below it the slow EXISTS COUNT finishes within
+// budget on the documented large fixture and is exact, so this helper
+// only short-circuits when the slow path would actually be slow.
+// Pagination's totalPages may over-shoot when the bound is loose;
+// rendered pages past the actual end come back empty.
+func fastTagTotal(database *db.DB, expr Expr) (int, bool) {
+	switch e := expr.(type) {
+	case TagExpr:
+		return fastCountTag(database, e)
+	case NotExpr:
+		return fastCountNot(database, e)
+	case AndExpr:
+		return fastCountAnd(database, e)
+	case OrExpr:
+		return fastCountOr(database, e)
+	case FilterExpr:
+		return fastCountFilter(database, e)
+	}
+	return 0, false
+}
+
+// fastApproxThreshold gates the fast-path approximations on the slow
+// path actually being slow. The slow EXISTS-AND-EXISTS / per-row scan
+// is bounded by the smallest matching tag's image_tags rows, so for
+// counts under this cap the slow path finishes inside the audit's
+// per-query budget and remains exact. Above the cap (popular tags on
+// large libraries) the upper-bound short-circuit kicks in.
+const fastApproxThreshold = 50000
+
+func fastCountTag(database *db.DB, t TagExpr) (int, bool) {
+	if t.Tag == "" {
+		return 0, false
+	}
+	var pred string
+	var arg any
+	switch t.Wildcard {
+	case "":
+		pred = "name = ?"
+		arg = t.Tag
+	case "prefix":
+		pred = `name LIKE ? ESCAPE '\'`
+		arg = escapeLike(t.Tag) + "%"
+	case "substring":
+		pred = `name LIKE ? ESCAPE '\'`
+		arg = "%" + escapeLike(t.Tag) + "%"
+	default:
+		return 0, false
+	}
+	rows, err := database.Read.Query(
+		`SELECT DISTINCT COALESCE(canonical_tag_id, id) FROM tags WHERE `+pred,
+		arg,
+	)
+	if err != nil {
+		return 0, false
+	}
+	var canonIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, false
+		}
+		canonIDs = append(canonIDs, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, false
+	}
+	if len(canonIDs) == 0 {
+		return 0, true
+	}
+	if len(canonIDs) == 1 {
+		var n int
+		if err := database.Read.QueryRow(
+			`SELECT usage_count FROM tags WHERE id = ?`, canonIDs[0],
+		).Scan(&n); err != nil {
+			return 0, false
+		}
+		return n, true
+	}
+	// Multi-canonical exact-name (same name in two categories): summing
+	// would over-count images carrying both, and the user typed an exact
+	// name so they expect an exact answer. Fall back.
+	if t.Wildcard == "" {
+		return 0, false
+	}
+	placeholders := strings.Repeat("?,", len(canonIDs))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]any, len(canonIDs))
+	for i, id := range canonIDs {
+		args[i] = id
+	}
+	var n int
+	if err := database.Read.QueryRow(
+		`SELECT COALESCE(SUM(usage_count), 0) FROM tags WHERE id IN (`+placeholders+`)`,
+		args...,
+	).Scan(&n); err != nil {
+		return 0, false
+	}
+	if n < fastApproxThreshold {
+		return 0, false
+	}
+	return n, true
+}
+
+// fastCountNot only handles NOT of a single literal tag. count(!E) is
+// visible_count - count(E); applied to an upper-bound count(E) it
+// would under-shoot, leaving pagination unable to reach actually-
+// existing pages. Restricting to the exact-count case keeps the
+// upper-bound invariant of fastTagTotal.
+func fastCountNot(database *db.DB, e NotExpr) (int, bool) {
+	inner, ok := e.Expr.(TagExpr)
+	if !ok || inner.Wildcard != "" || inner.Tag == "" {
+		return 0, false
+	}
+	used, ok := fastCountTag(database, inner)
+	if !ok {
+		return 0, false
+	}
+	visible, ok := fastVisibleCount(database)
+	if !ok {
+		return 0, false
+	}
+	n := visible - used
+	if n < 0 {
+		n = 0
+	}
+	return n, true
+}
+
+func fastCountAnd(database *db.DB, e AndExpr) (int, bool) {
+	l, ok := fastTagTotal(database, e.Left)
+	if !ok {
+		return 0, false
+	}
+	r, ok := fastTagTotal(database, e.Right)
+	if !ok {
+		return 0, false
+	}
+	minN := l
+	if r < minN {
+		minN = r
+	}
+	if minN < fastApproxThreshold {
+		return 0, false
+	}
+	return minN, true
+}
+
+func fastCountOr(database *db.DB, e OrExpr) (int, bool) {
+	l, ok := fastTagTotal(database, e.Left)
+	if !ok {
+		return 0, false
+	}
+	r, ok := fastTagTotal(database, e.Right)
+	if !ok {
+		return 0, false
+	}
+	sum := l + r
+	if sum < fastApproxThreshold {
+		return 0, false
+	}
+	v, ok := fastVisibleCount(database)
+	if !ok {
+		return 0, false
+	}
+	if sum > v {
+		sum = v
+	}
+	return sum, true
+}
+
+func fastCountFilter(database *db.DB, e FilterExpr) (int, bool) {
+	if e.Val == "" {
+		return 0, false
+	}
+	if e.Key == "cat" {
+		// Sum usage_count over non-alias tags in the category. Aliases
+		// have usage_count=0 after merge so they don't actually
+		// contribute, but the explicit filter mirrors the slow path's
+		// canonical-only image_tags rows.
+		var n int
+		if err := database.Read.QueryRow(
+			`SELECT COALESCE(SUM(usage_count), 0) FROM tags
+			 WHERE is_alias = 0
+			   AND category_id = (SELECT id FROM tag_categories WHERE name = ?)`,
+			e.Val,
+		).Scan(&n); err != nil {
+			return 0, false
+		}
+		if n < fastApproxThreshold {
+			return 0, false
+		}
+		return n, true
+	}
+	if IsFilterKeyword(e.Key) {
+		// Other filter keywords (fav, source, folder, ...) have their
+		// own selective indexes that the planner picks; no fast path
+		// shortcut is needed.
+		return 0, false
+	}
+	// Category-qualified single tag (e.g. character:miku) or a
+	// literal-tag fallback (e.g. nier:automata). Match buildFilterExpr's
+	// categoryExists branch by looking the category up first.
+	var catID int64
+	if err := database.Read.QueryRow(
+		`SELECT id FROM tag_categories WHERE name = ?`, e.Key,
+	).Scan(&catID); err != nil {
+		// Not a real category; the slow path falls back to a literal-
+		// tag-name match for the whole "key:val" string. Bail.
+		return 0, false
+	}
+	var n int
+	err := database.Read.QueryRow(
+		`SELECT canon.usage_count FROM tags t
+		 JOIN tags canon ON canon.id = COALESCE(t.canonical_tag_id, t.id)
+		 WHERE t.name = ? AND t.category_id = ?
+		 LIMIT 1`,
+		e.Val, catID,
+	).Scan(&n)
+	if err == sql.ErrNoRows {
+		return 0, true
+	}
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+func fastVisibleCount(database *db.DB) (int, bool) {
+	var n int
+	if err := database.Read.QueryRow(
+		`SELECT COUNT(*) FROM images WHERE is_missing = 0`,
+	).Scan(&n); err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // ExecuteAdjacent returns the image IDs immediately before and after
@@ -389,8 +678,16 @@ func SidebarTagsWithGlobalCount(database *db.DB, imageIDs []int64) ([]models.Tag
 // without a cap the executor joined image_tags ⋈ images for every match
 // just to discard all but the top 10. Bounding by global usage_count is
 // safe because COUNT(DISTINCT i.id) ≤ tags.usage_count, so a candidate
-// outside the cap cannot outrank one inside it on combo count.
-const suggestCandidateCap = 200
+// outside the cap cannot outrank one inside it on combo count. The
+// dropdown surfaces 10 results, so 5x headroom absorbs the prefix-then-
+// substring de-dup pass without dragging tail candidates into the join.
+const suggestCandidateCap = 50
+
+// suggestContextCap bounds the materialised context-image set. The combo
+// count for hot context tags becomes a lower bound past the cap, but
+// the relative ordering of suggestions is preserved because tied
+// candidates fall through to global usage_count for tie-breaking.
+const suggestContextCap = 5000
 
 // SuggestTagsWithFilter returns up to limit tags matching prefix that
 // also co-occur with at least one image matching expr. UsageCount on
@@ -426,8 +723,11 @@ func SuggestTagsWithFilter(database *db.DB, expr Expr, prefix, categoryName stri
 	// EXISTS subquery per row. The image_tags PK makes (image_id, tag_id)
 	// unique, so COUNT(it.image_id) within a group fixed at one tag_id
 	// equals the original COUNT(DISTINCT i.id).
+	//
+	// suggestContextCap keeps the per-candidate join bounded; combo
+	// counts become a lower bound past the cap.
 	baseSQL := `WITH ctx AS (
-	                SELECT i.id AS image_id FROM images i WHERE %s
+	                SELECT i.id AS image_id FROM images i WHERE %s LIMIT ?
 	            ),
 	            cand AS (
 	                SELECT id, category_id, usage_count
@@ -458,8 +758,9 @@ func SuggestTagsWithFilter(database *db.DB, expr Expr, prefix, categoryName stri
 
 	run := func(pat string, prior []models.Tag, remaining int, nameNotLike string) ([]models.Tag, error) {
 		extra := catClause
-		qargs := make([]any, 0, 4+len(args)+len(catArgs))
+		qargs := make([]any, 0, 5+len(args)+len(catArgs))
 		qargs = append(qargs, args...)
+		qargs = append(qargs, suggestContextCap)
 		qargs = append(qargs, pat)
 		qargs = append(qargs, catArgs...)
 		if nameNotLike != "" {

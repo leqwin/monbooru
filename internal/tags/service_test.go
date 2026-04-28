@@ -399,6 +399,35 @@ func TestRelatedImages(t *testing.T) {
 	}
 }
 
+func TestRelatedImages_DropsPopularTags(t *testing.T) {
+	// A tag whose global usage_count is above relatedMaxTagUsage carries
+	// no discriminative signal, so it must not contribute to the seed
+	// set. With it dropped, an image whose only shared tag is the
+	// popular one yields an empty related panel.
+	database, svc := setupTestDB(t)
+	catID := generalCategoryID(t, svc)
+
+	img1 := insertTestImage(t, database, "rel_pop1")
+	img2 := insertTestImage(t, database, "rel_pop2")
+
+	tag, _ := svc.GetOrCreateTag("very_popular", catID)
+	svc.AddTagToImage(img1, tag.ID, false, nil)
+	svc.AddTagToImage(img2, tag.ID, false, nil)
+	if _, err := database.Write.Exec(
+		`UPDATE tags SET usage_count = ? WHERE id = ?`, relatedMaxTagUsage+1, tag.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	related, err := svc.RelatedImages(img1, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(related) != 0 {
+		t.Fatalf("related = %+v, want empty (shared tag is over the popularity cap)", related)
+	}
+}
+
 func TestListTags_All(t *testing.T) {
 	_, svc := setupTestDB(t)
 	catID := generalCategoryID(t, svc)
@@ -958,10 +987,9 @@ func TestValidateTagName_PunctuationOnly(t *testing.T) {
 }
 
 func TestValidateTagName_AllowsColon(t *testing.T) {
-	// Colon was moved into the allowed set so legitimate names like `:3`
-	// and `nier:automata` round-trip. The colon doubles as the
-	// category:tag separator at input-parse time, but that's resolved
-	// before names reach the validator.
+	// Names like `:3` and `nier:automata` must round-trip through the
+	// validator. The colon doubles as the category:tag separator at
+	// input-parse time, but that's resolved before names reach here.
 	_, svc := setupTestDB(t)
 	catID := generalCategoryID(t, svc)
 
@@ -971,8 +999,8 @@ func TestValidateTagName_AllowsColon(t *testing.T) {
 		}
 	}
 
-	// All-punctuation (colons and hyphens only) must still be rejected:
-	// the "must contain a letter or digit" rule is unchanged.
+	// All-punctuation (colons and hyphens only) is still rejected by the
+	// "must contain a letter or digit" rule.
 	if _, err := svc.GetOrCreateTag("::-:", catID); err == nil {
 		t.Error("expected all-punctuation name to be rejected even with colon allowed")
 	}

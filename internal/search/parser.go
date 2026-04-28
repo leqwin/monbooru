@@ -51,8 +51,6 @@ func Parse(query string) (Expr, error) {
 	return result, nil
 }
 
-// --- Tokenizer ---
-
 type tokenKind int
 
 const (
@@ -133,8 +131,6 @@ func tokenize(query string) []token {
 	}
 	return tokens
 }
-
-// --- Parser ---
 
 type parser struct {
 	tokens []token

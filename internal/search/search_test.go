@@ -53,8 +53,8 @@ func TestParse_OR(t *testing.T) {
 }
 
 func TestParse_ORChain(t *testing.T) {
-	// Chained OR used to silently drop everything past the first pair;
-	// `a OR b OR c` should produce three leaves, not two.
+	// `a OR b OR c` must produce three leaves, not two; chained ORs past
+	// the first pair must not be silently dropped.
 	e, _ := Parse("a OR b OR c")
 	or, ok := e.(OrExpr)
 	if !ok {
@@ -403,6 +403,12 @@ func TestExecute_TagAliasResolvesToCanonical(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
+	// match the AddTagToImage invariant fastTagTotal trusts.
+	if _, err := database.Write.Exec(
+		`UPDATE tags SET usage_count = 1 WHERE id = ?`, canonID,
+	); err != nil {
+		t.Fatal(err)
+	}
 
 	result, err := Execute(database, Query{
 		Expr:  TagExpr{Tag: "cat"},
@@ -414,6 +420,532 @@ func TestExecute_TagAliasResolvesToCanonical(t *testing.T) {
 	}
 	if result.Total != 1 {
 		t.Errorf("Total = %d, want 1 (alias should resolve to canonical)", result.Total)
+	}
+}
+
+func TestIsPureTagExpr(t *testing.T) {
+	tests := []struct {
+		name string
+		expr Expr
+		want bool
+	}{
+		{"literal tag", TagExpr{Tag: "1girl"}, true},
+		{"prefix tag", TagExpr{Tag: "blue", Wildcard: "prefix"}, true},
+		{"substring tag", TagExpr{Tag: "blue", Wildcard: "substring"}, true},
+		{"and of tags", AndExpr{Left: TagExpr{Tag: "a"}, Right: TagExpr{Tag: "b"}}, true},
+		{"or of tags", OrExpr{Left: TagExpr{Tag: "a"}, Right: TagExpr{Tag: "b"}}, true},
+		{"not tag", NotExpr{Expr: TagExpr{Tag: "a"}}, true},
+		{"cat: filter", FilterExpr{Key: "cat", Val: "character"}, true},
+		{"category-qualified (unknown key)", FilterExpr{Key: "character", Val: "miku"}, true},
+		{"colon tag fallback (unknown key)", FilterExpr{Key: "nier", Val: "automata"}, true},
+		{"fav filter", FilterExpr{Key: "fav", Val: "true"}, false},
+		{"source filter", FilterExpr{Key: "source", Val: "ai"}, false},
+		{"folder filter", FilterExpr{Key: "folder", Val: "anime"}, false},
+		{"tag and fav", AndExpr{Left: TagExpr{Tag: "a"}, Right: FilterExpr{Key: "fav", Val: "true"}}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isPureTagExpr(tt.expr); got != tt.want {
+				t.Errorf("isPureTagExpr(%+v) = %v, want %v", tt.expr, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFastTagTotal_NonexistentTag(t *testing.T) {
+	database, _ := setupSearchDB(t)
+	n, ok := fastTagTotal(database, TagExpr{Tag: "no_such_tag"})
+	if !ok {
+		t.Fatal("nonexistent tag should resolve as confirmed-empty (ok=true)")
+	}
+	if n != 0 {
+		t.Errorf("count = %d, want 0", n)
+	}
+}
+
+func TestFastTagTotal_SingleCanonical(t *testing.T) {
+	database, _ := setupSearchDB(t)
+	var generalID int64
+	database.Read.QueryRow(`SELECT id FROM tag_categories WHERE name = 'general'`).Scan(&generalID)
+
+	if _, err := database.Write.Exec(
+		`INSERT INTO tags (name, category_id, usage_count) VALUES ('hot', ?, 549514)`,
+		generalID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	n, ok := fastTagTotal(database, TagExpr{Tag: "hot"})
+	if !ok {
+		t.Fatal("single-canonical tag should hit fast path (ok=true)")
+	}
+	if n != 549514 {
+		t.Errorf("count = %d, want 549514", n)
+	}
+}
+
+func TestFastTagTotal_AliasFollowsCanonical(t *testing.T) {
+	database, _ := setupSearchDB(t)
+	var generalID int64
+	database.Read.QueryRow(`SELECT id FROM tag_categories WHERE name = 'general'`).Scan(&generalID)
+
+	var canonID int64
+	database.Write.QueryRow(
+		`INSERT INTO tags (name, category_id, usage_count) VALUES ('feline', ?, 7) RETURNING id`,
+		generalID,
+	).Scan(&canonID)
+	if _, err := database.Write.Exec(
+		`INSERT INTO tags (name, category_id, is_alias, canonical_tag_id) VALUES ('cat', ?, 1, ?)`,
+		generalID, canonID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	n, ok := fastTagTotal(database, TagExpr{Tag: "cat"})
+	if !ok {
+		t.Fatal("alias should resolve via canonical (ok=true)")
+	}
+	if n != 7 {
+		t.Errorf("count = %d, want 7 (canonical's usage_count)", n)
+	}
+}
+
+func TestFastTagTotal_MultipleCanonicalsFallthrough(t *testing.T) {
+	database, _ := setupSearchDB(t)
+	var generalID, charID int64
+	database.Read.QueryRow(`SELECT id FROM tag_categories WHERE name = 'general'`).Scan(&generalID)
+	database.Read.QueryRow(`SELECT id FROM tag_categories WHERE name = 'character'`).Scan(&charID)
+
+	if _, err := database.Write.Exec(
+		`INSERT INTO tags (name, category_id, usage_count) VALUES ('cat', ?, 3)`, generalID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Write.Exec(
+		`INSERT INTO tags (name, category_id, usage_count) VALUES ('cat', ?, 5)`, charID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := fastTagTotal(database, TagExpr{Tag: "cat"}); ok {
+		t.Error("multi-canonical name must fall through to slow path (ok=false)")
+	}
+}
+
+func TestFastTagTotal_WildcardPrefix(t *testing.T) {
+	database, _ := setupSearchDB(t)
+	var generalID int64
+	database.Read.QueryRow(`SELECT id FROM tag_categories WHERE name = 'general'`).Scan(&generalID)
+
+	// Usages above fastApproxThreshold so the upper-bound short-circuit
+	// engages instead of falling through to the slow exact COUNT.
+	if _, err := database.Write.Exec(
+		`INSERT INTO tags (name, category_id, usage_count) VALUES
+		    ('blue_eyes',  ?, 40000),
+		    ('blue_hair',  ?, 20000),
+		    ('green_eyes', ?, 30)`,
+		generalID, generalID, generalID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	n, ok := fastTagTotal(database, TagExpr{Tag: "blue", Wildcard: "prefix"})
+	if !ok {
+		t.Fatal("wildcard prefix should hit fast path")
+	}
+	if n != 60000 {
+		t.Errorf("count = %d, want 60000 (sum over name LIKE 'blue%%')", n)
+	}
+}
+
+func TestFastTagTotal_WildcardSubstring(t *testing.T) {
+	database, _ := setupSearchDB(t)
+	var generalID int64
+	database.Read.QueryRow(`SELECT id FROM tag_categories WHERE name = 'general'`).Scan(&generalID)
+
+	if _, err := database.Write.Exec(
+		`INSERT INTO tags (name, category_id, usage_count) VALUES
+		    ('blue_eyes',  ?, 40000),
+		    ('light_blue', ?, 20000),
+		    ('green_eyes', ?, 30)`,
+		generalID, generalID, generalID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	n, ok := fastTagTotal(database, TagExpr{Tag: "blue", Wildcard: "substring"})
+	if !ok {
+		t.Fatal("wildcard substring should hit fast path")
+	}
+	if n != 60000 {
+		t.Errorf("count = %d, want 60000 (sum over name LIKE '%%blue%%')", n)
+	}
+}
+
+func TestFastTagTotal_WildcardBelowThresholdFallsThrough(t *testing.T) {
+	// Multi-canonical wildcard with small usages: the slow path is fast
+	// and exact, so the fast path bails to keep displayed totals exact.
+	database, _ := setupSearchDB(t)
+	var generalID int64
+	database.Read.QueryRow(`SELECT id FROM tag_categories WHERE name = 'general'`).Scan(&generalID)
+
+	if _, err := database.Write.Exec(
+		`INSERT INTO tags (name, category_id, usage_count) VALUES
+		    ('blue_eyes', ?, 5),
+		    ('blue_hair', ?, 3)`,
+		generalID, generalID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := fastTagTotal(database, TagExpr{Tag: "blue", Wildcard: "prefix"}); ok {
+		t.Error("sub-threshold wildcard should fall through to the exact slow path")
+	}
+}
+
+func TestFastTagTotal_WildcardCollapsesAlias(t *testing.T) {
+	database, _ := setupSearchDB(t)
+	var generalID int64
+	database.Read.QueryRow(`SELECT id FROM tag_categories WHERE name = 'general'`).Scan(&generalID)
+
+	var canonID int64
+	database.Write.QueryRow(
+		`INSERT INTO tags (name, category_id, usage_count) VALUES ('blueberry', ?, 7) RETURNING id`,
+		generalID,
+	).Scan(&canonID)
+	if _, err := database.Write.Exec(
+		`INSERT INTO tags (name, category_id, is_alias, canonical_tag_id) VALUES ('bluebell', ?, 1, ?)`,
+		generalID, canonID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	n, ok := fastTagTotal(database, TagExpr{Tag: "blue", Wildcard: "prefix"})
+	if !ok {
+		t.Fatal("wildcard with alias should hit fast path")
+	}
+	if n != 7 {
+		t.Errorf("count = %d, want 7 (alias and canonical collapse via DISTINCT COALESCE)", n)
+	}
+}
+
+func TestFastTagTotal_WildcardEmpty(t *testing.T) {
+	database, _ := setupSearchDB(t)
+	n, ok := fastTagTotal(database, TagExpr{Tag: "nomatch_zzzzz", Wildcard: "prefix"})
+	if !ok {
+		t.Fatal("wildcard with no matches should resolve as confirmed-empty")
+	}
+	if n != 0 {
+		t.Errorf("count = %d, want 0", n)
+	}
+}
+
+func TestFastTagTotal_WildcardEscapesMetacharacters(t *testing.T) {
+	// A wildcard like `foo_*` must match `foo_bar` literally (the underscore
+	// is part of the tag name) and NOT every name with any character at
+	// position 4. escapeLike + ESCAPE '\' carries that through.
+	database, _ := setupSearchDB(t)
+	var generalID int64
+	database.Read.QueryRow(`SELECT id FROM tag_categories WHERE name = 'general'`).Scan(&generalID)
+
+	if _, err := database.Write.Exec(
+		`INSERT INTO tags (name, category_id, usage_count) VALUES
+		    ('foo_bar',  ?, 10),
+		    ('fooXbar', ?, 99)`,
+		generalID, generalID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	n, ok := fastTagTotal(database, TagExpr{Tag: "foo_b", Wildcard: "prefix"})
+	if !ok {
+		t.Fatal("wildcard with literal underscore should hit fast path")
+	}
+	if n != 10 {
+		t.Errorf("count = %d, want 10 (only foo_bar, not fooXbar)", n)
+	}
+}
+
+func TestFastTagTotal_RejectsNonRecognisedShapes(t *testing.T) {
+	database, _ := setupSearchDB(t)
+	// Filter keywords with their own selective indexes still fall through.
+	for _, key := range []string{"fav", "source", "folder", "width", "date"} {
+		if _, ok := fastTagTotal(database, FilterExpr{Key: key, Val: "true"}); ok {
+			t.Errorf("FilterExpr{%q} should fall through to slow path", key)
+		}
+	}
+	// AND/OR with a non-fast-pathable leaf falls through.
+	mixed := AndExpr{Left: TagExpr{Tag: "a"}, Right: FilterExpr{Key: "fav", Val: "true"}}
+	if _, ok := fastTagTotal(database, mixed); ok {
+		t.Error("AND with FilterExpr{fav} leaf should fall through")
+	}
+	mixedOr := OrExpr{Left: TagExpr{Tag: "a"}, Right: FilterExpr{Key: "fav", Val: "true"}}
+	if _, ok := fastTagTotal(database, mixedOr); ok {
+		t.Error("OR with FilterExpr{fav} leaf should fall through")
+	}
+	// NotExpr with non-literal inner falls through.
+	if _, ok := fastTagTotal(database, NotExpr{Expr: TagExpr{Tag: "blue", Wildcard: "prefix"}}); ok {
+		t.Error("NOT with wildcard inner should fall through")
+	}
+	if _, ok := fastTagTotal(database, NotExpr{Expr: FilterExpr{Key: "fav", Val: "true"}}); ok {
+		t.Error("NOT with non-tag inner should fall through")
+	}
+}
+
+func TestFastTagTotal_NotSingleTag(t *testing.T) {
+	database, env := setupSearchDB(t)
+	ingestTestImage(t, database, env, "n_a.png")
+	ingestTestImage(t, database, env, "n_b.png")
+	ingestTestImage(t, database, env, "n_c.png")
+
+	var generalID int64
+	database.Read.QueryRow(`SELECT id FROM tag_categories WHERE name = 'general'`).Scan(&generalID)
+	if _, err := database.Write.Exec(
+		`INSERT INTO tags (name, category_id, usage_count) VALUES ('hot', ?, 2)`, generalID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	n, ok := fastTagTotal(database, NotExpr{Expr: TagExpr{Tag: "hot"}})
+	if !ok {
+		t.Fatal("NOT single tag should hit fast path")
+	}
+	if n != 1 {
+		t.Errorf("count = %d, want 1 (3 visible - 2 hot)", n)
+	}
+}
+
+func TestFastTagTotal_NotMissingTag(t *testing.T) {
+	// NotExpr{tag} where the tag doesn't exist should report all visible.
+	database, env := setupSearchDB(t)
+	ingestTestImage(t, database, env, "nm_a.png")
+	ingestTestImage(t, database, env, "nm_b.png")
+
+	n, ok := fastTagTotal(database, NotExpr{Expr: TagExpr{Tag: "no_such_tag"}})
+	if !ok {
+		t.Fatal("NOT of missing tag should hit fast path")
+	}
+	if n != 2 {
+		t.Errorf("count = %d, want 2 (all visible)", n)
+	}
+}
+
+func TestFastTagTotal_AndPositiveTags(t *testing.T) {
+	database, _ := setupSearchDB(t)
+	var generalID int64
+	database.Read.QueryRow(`SELECT id FROM tag_categories WHERE name = 'general'`).Scan(&generalID)
+	// Each tag's usage above fastApproxThreshold so min(...) clears the
+	// gate and the upper-bound short-circuit engages.
+	if _, err := database.Write.Exec(
+		`INSERT INTO tags (name, category_id, usage_count) VALUES
+		    ('a', ?, 100000),
+		    ('b', ?, 60000),
+		    ('c', ?, 200000)`,
+		generalID, generalID, generalID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	expr := AndExpr{
+		Left: TagExpr{Tag: "a"},
+		Right: AndExpr{
+			Left:  TagExpr{Tag: "b"},
+			Right: TagExpr{Tag: "c"},
+		},
+	}
+	n, ok := fastTagTotal(database, expr)
+	if !ok {
+		t.Fatal("AND of high-usage positive tags should hit fast path")
+	}
+	if n != 60000 {
+		t.Errorf("count = %d, want 60000 (min upper bound)", n)
+	}
+}
+
+func TestFastTagTotal_AndBelowThresholdFallsThrough(t *testing.T) {
+	// Small AND queries fall through to the exact slow COUNT so totals
+	// like `cute dog` (no overlap → 0) stay exact in tests and small
+	// libraries.
+	database, _ := setupSearchDB(t)
+	var generalID int64
+	database.Read.QueryRow(`SELECT id FROM tag_categories WHERE name = 'general'`).Scan(&generalID)
+	if _, err := database.Write.Exec(
+		`INSERT INTO tags (name, category_id, usage_count) VALUES ('cute', ?, 3), ('dog', ?, 2)`,
+		generalID, generalID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	expr := AndExpr{Left: TagExpr{Tag: "cute"}, Right: TagExpr{Tag: "dog"}}
+	if _, ok := fastTagTotal(database, expr); ok {
+		t.Error("sub-threshold AND should fall through to the exact slow path")
+	}
+}
+
+func TestFastTagTotal_OrCappedAtVisibleCount(t *testing.T) {
+	database, env := setupSearchDB(t)
+	ingestTestImage(t, database, env, "or_cap.png") // 1 visible image total
+
+	var generalID int64
+	database.Read.QueryRow(`SELECT id FROM tag_categories WHERE name = 'general'`).Scan(&generalID)
+	// Drift-style usage_counts above what the (1) visible image
+	// supports; the cap should clamp the upper bound to visible_count.
+	if _, err := database.Write.Exec(
+		`INSERT INTO tags (name, category_id, usage_count) VALUES ('a', ?, 30000), ('b', ?, 30000)`,
+		generalID, generalID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	expr := OrExpr{Left: TagExpr{Tag: "a"}, Right: TagExpr{Tag: "b"}}
+	n, ok := fastTagTotal(database, expr)
+	if !ok {
+		t.Fatal("OR fast path expected")
+	}
+	if n != 1 {
+		t.Errorf("count = %d, want 1 (sum=60000 capped at visible=1)", n)
+	}
+}
+
+func TestFastTagTotal_OrBelowThresholdFallsThrough(t *testing.T) {
+	database, _ := setupSearchDB(t)
+	var generalID int64
+	database.Read.QueryRow(`SELECT id FROM tag_categories WHERE name = 'general'`).Scan(&generalID)
+	if _, err := database.Write.Exec(
+		`INSERT INTO tags (name, category_id, usage_count) VALUES ('a', ?, 5), ('b', ?, 3)`,
+		generalID, generalID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	expr := OrExpr{Left: TagExpr{Tag: "a"}, Right: TagExpr{Tag: "b"}}
+	if _, ok := fastTagTotal(database, expr); ok {
+		t.Error("sub-threshold OR should fall through to the exact slow path")
+	}
+}
+
+func TestFastTagTotal_CatFilter(t *testing.T) {
+	database, _ := setupSearchDB(t)
+	var generalID, charID int64
+	database.Read.QueryRow(`SELECT id FROM tag_categories WHERE name = 'general'`).Scan(&generalID)
+	database.Read.QueryRow(`SELECT id FROM tag_categories WHERE name = 'character'`).Scan(&charID)
+	// Sum within character above fastApproxThreshold so the upper-bound
+	// short-circuit engages.
+	if _, err := database.Write.Exec(
+		`INSERT INTO tags (name, category_id, usage_count) VALUES
+		    ('miku',  ?, 40000),
+		    ('haku',  ?, 20000),
+		    ('1girl', ?, 100000)`,
+		charID, charID, generalID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	n, ok := fastTagTotal(database, FilterExpr{Key: "cat", Val: "character"})
+	if !ok {
+		t.Fatal("cat: filter should hit fast path")
+	}
+	if n != 60000 {
+		t.Errorf("count = %d, want 60000 (sum within character, general excluded)", n)
+	}
+}
+
+func TestFastTagTotal_CatFilterBelowThresholdFallsThrough(t *testing.T) {
+	database, _ := setupSearchDB(t)
+	var charID int64
+	database.Read.QueryRow(`SELECT id FROM tag_categories WHERE name = 'character'`).Scan(&charID)
+	if _, err := database.Write.Exec(
+		`INSERT INTO tags (name, category_id, usage_count) VALUES ('miku', ?, 5), ('haku', ?, 3)`,
+		charID, charID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fastTagTotal(database, FilterExpr{Key: "cat", Val: "character"}); ok {
+		t.Error("sub-threshold cat: should fall through to the exact slow path")
+	}
+}
+
+func TestFastTagTotal_CategoryQualifiedTag(t *testing.T) {
+	database, _ := setupSearchDB(t)
+	var charID int64
+	database.Read.QueryRow(`SELECT id FROM tag_categories WHERE name = 'character'`).Scan(&charID)
+	if _, err := database.Write.Exec(
+		`INSERT INTO tags (name, category_id, usage_count) VALUES ('miku', ?, 5)`, charID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	n, ok := fastTagTotal(database, FilterExpr{Key: "character", Val: "miku"})
+	if !ok {
+		t.Fatal("character:miku should hit fast path")
+	}
+	if n != 5 {
+		t.Errorf("count = %d, want 5", n)
+	}
+}
+
+func TestFastTagTotal_CategoryQualifiedFollowsAlias(t *testing.T) {
+	// character:cat aliased to character:feline - querying the alias
+	// should report the canonical's usage_count.
+	database, _ := setupSearchDB(t)
+	var charID int64
+	database.Read.QueryRow(`SELECT id FROM tag_categories WHERE name = 'character'`).Scan(&charID)
+
+	var canonID int64
+	database.Write.QueryRow(
+		`INSERT INTO tags (name, category_id, usage_count) VALUES ('feline', ?, 9) RETURNING id`,
+		charID,
+	).Scan(&canonID)
+	if _, err := database.Write.Exec(
+		`INSERT INTO tags (name, category_id, is_alias, canonical_tag_id) VALUES ('cat', ?, 1, ?)`,
+		charID, canonID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	n, ok := fastTagTotal(database, FilterExpr{Key: "character", Val: "cat"})
+	if !ok {
+		t.Fatal("alias should resolve via canonical")
+	}
+	if n != 9 {
+		t.Errorf("count = %d, want 9 (canonical's usage_count)", n)
+	}
+}
+
+func TestFastTagTotal_CategoryQualifiedMissingTag(t *testing.T) {
+	// (name, cat) pair doesn't exist but the category does - exact 0.
+	database, _ := setupSearchDB(t)
+	n, ok := fastTagTotal(database, FilterExpr{Key: "character", Val: "no_such_char"})
+	if !ok {
+		t.Fatal("missing tag in real category should still hit fast path")
+	}
+	if n != 0 {
+		t.Errorf("count = %d, want 0", n)
+	}
+}
+
+func TestFastTagTotal_CategoryQualifiedUnknownCategory(t *testing.T) {
+	// "nier:automata" - "nier" is not a real category. Slow path falls
+	// back to a literal-tag search; fast path bails so that runs.
+	database, _ := setupSearchDB(t)
+	if _, ok := fastTagTotal(database, FilterExpr{Key: "nier", Val: "automata"}); ok {
+		t.Error("unknown category must fall through")
+	}
+}
+
+func TestExecute_FastTagTotal_EmptyShortCircuits(t *testing.T) {
+	database, env := setupSearchDB(t)
+	ingestTestImage(t, database, env, "fast_empty.png")
+
+	result, err := Execute(database, Query{
+		Expr:  TagExpr{Tag: "tag_that_does_not_exist"},
+		Page:  1,
+		Limit: 40,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Total != 0 || len(result.Results) != 0 {
+		t.Errorf("Total = %d, Results = %d, want both 0", result.Total, len(result.Results))
 	}
 }
 
@@ -432,8 +964,6 @@ func TestExecute_FullSync(t *testing.T) {
 		t.Errorf("Total = %d, want >= 2", result.Total)
 	}
 }
-
-// --- buildOrder tests ---
 
 func TestBuildOrder_Newest(t *testing.T) {
 	got := buildOrder("newest", "", 0)
@@ -478,8 +1008,6 @@ func TestBuildOrder_Random(t *testing.T) {
 	}
 }
 
-// --- buildTagExpr tests ---
-
 func TestBuildWhere_TagExact(t *testing.T) {
 	expr := TagExpr{Tag: "cute", Wildcard: ""}
 	where, args, _ := buildWhere(expr)
@@ -514,8 +1042,6 @@ func TestBuildWhere_TagSubstring(t *testing.T) {
 		t.Errorf("args = %v", args)
 	}
 }
-
-// --- buildFilterExpr tests ---
 
 func TestBuildWhere_FavFalse(t *testing.T) {
 	expr := FilterExpr{Key: "fav", Val: "false"}
@@ -592,10 +1118,9 @@ func TestBuildWhere_Height(t *testing.T) {
 }
 
 func TestBuildWhere_WidthNonNumericRejected(t *testing.T) {
-	// `width:>=abc` used to bind the string "abc" into the SQL and let
-	// SQLite silently coerce it to 0, matching every row with width >= 0.
-	// Now it produces an explicit `1=0` so the user sees an empty result
-	// instead of a too-wide one.
+	// A non-numeric width comparand must produce `1=0`, not bind the string
+	// into the SQL — SQLite would coerce it to 0 and match every row with
+	// width >= 0, which is worse than returning nothing.
 	expr := FilterExpr{Key: "width", Val: ">=abc"}
 	where, args, _ := buildWhere(expr)
 	if len(args) != 0 {
@@ -622,10 +1147,10 @@ func TestBuildWhere_MissingFalse(t *testing.T) {
 }
 
 func TestBuildWhere_NegatedMissingFalse(t *testing.T) {
-	// `-missing:false` should mean "show me missing images" - equivalent
-	// to `missing:true`. Previously the auto-injected
-	// `AND is_missing = 0` clause was still appended on top of the
-	// negation and the query collapsed to zero results.
+	// `-missing:false` should mean "show me missing images", equivalent to
+	// `missing:true`. The auto-injected `AND is_missing = 0` clause must
+	// not be layered on top of the negation, or the query collapses to
+	// zero results.
 	expr := NotExpr{Expr: FilterExpr{Key: "missing", Val: "false"}}
 	where, _, _ := buildWhere(expr)
 	if !strings.Contains(where, "NOT") {
@@ -690,8 +1215,6 @@ func TestBuildWhereDB_ColonUsesCategoryWhenPrefixExists(t *testing.T) {
 	}
 }
 
-// --- buildDateFilter tests ---
-
 func TestBuildDateFilter_After(t *testing.T) {
 	b := &whereBuilder{}
 	clause := b.buildDateFilter(">2024-01-01")
@@ -726,8 +1249,6 @@ func TestBuildDateFilter_Exact(t *testing.T) {
 		t.Errorf("exact date clause = %q", clause)
 	}
 }
-
-// --- parseCompOp tests ---
 
 func TestParseCompOp_GTE(t *testing.T) {
 	op, val := parseCompOp(">=1920")
@@ -770,8 +1291,6 @@ func TestParseCompOp_Default(t *testing.T) {
 		t.Errorf("default op=%q val=%q", op, val)
 	}
 }
-
-// --- buildExpr OR/NOT/AND tests ---
 
 func TestBuildWhere_OR(t *testing.T) {
 	expr := OrExpr{
@@ -821,8 +1340,6 @@ func TestBuildWhere_AND_LeftUnknown(t *testing.T) {
 		t.Errorf("expected 1 arg, got %d: %v", len(args), args)
 	}
 }
-
-// --- SidebarTagsWithGlobalCount test ---
 
 func TestSidebarTagsWithGlobalCount_Empty(t *testing.T) {
 	database, _ := setupSearchDB(t)
@@ -888,8 +1405,6 @@ func TestSidebarTagsWithGlobalCount_WithImages(t *testing.T) {
 		t.Errorf("shared tag usage = %d, want 2", got[*found].UsageCount)
 	}
 }
-
-// --- Execute with sort/filter integration tests ---
 
 func TestExecute_SortFilesize(t *testing.T) {
 	database, cfg := setupSearchDB(t)

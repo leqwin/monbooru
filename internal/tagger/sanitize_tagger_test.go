@@ -5,10 +5,10 @@ package tagger
 import "testing"
 
 // TestSanitizeLabel_PreservesColon locks in the colon-in-label contract:
-// the allowlist was widened to keep `:` so labels like `:3`, `nier:automata`,
-// and WD14's `rating:general` pseudo-tag round-trip into the tags table as
-// written. Stripping `:` would make the wd14RatingTags lookup miss and
-// would collapse `:3` to `3`, silently merging it with an unrelated tag.
+// labels like `:3`, `nier:automata`, and WD14's `rating:general` pseudo-tag
+// must round-trip into the tags table as written. Stripping `:` would make
+// the wd14RatingTags lookup miss and would collapse `:3` to `3`, silently
+// merging it with an unrelated tag.
 func TestSanitizeLabel_PreservesColon(t *testing.T) {
 	cases := []struct {
 		in, want string

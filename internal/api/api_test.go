@@ -264,8 +264,6 @@ func TestBearerAuthAcceptsValidToken(t *testing.T) {
 	}
 }
 
-// --- openAPIDocs ---
-
 func TestOpenAPIDocs(t *testing.T) {
 	mux := newTestMux(t)
 	req := httptest.NewRequest("GET", "/api/v1/docs", nil)
@@ -289,8 +287,6 @@ func TestOpenAPIDocs(t *testing.T) {
 		t.Error("docs response should not load any external assets")
 	}
 }
-
-// --- getImage with valid ID ---
 
 func TestGetImage_ValidID(t *testing.T) {
 	env := newTestEnv(t)
@@ -319,8 +315,6 @@ func TestGetImage_InvalidID(t *testing.T) {
 		t.Errorf("expected 400, got %d", w.Code)
 	}
 }
-
-// --- createImage via JSON path ---
 
 func TestCreateImage_JSONPath(t *testing.T) {
 	env := newTestEnv(t)
@@ -397,8 +391,6 @@ func TestCreateImage_InvalidJSON(t *testing.T) {
 	}
 }
 
-// --- deleteImage ---
-
 func TestDeleteImage(t *testing.T) {
 	env := newTestEnv(t)
 	id := env.createTestImage(t, "del_test.png", 10, 10)
@@ -439,8 +431,6 @@ func TestDeleteImage_InvalidID(t *testing.T) {
 		t.Errorf("expected 400, got %d", w.Code)
 	}
 }
-
-// --- addImageTags / removeImageTags ---
 
 func TestAddImageTags(t *testing.T) {
 	env := newTestEnv(t)
@@ -634,9 +624,9 @@ func TestRemoveImageTags_ImageNotFound(t *testing.T) {
 }
 
 // findImageTag returns the (name, category) for the first tag attached to id
-// whose name matches want, or ("","") if none. Used by the colon-fallback
-// tests to confirm that a tag containing `:` was stored whole instead of
-// being split into a category/name pair.
+// whose name matches want, or ("","") if none. The colon-fallback tests use
+// it to assert that a tag containing `:` lands whole rather than split into
+// a category/name pair.
 func findImageTag(t *testing.T, env *testEnv, id int64, want string) (string, string) {
 	t.Helper()
 	rows, err := env.database.Read.Query(
@@ -780,8 +770,6 @@ func TestRemoveImageTags_CategoryMissFallsThroughToLiteral(t *testing.T) {
 	}
 }
 
-// --- searchImages with parameters ---
-
 func TestSearchImages_WithSort(t *testing.T) {
 	env := newTestEnv(t)
 	// Different widths produce different SHAs so each image is distinct.
@@ -859,8 +847,8 @@ func TestSearchImages_LimitCapped(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	// Assert both the presence of `limit` and its upper bound: the `if ok`
-	// guard used to let a missing field silently pass.
+	// Assert both the presence of `limit` and its upper bound; without the
+	// presence check a missing field would slip past the bound check.
 	raw, ok := resp["limit"]
 	if !ok {
 		t.Fatal("response missing 'limit'")
@@ -873,8 +861,6 @@ func TestSearchImages_LimitCapped(t *testing.T) {
 		t.Errorf("limit = %v, want <= 200 (spec §8.3 API max)", limit)
 	}
 }
-
-// --- parsePage and parseInt ---
 
 func TestParsePage(t *testing.T) {
 	req := httptest.NewRequest("GET", "/?page=3&limit=20", nil)
@@ -932,8 +918,6 @@ func TestParseInt_Invalid(t *testing.T) {
 	}
 }
 
-// --- CORS auth ---
-
 func TestCORSRejectsBadOrigin(t *testing.T) {
 	dir := t.TempDir()
 	database, _ := db.Open(dir + "/test.db")
@@ -981,8 +965,6 @@ func TestBearerAuth_MissingHeader(t *testing.T) {
 		t.Errorf("expected 401 for missing auth header, got %d", w.Code)
 	}
 }
-
-// --- createImage multipart upload ---
 
 func TestCreateImage_Multipart(t *testing.T) {
 	env := newTestEnv(t)
@@ -1036,8 +1018,6 @@ func TestCreateImage_Multipart_MissingFile(t *testing.T) {
 		t.Errorf("expected 400 for missing file field, got %d: %s", w.Code, w.Body.String())
 	}
 }
-
-// --- listTags with category filter ---
 
 func TestListTags_WithCategory(t *testing.T) {
 	env := newTestEnv(t)
@@ -1102,7 +1082,7 @@ func TestDeleteImage_DeleteEmptyFolder(t *testing.T) {
 	env.mux.ServeHTTP(w, req)
 
 	// With the folder empty, the handler must return 200 + the folder_deleted
-	// payload (images.go:431). 204 would mean the folder was not removed.
+	// payload. 204 would mean the folder was not removed.
 	if w.Code != http.StatusOK {
 		t.Fatalf("empty-folder delete expected 200, got %d: %s", w.Code, w.Body.String())
 	}

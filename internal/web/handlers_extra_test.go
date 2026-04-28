@@ -16,8 +16,6 @@ import (
 	"github.com/leqwin/monbooru/internal/gallery"
 )
 
-// --- moveImage handler ------------------------------------------------------
-
 func TestMoveImage_RejectsAbsolutePath(t *testing.T) {
 	srv := newTestServer(t)
 	id := seedImage(t, srv, "mv.png", 10, 10)
@@ -90,8 +88,6 @@ func TestMoveImage_HappyPath(t *testing.T) {
 	}
 }
 
-// --- foldersSuggest --------------------------------------------------------
-
 func TestFoldersSuggest_PrefixFilter(t *testing.T) {
 	srv := newTestServer(t)
 	cx := srv.Active()
@@ -131,8 +127,6 @@ func TestFoldersSuggest_PrefixFilter(t *testing.T) {
 	}
 }
 
-// --- saved-search CRUD -----------------------------------------------------
-
 func TestSavedSearch_CreateAndDelete(t *testing.T) {
 	srv := newTestServer(t)
 	csrf := srv.csrfToken("anon")
@@ -169,8 +163,6 @@ func TestSavedSearch_CreateAndDelete(t *testing.T) {
 	}
 }
 
-// --- category CRUD --------------------------------------------------------
-
 func TestCreateCategory_Post(t *testing.T) {
 	srv := newTestServer(t)
 	csrf := srv.csrfToken("anon")
@@ -194,8 +186,6 @@ func TestCreateCategory_Post(t *testing.T) {
 		t.Fatalf("category not persisted: %v", err)
 	}
 }
-
-// --- jobDismiss + jobCancel ------------------------------------------------
 
 func TestJobDismissPost_ClearsDoneSummary(t *testing.T) {
 	srv := newTestServer(t)
@@ -239,8 +229,6 @@ func TestJobCancelPost_CancelsRunning(t *testing.T) {
 	}
 	srv.jobs.Complete("cancelled test")
 }
-
-// --- re-extract replaces existing metadata rows ---------------------------
 
 func TestReExtract_ReplacesExistingMetadata(t *testing.T) {
 	srv := newTestServer(t)
@@ -295,8 +283,6 @@ func TestReExtract_ReplacesExistingMetadata(t *testing.T) {
 	}
 }
 
-// --- gallery switch lifecycle ---------------------------------------------
-
 func TestGallerySwitch_RejectedWhileJobRunning(t *testing.T) {
 	srv := newMultiGalleryServer(t)
 	// Hold the job manager lock.
@@ -340,8 +326,6 @@ func TestGallerySwitch_UnknownGalleryRejected(t *testing.T) {
 	}
 }
 
-// --- addTagToImage colon-in-name handling --------------------------------
-
 // imageTagCategory returns the category name of a tag attached to id whose
 // name equals want, or "" if no such row exists. Used by the colon tests to
 // confirm the parser kept the literal name instead of splitting it.
@@ -361,10 +345,9 @@ func imageTagCategory(t *testing.T, srv *Server, id int64, want string) string {
 }
 
 func TestAddTagToImage_ColonFallbackLiteral(t *testing.T) {
-	// `nier` is not a category, so the token must be stored whole in
-	// general. Previously this path rejected the input as "unknown
-	// category"; after the last commit it falls through to a literal
-	// tag-name insert.
+	// `nier` is not a category, so the token must fall through to a literal
+	// tag-name insert and land whole in general — not be rejected as an
+	// unknown category.
 	srv := newTestServer(t)
 	id := seedImage(t, srv, "colon_literal.png", 10, 10)
 

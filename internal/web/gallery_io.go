@@ -1031,8 +1031,6 @@ func nullFloat64Arg(n sql.NullFloat64) any {
 	return nil
 }
 
-// --- JSON stream writer ---
-
 // jsonWriter emits a single JSON object incrementally so each table's rows
 // stream out as we query them, bounding memory to one row at a time. Caller
 // drives it with objStart / field / arrayStart+arrayItem+arrayEnd / objEnd;
@@ -1142,8 +1140,6 @@ func streamRows(j *jsonWriter, key string, database *db.DB, query string, scan f
 	}
 	return j.err
 }
-
-// --- HTTP handlers ---
 
 // settingsGalleryExport serves GET /settings/galleries/{name}/export?format=&with_images=.
 // Plain GET so the browser saves the response as a file without HTMX wiring.

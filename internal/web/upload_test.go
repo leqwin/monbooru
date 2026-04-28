@@ -62,8 +62,6 @@ func makePNGBytes(t *testing.T, w, h int, r, g, b uint8) []byte {
 	return buf.Bytes()
 }
 
-// --- happy-path ingestion --------------------------------------------------
-
 func TestUploadPost_IngestsSinglePNG(t *testing.T) {
 	srv := newTestServer(t)
 	req := makeUploadReq(t, srv, map[string][]byte{
@@ -187,8 +185,6 @@ func TestUploadPost_SameShaReturnsDuplicate(t *testing.T) {
 	}
 }
 
-// --- path-safety rejection -------------------------------------------------
-
 func TestUploadPost_RejectsAbsoluteFolder(t *testing.T) {
 	srv := newTestServer(t)
 	req := makeUploadReq(t, srv, map[string][]byte{
@@ -240,8 +236,6 @@ func TestUploadPost_RejectsNestedTraversal(t *testing.T) {
 		t.Errorf("expected nested '..' rejection, got: %s", w.Body.String())
 	}
 }
-
-// --- empty / error paths ---------------------------------------------------
 
 func TestUploadPost_NoFilesRejected(t *testing.T) {
 	srv := newTestServer(t)

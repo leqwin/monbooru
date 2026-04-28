@@ -1,5 +1,12 @@
 # Changelog
 
+## [v1.4.2] - 2026-04-28
+
+### Internal
+- Search: fast-path counts for pure-tag, wildcard, NOT, AND, OR, and category-qualified queries; pinned partial sort index for the unfiltered-newest path; fast-path approximations gated on a per-query usage threshold.
+- Search: autocomplete candidate and context caps tightened; context CTE capped at 50k rows.
+- Tags: `RelatedImages` drops popular tags from the seed set and uses a smaller candidate buffer; tag-count recalc chunks by `tag_id` range to release the SQLite writer.
+
 ## [v1.4.1] - 2026-04-27
 
 ### Added
