@@ -54,7 +54,11 @@ type GalleryConfig struct {
 type TaggerConfig struct {
 	UseCUDA  bool             `toml:"use_cuda"`
 	Parallel int              `toml:"parallel"`
-	Taggers  []TaggerInstance `toml:"taggers"`
+	// IdleReleaseAfterMinutes is how long the cached ORT session may sit
+	// idle before the reclaim loop tears it down. 0 disables caching, so
+	// every run loads the model fresh. Default 30.
+	IdleReleaseAfterMinutes int              `toml:"idle_release_after_minutes"`
+	Taggers                 []TaggerInstance `toml:"taggers"`
 }
 
 type TaggerInstance struct {
@@ -113,7 +117,7 @@ func Default() *Config {
 			WatchEnabled:  true,
 			MaxFileSizeMB: 500,
 		},
-		Tagger: TaggerConfig{Parallel: 8},
+		Tagger: TaggerConfig{Parallel: 4, IdleReleaseAfterMinutes: 30},
 		Auth: AuthConfig{
 			SessionLifetimeDays: 7,
 		},

@@ -28,7 +28,7 @@ Designed for organizing your local media collection, including AI-generated imag
 - Per-gallery export and import: full backup (.db, .json, .zip with images), or a light format (.json or .zip with images) with only images<->tags map. See [docs/MIGRATING.md](docs/MIGRATING.md) for migrating from another supported booru-style app.
 - REST API for third-party integrations (e.g. adding images to the gallery from an external app)
 - Daily maintenance schedule: scheduled sync, auto-tag, recompute counts, merge general tags, and vacuum databases...
-- Fully offline, no telemetry
+- Fully offline, no inbound or outbound internet connection.
 
 ---
 
@@ -67,55 +67,28 @@ Autocomplete is combination-aware: the count next to each suggestion is for the 
 
 Sort options: newest, file size, random shuffle. Any query can be saved from the sidebar for one-click access later.
 
----
-
-## Tags
-
-Five built-in categories (General, Character, Artist, Copyright, Meta), each with its own color. Custom categories with custom colors are also supported.
-
-- Add tags manually or let the auto-tagger do it
-- The same name can live in multiple categories (`character:cat` vs `artist:cat`)
-- Merge tags, rename, move between categories
-- Category-aware autocomplete: typing `artist:` limits suggestions to artist tags
 
 ---
 
 ## Auto-tagger
 
 You can use autotaggers to tag your images automatically.  
-Place a model in the `models/` volume. Each tagger lives in its own subfolder with two files:
+Instructions are available in the settings page to download support autotaggers.
+You can also place other ONNX models in the `models/` volume. Each tagger lives in its own subfolder with two files:
 
 - `model.onnx`, the weights
 - `tags.csv` in WD14 format (`tag_id,name,category_id`), or `tags.txt` with one label per line (all labels are assigned to `general`)
 
-If neither default filename is present, monbooru picks the lone `.onnx` plus the lone `.csv`/`.txt` found in the folder, so models distributed with nonstandard names (e.g. `top_tags.txt`) work without extra config.
-
-Restart the container after adding a model, then enable it in **Settings → Auto-Tagger**. Multiple taggers can run at the same time, and each tag records which tagger produced it. Auto-tags can be removed per tagger or all at once without touching manual tags.
-
-Some models that have been tested :
-- Anime: https://huggingface.co/SmilingWolf/wd-swinv2-tagger-v3
-- Realistic: https://huggingface.co/fancyfeast/joytag
-
-Example setup (WD14 SwinV2):
-
-```bash
-MODEL_DIR=/data/monbooru/models
-mkdir -p "$MODEL_DIR/wd-swinv2"
-
-wget -O "$MODEL_DIR/wd-swinv2/model.onnx" \
-  https://huggingface.co/SmilingWolf/wd-swinv2-tagger-v3/resolve/main/model.onnx
-
-wget -O "$MODEL_DIR/wd-swinv2/tags.csv" \
-  https://huggingface.co/SmilingWolf/wd-swinv2-tagger-v3/resolve/main/selected_tags.csv
-```
+Reload the settings page after adding a model, then enable it in **Settings → Auto-Tagger**. Multiple taggers can run at the same time, and each tag records which tagger produced it. Auto-tags can be removed per tagger or all at once without touching manual tags.
 
 If no tagger is enabled, auto-tagging is simply disabled. The rest of the app works normally.
+The model stays loaded in memory across back-to-back jobs and is unloaded automatically after 30 minutes without a tagger run. Tune the window via `tagger.idle_release_after_minutes` in the TOML; set it to `0` to release on every run.
 
 ### GPU (CUDA)
 
 The default image is CPU-only (~210 MB). For GPU inference, switch to the `-cuda` image (~2.3 GB), pass the GPU into the container the usual way, then enable **Settings → Auto-Tagger → Use GPU (CUDA)** (or set `MONBOORU_TAGGER_USE_CUDA=true`).
 
-The current mode (GPU or CPU) is shown as a badge in the Auto-Tagger section. The `-cuda` image also runs on CPU when the toggle is off, so switching between the two does not require a rebuild. Worker count is configurable in Settings (default 8); increase it on GPU if preprocessing becomes the bottleneck.
+The current mode (GPU or CPU) is shown as a badge in the Auto-Tagger section. The `-cuda` image also runs on CPU when the toggle is off, so switching between the two does not require a rebuild. Worker count is configurable in Settings (default 4); increase it on GPU if preprocessing becomes the bottleneck.
 
 ---
 

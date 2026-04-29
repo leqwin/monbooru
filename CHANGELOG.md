@@ -1,5 +1,15 @@
 # Changelog
 
+## [v1.4.3] - 2026-04-29
+### Fixed
+- Auto-tagger: ORT environment and per-tagger sessions are cached across runs so back-to-back jobs no longer leak ~440 MB of glibc-arena memory each. The cache is torn down after `tagger.idle_release_after_minutes` (default 30) of inactivity, on Settings save, and on `use_cuda` flips.
+- Auto-tagger: completion summary now reports `auto-tagged X of N image(s), K skipped` when images are skipped (missing rows, no extractable frames, store failures), instead of always reporting the submit count.
+
+### Internal
+- Search: prev/next adjacency on the detail page uses a row-value cursor and pins the partial sort index, dropping cursor lookups from seconds to milliseconds on large libraries; random-sort + tag-predicate adjacency bounds the outer scan to a 2000-id bucket around the current image; random-sort wildcard searches materialize the EXISTS body as an IN-list instead of re-evaluating per row.
+- Search: detail-page X/Y counter is skipped for tag-predicate and folder-filtered searches; cursor-based prev/next still works and the template hides the counter when the total is zero.
+- Memory: read connections run `PRAGMA shrink_memory` and `runtime/debug.FreeOSMemory()` every 5 minutes when the job manager is idle, so RSS plateaus instead of holding the post-burst peak.
+
 ## [v1.4.2] - 2026-04-28
 
 ### Internal

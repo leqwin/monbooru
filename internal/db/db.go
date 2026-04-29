@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	_ "embed"
 	"fmt"
@@ -88,6 +89,37 @@ func ensureColumn(db *DB, table, column, alterSQL string) error {
 	}
 	if _, err := db.Write.Exec(alterSQL); err != nil {
 		return fmt.Errorf("add column %s.%s: %w", table, column, err)
+	}
+	return nil
+}
+
+// ShrinkMemory runs `PRAGMA shrink_memory` on every read connection in
+// the pool, returning freed pages from modernc/sqlite's mmap free list
+// to the kernel. Each connection has its own page cache, so all are
+// reserved up front to guarantee coverage.
+func (db *DB) ShrinkMemory(ctx context.Context) error {
+	stats := db.Read.Stats()
+	n := stats.MaxOpenConnections
+	if n <= 0 {
+		n = 1
+	}
+	conns := make([]*sql.Conn, 0, n)
+	defer func() {
+		for _, c := range conns {
+			c.Close()
+		}
+	}()
+	for i := 0; i < n; i++ {
+		c, err := db.Read.Conn(ctx)
+		if err != nil {
+			return err
+		}
+		conns = append(conns, c)
+	}
+	for _, c := range conns {
+		if _, err := c.ExecContext(ctx, `PRAGMA shrink_memory`); err != nil {
+			return err
+		}
 	}
 	return nil
 }

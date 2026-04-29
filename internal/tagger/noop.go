@@ -5,6 +5,7 @@ package tagger
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/leqwin/monbooru/internal/config"
 	"github.com/leqwin/monbooru/internal/db"
@@ -36,6 +37,13 @@ func AvailableTaggers(cfg *config.Config) []TaggerStatus {
 }
 
 // RunWithTaggers is the no-op stub matching the tagger build signature.
-func RunWithTaggers(_ context.Context, _ *db.DB, _ *config.Config, _ []int64, _ []TaggerStatus, _ *jobs.Manager, _ bool) error {
-	return nil
+func RunWithTaggers(_ context.Context, _ *db.DB, _ *config.Config, _ []int64, _ []TaggerStatus, _ *jobs.Manager, _ bool) (int, error) {
+	return 0, nil
 }
+
+// ReleaseIdle is a no-op stub on the non-tagger build; nothing is
+// cached when inference is compiled out.
+func ReleaseIdle(_ time.Duration) bool { return false }
+
+// ReleaseAll is a no-op stub on the non-tagger build.
+func ReleaseAll() {}

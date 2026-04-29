@@ -348,8 +348,13 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 				imgID := img.ID
 				database := g.DB
 				go func() {
-					if err := tagger.RunWithTaggers(h.jobs.Context(), database, h.cfg, []int64{imgID}, selected, h.jobs, h.cfg.Tagger.UseCUDA); err != nil {
+					skipped, err := tagger.RunWithTaggers(h.jobs.Context(), database, h.cfg, []int64{imgID}, selected, h.jobs, h.cfg.Tagger.UseCUDA)
+					if err != nil {
 						h.jobs.Fail(err.Error())
+						return
+					}
+					if skipped > 0 {
+						h.jobs.Complete(fmt.Sprintf("auto-tagger skipped image #%d", imgID))
 						return
 					}
 					h.jobs.Complete(fmt.Sprintf("auto-tagged image #%d", imgID))

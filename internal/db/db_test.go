@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"sync"
 	"testing"
 )
@@ -87,4 +88,24 @@ func TestConcurrentReads(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestShrinkMemory(t *testing.T) {
+	db := openTestDB(t)
+	if err := Bootstrap(db); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		var n int
+		if err := db.Read.QueryRow(`SELECT COUNT(*) FROM tag_categories`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.ShrinkMemory(context.Background()); err != nil {
+		t.Errorf("ShrinkMemory: %v", err)
+	}
+	var n int
+	if err := db.Read.QueryRow(`SELECT COUNT(*) FROM tag_categories`).Scan(&n); err != nil {
+		t.Errorf("read after shrink: %v", err)
+	}
 }

@@ -171,6 +171,30 @@ func isPureTagExpr(expr Expr) bool {
 	return false
 }
 
+// containsTagPredicate reports whether expr carries any node whose
+// ExecutePosition SUM/COUNT walks an unbounded match set: tag-shaped
+// EXISTS predicates and folder-prefix LIKEs that match a large fraction
+// of the library on popular roots.
+func containsTagPredicate(expr Expr) bool {
+	switch e := expr.(type) {
+	case AndExpr:
+		return containsTagPredicate(e.Left) || containsTagPredicate(e.Right)
+	case OrExpr:
+		return containsTagPredicate(e.Left) || containsTagPredicate(e.Right)
+	case NotExpr:
+		return containsTagPredicate(e.Expr)
+	case TagExpr:
+		return true
+	case FilterExpr:
+		switch e.Key {
+		case "cat", "tagged", "autotagged", "folder", "folderonly":
+			return true
+		}
+		return !IsFilterKeyword(e.Key)
+	}
+	return false
+}
+
 // fastTagTotal returns a visible-image count for an Expr by reading
 // tags.usage_count instead of EXISTS-scanning image_tags. ok=false
 // falls back to COUNT(*) for shapes the helper can't bound.
@@ -214,6 +238,14 @@ func fastTagTotal(database *db.DB, expr Expr) (int, bool) {
 // per-query budget and remains exact. Above the cap (popular tags on
 // large libraries) the upper-bound short-circuit kicks in.
 const fastApproxThreshold = 50000
+
+// randomAdjacencyBucketSize caps the id range ExecuteAdjacent scans
+// when Sort=="random" carries a tag predicate. The random key has no
+// index, so the cursor's ORDER BY temp-sorts every matching row;
+// bounding the outer scan to a fixed id-range bucket keeps that sort
+// proportional to the bucket. The chain ends at bucket boundaries -
+// same UX choice as ExecutePosition's tag-predicate short-circuit.
+const randomAdjacencyBucketSize = 2000
 
 func fastCountTag(database *db.DB, t TagExpr) (int, bool) {
 	if t.Tag == "" {
@@ -428,7 +460,9 @@ func fastVisibleCount(database *db.DB) (int, bool) {
 // ExecuteAdjacent returns the image IDs immediately before and after
 // currentID under q's sort and filter. Uses cursor-style LIMIT 1
 // queries so cost is O(log n) via the ingested_at / file_size indexes,
-// not O(matches).
+// not O(matches). Random sort has no key index; for tag-predicate
+// queries the scan is bounded to a fixed id-range bucket containing
+// currentID (see randomAdjacencyBucketSize).
 func ExecuteAdjacent(database *db.DB, q Query, currentID int64) (*int64, *int64, error) {
 	var ingestedAt string
 	var fileSize int64
@@ -445,6 +479,13 @@ func ExecuteAdjacent(database *db.DB, q Query, currentID int64) (*int64, *int64,
 		} else {
 			where = where + " AND i.is_missing = 0"
 		}
+	}
+
+	if q.Sort == "random" && containsTagPredicate(q.Expr) {
+		bucketLo := (currentID / randomAdjacencyBucketSize) * randomAdjacencyBucketSize
+		bucketHi := bucketLo + randomAdjacencyBucketSize - 1
+		where = where + " AND i.id BETWEEN ? AND ?"
+		args = append(args, bucketLo, bucketHi)
 	}
 
 	var keyCol string
@@ -468,26 +509,43 @@ func ExecuteAdjacent(database *db.DB, q Query, currentID int64) (*int64, *int64,
 	}
 
 	// In desc order prev is the next-larger neighbour; in asc/random it's
-	// the next-smaller one.
+	// the next-smaller one. Row-value comparison `(A, id) < (?, ?)`
+	// seek-prunes against the (A, id) index; the equivalent OR shape
+	// does not.
 	var prevCmp, nextCmp, prevSort, nextSort string
 	if q.Order == "asc" || q.Sort == "random" {
-		prevCmp = fmt.Sprintf("(%s < ? OR (%s = ? AND i.id < ?))", keyCol, keyCol)
-		nextCmp = fmt.Sprintf("(%s > ? OR (%s = ? AND i.id > ?))", keyCol, keyCol)
+		prevCmp = fmt.Sprintf("(%s, i.id) < (?, ?)", keyCol)
+		nextCmp = fmt.Sprintf("(%s, i.id) > (?, ?)", keyCol)
 		prevSort = fmt.Sprintf("ORDER BY %s DESC, i.id DESC", keyCol)
 		nextSort = fmt.Sprintf("ORDER BY %s ASC, i.id ASC", keyCol)
 	} else {
-		prevCmp = fmt.Sprintf("(%s > ? OR (%s = ? AND i.id > ?))", keyCol, keyCol)
-		nextCmp = fmt.Sprintf("(%s < ? OR (%s = ? AND i.id < ?))", keyCol, keyCol)
+		prevCmp = fmt.Sprintf("(%s, i.id) > (?, ?)", keyCol)
+		nextCmp = fmt.Sprintf("(%s, i.id) < (?, ?)", keyCol)
 		prevSort = fmt.Sprintf("ORDER BY %s ASC, i.id ASC", keyCol)
 		nextSort = fmt.Sprintf("ORDER BY %s DESC, i.id DESC", keyCol)
 	}
 
+	// Pin the partial sort index when nothing in the query has its own
+	// more-selective column index, otherwise the planner can pick
+	// idx_images_missing and emit a TEMP B-TREE FOR ORDER BY on libraries
+	// where is_missing=0 has near-zero selectivity. Mirrors the hint in
+	// Execute.
+	indexHint := ""
+	if !hasMissingFilter && (q.Expr == nil || isPureTagExpr(q.Expr)) {
+		switch q.Sort {
+		case "filesize":
+			indexHint = " INDEXED BY idx_images_filesize_visible"
+		case "", "newest":
+			indexHint = " INDEXED BY idx_images_ingested_visible"
+		}
+	}
+
 	lookup := func(cursorCmp, sort string) *int64 {
-		qargs := make([]any, 0, len(args)+3)
+		qargs := make([]any, 0, len(args)+2)
 		qargs = append(qargs, args...)
-		qargs = append(qargs, keyVal, keyVal, currentID)
-		sql := fmt.Sprintf("SELECT i.id FROM images i WHERE %s AND %s %s LIMIT 1",
-			where, cursorCmp, sort)
+		qargs = append(qargs, keyVal, currentID)
+		sql := fmt.Sprintf("SELECT i.id FROM images i%s WHERE %s AND %s %s LIMIT 1",
+			indexHint, where, cursorCmp, sort)
 		var id int64
 		if err := database.Read.QueryRow(sql, qargs...).Scan(&id); err != nil {
 			return nil
@@ -500,8 +558,14 @@ func ExecuteAdjacent(database *db.DB, q Query, currentID int64) (*int64, *int64,
 // ExecutePosition returns the 1-based rank of currentID under q's sort
 // plus the total matching rows. Drives the detail page's "X/Y" counter.
 // One combined COUNT exploits the same key-col indexes ExecuteAdjacent
-// uses, avoiding a full materialised match list.
+// uses, avoiding a full materialised match list. Returns 0/0 for any
+// expression containing a tag predicate (full-set SUM/COUNT over EXISTS
+// is unbounded); the detail template hides the counter on a 0 total.
 func ExecutePosition(database *db.DB, q Query, currentID int64) (int, int, error) {
+	if containsTagPredicate(q.Expr) {
+		return 0, 0, nil
+	}
+
 	var ingestedAt string
 	var fileSize int64
 	if err := database.Read.QueryRow(
@@ -541,17 +605,17 @@ func ExecutePosition(database *db.DB, q Query, currentID int64) (int, int, error
 	// currentID, so SUM(CASE WHEN prevCmp ...) gives zero-based rank.
 	var prevCmp string
 	if q.Order == "asc" || q.Sort == "random" {
-		prevCmp = fmt.Sprintf("(%s < ? OR (%s = ? AND i.id < ?))", keyCol, keyCol)
+		prevCmp = fmt.Sprintf("(%s, i.id) < (?, ?)", keyCol)
 	} else {
-		prevCmp = fmt.Sprintf("(%s > ? OR (%s = ? AND i.id > ?))", keyCol, keyCol)
+		prevCmp = fmt.Sprintf("(%s, i.id) > (?, ?)", keyCol)
 	}
 
 	stmt := fmt.Sprintf(
 		`SELECT SUM(CASE WHEN %s THEN 1 ELSE 0 END), COUNT(*) FROM images i WHERE %s`,
 		prevCmp, where,
 	)
-	qargs := make([]any, 0, len(args)+3)
-	qargs = append(qargs, keyVal, keyVal, currentID)
+	qargs := make([]any, 0, len(args)+2)
+	qargs = append(qargs, keyVal, currentID)
 	qargs = append(qargs, args...)
 
 	var rankBefore sql.NullInt64
@@ -915,6 +979,26 @@ type whereBuilder struct {
 	db *db.DB
 }
 
+// imageIDExists builds an EXISTS predicate against the per-image-ids
+// subquery FROM <fromBody> WHERE <where>. alias qualifies image_id;
+// where omits the alias.image_id = i.id link, which the helper supplies.
+func (b *whereBuilder) imageIDExists(fromBody, alias, where string, negate bool) string {
+	op := "EXISTS"
+	if negate {
+		op = "NOT EXISTS"
+	}
+	if where == "" {
+		return fmt.Sprintf("%s (SELECT 1 FROM %s WHERE %s.image_id = i.id)", op, fromBody, alias)
+	}
+	return fmt.Sprintf("%s (SELECT 1 FROM %s WHERE %s.image_id = i.id AND %s)", op, fromBody, alias, where)
+}
+
+// imageTagsPredicate is imageIDExists shorthand for the common
+// `image_tags it`-only shape used by tag and tagged/autotagged filters.
+func (b *whereBuilder) imageTagsPredicate(where string, negate bool) string {
+	return b.imageIDExists("image_tags it", "it", where, negate)
+}
+
 func buildWhere(expr Expr) (string, []any, bool) {
 	return buildWhereDB(expr, nil)
 }
@@ -992,13 +1076,13 @@ func (b *whereBuilder) buildTagExpr(e TagExpr) string {
 	switch e.Wildcard {
 	case "prefix":
 		b.args = append(b.args, escapeLike(e.Tag)+"%")
-		return `EXISTS (SELECT 1 FROM image_tags it WHERE it.image_id = i.id AND it.tag_id IN (SELECT COALESCE(canonical_tag_id, id) FROM tags WHERE name LIKE ? ESCAPE '\'))`
+		return b.imageTagsPredicate(`it.tag_id IN (SELECT COALESCE(canonical_tag_id, id) FROM tags WHERE name LIKE ? ESCAPE '\')`, false)
 	case "substring":
 		b.args = append(b.args, "%"+escapeLike(e.Tag)+"%")
-		return `EXISTS (SELECT 1 FROM image_tags it WHERE it.image_id = i.id AND it.tag_id IN (SELECT COALESCE(canonical_tag_id, id) FROM tags WHERE name LIKE ? ESCAPE '\'))`
+		return b.imageTagsPredicate(`it.tag_id IN (SELECT COALESCE(canonical_tag_id, id) FROM tags WHERE name LIKE ? ESCAPE '\')`, false)
 	default:
 		b.args = append(b.args, e.Tag)
-		return `EXISTS (SELECT 1 FROM image_tags it WHERE it.image_id = i.id AND it.tag_id IN (SELECT COALESCE(canonical_tag_id, id) FROM tags WHERE name = ?))`
+		return b.imageTagsPredicate(`it.tag_id IN (SELECT COALESCE(canonical_tag_id, id) FROM tags WHERE name = ?)`, false)
 	}
 }
 
@@ -1062,7 +1146,7 @@ func (b *whereBuilder) buildFilterExpr(e FilterExpr) string {
 
 	case "cat":
 		b.args = append(b.args, e.Val)
-		return `EXISTS (SELECT 1 FROM image_tags it JOIN tags t ON it.tag_id = t.id JOIN tag_categories tc ON tc.id = t.category_id WHERE it.image_id = i.id AND tc.name = ?)`
+		return b.imageIDExists("image_tags it JOIN tags t ON it.tag_id = t.id JOIN tag_categories tc ON tc.id = t.category_id", "it", "tc.name = ?", false)
 
 	case "width":
 		op, n, ok := parseIntComp(e.Val)
@@ -1101,16 +1185,10 @@ func (b *whereBuilder) buildFilterExpr(e FilterExpr) string {
 		return "i.file_type NOT IN ('gif', 'mp4', 'webm')"
 
 	case "tagged":
-		if e.Val == "true" {
-			return "EXISTS (SELECT 1 FROM image_tags it WHERE it.image_id = i.id)"
-		}
-		return "NOT EXISTS (SELECT 1 FROM image_tags it WHERE it.image_id = i.id)"
+		return b.imageTagsPredicate("", e.Val != "true")
 
 	case "autotagged":
-		if e.Val == "true" {
-			return "EXISTS (SELECT 1 FROM image_tags it WHERE it.image_id = i.id AND it.is_auto = 1)"
-		}
-		return "NOT EXISTS (SELECT 1 FROM image_tags it WHERE it.image_id = i.id AND it.is_auto = 1)"
+		return b.imageTagsPredicate("it.is_auto = 1", e.Val != "true")
 
 	case "folder":
 		if e.Val == "" {
@@ -1134,8 +1212,9 @@ func (b *whereBuilder) buildFilterExpr(e FilterExpr) string {
 
 	case "generated":
 		b.args = append(b.args, e.Val, e.Val)
-		return `(EXISTS (SELECT 1 FROM sd_metadata sm WHERE sm.image_id = i.id AND sm.generation_hash = ?)
-		         OR EXISTS (SELECT 1 FROM comfyui_metadata cm WHERE cm.image_id = i.id AND cm.generation_hash = ?))`
+		sm := b.imageIDExists("sd_metadata sm", "sm", "sm.generation_hash = ?", false)
+		cm := b.imageIDExists("comfyui_metadata cm", "cm", "cm.generation_hash = ?", false)
+		return "(" + sm + " OR " + cm + ")"
 
 	default:
 		// Unknown key is either a category-qualified tag search
@@ -1148,16 +1227,10 @@ func (b *whereBuilder) buildFilterExpr(e FilterExpr) string {
 		}
 		if b.categoryExists(e.Key) {
 			b.args = append(b.args, e.Val, e.Key)
-			return `EXISTS (SELECT 1 FROM image_tags it
-			         WHERE it.image_id = i.id AND it.tag_id IN (
-			             SELECT COALESCE(t.canonical_tag_id, t.id) FROM tags t
-			             JOIN tag_categories tc ON tc.id = t.category_id
-			             WHERE t.name = ? AND tc.name = ?))`
+			return b.imageTagsPredicate(`it.tag_id IN (SELECT COALESCE(t.canonical_tag_id, t.id) FROM tags t JOIN tag_categories tc ON tc.id = t.category_id WHERE t.name = ? AND tc.name = ?)`, false)
 		}
 		b.args = append(b.args, e.Key+":"+e.Val)
-		return `EXISTS (SELECT 1 FROM image_tags it
-		         WHERE it.image_id = i.id AND it.tag_id IN (
-		             SELECT COALESCE(canonical_tag_id, id) FROM tags WHERE name = ?))`
+		return b.imageTagsPredicate(`it.tag_id IN (SELECT COALESCE(canonical_tag_id, id) FROM tags WHERE name = ?)`, false)
 	}
 }
 

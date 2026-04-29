@@ -181,13 +181,17 @@ func (s *Server) uploadPost(w http.ResponseWriter, r *http.Request) {
 			database := s.db()
 			go func() {
 				ctx := s.jobs.Context()
-				err := tagger.RunWithTaggers(ctx, database, s.cfg, ids, selected, s.jobs, s.cfg.Tagger.UseCUDA)
+				skipped, err := tagger.RunWithTaggers(ctx, database, s.cfg, ids, selected, s.jobs, s.cfg.Tagger.UseCUDA)
 				if ctx.Err() != nil {
 					s.jobs.Complete(fmt.Sprintf("auto-tagging cancelled (%d image(s) queued)", len(ids)))
 					return
 				}
 				if err != nil {
 					s.jobs.Fail(err.Error())
+					return
+				}
+				if skipped > 0 {
+					s.jobs.Complete(fmt.Sprintf("auto-tagged %d of %d uploaded image(s), %d skipped", len(ids)-skipped, len(ids), skipped))
 					return
 				}
 				s.jobs.Complete(fmt.Sprintf("auto-tagged %d uploaded image(s)", len(ids)))
@@ -401,13 +405,17 @@ func (s *Server) autotagTrigger(w http.ResponseWriter, r *http.Request) {
 	database := s.db()
 	go func() {
 		ctx := s.jobs.Context()
-		err := tagger.RunWithTaggers(ctx, database, s.cfg, ids, selected, s.jobs, s.cfg.Tagger.UseCUDA)
+		skipped, err := tagger.RunWithTaggers(ctx, database, s.cfg, ids, selected, s.jobs, s.cfg.Tagger.UseCUDA)
 		if ctx.Err() != nil {
 			s.jobs.Complete(fmt.Sprintf("auto-tagging cancelled (%d image(s) queued)", len(ids)))
 			return
 		}
 		if err != nil {
 			s.jobs.Fail(err.Error())
+			return
+		}
+		if skipped > 0 {
+			s.jobs.Complete(fmt.Sprintf("auto-tagged %d of %d image(s), %d skipped", len(ids)-skipped, len(ids), skipped))
 			return
 		}
 		s.jobs.Complete(fmt.Sprintf("auto-tagged %d image(s)", len(ids)))
@@ -468,13 +476,17 @@ func (s *Server) autotagImage(w http.ResponseWriter, r *http.Request) {
 		// time for a single image, so CPU finishes faster even when the
 		// global toggle is on.
 		ctx := s.jobs.Context()
-		err := tagger.RunWithTaggers(ctx, database, s.cfg, []int64{id}, selected, s.jobs, false)
+		skipped, err := tagger.RunWithTaggers(ctx, database, s.cfg, []int64{id}, selected, s.jobs, false)
 		if ctx.Err() != nil {
 			s.jobs.Complete("auto-tagging cancelled")
 			return
 		}
 		if err != nil {
 			s.jobs.Fail(err.Error())
+			return
+		}
+		if skipped > 0 {
+			s.jobs.Complete("auto-tagger skipped image #" + idStr)
 			return
 		}
 		s.jobs.Complete("auto-tagged image #" + idStr)

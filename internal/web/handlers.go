@@ -1568,6 +1568,7 @@ func (s *Server) settingsTaggerPost(w http.ResponseWriter, r *http.Request) {
 
 	s.cfgMu.Lock()
 
+	cudaChanged := s.cfg.Tagger.UseCUDA != newUseCUDA
 	s.cfg.Tagger.UseCUDA = newUseCUDA
 	if n, err := strconv.Atoi(r.FormValue("parallel")); err == nil && n >= 1 {
 		s.cfg.Tagger.Parallel = n
@@ -1601,6 +1602,11 @@ func (s *Server) settingsTaggerPost(w http.ResponseWriter, r *http.Request) {
 	if err := s.saveConfig(); err != nil {
 		fmt.Fprintf(w, `<div class="flash flash-err">Could not save: %s</div>`, html.EscapeString(err.Error()))
 		return
+	}
+	// Drop the cached ORT session so the freed RAM is visible immediately
+	// rather than after idle_release_after_minutes elapses.
+	if cudaChanged {
+		tagger.ReleaseAll()
 	}
 	logx.Infof("settings: tagger updated (%d taggers, use_cuda=%t)", len(newList), s.cfg.Tagger.UseCUDA)
 	w.Write([]byte(`<div class="flash flash-ok">Saved.</div>`))

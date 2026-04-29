@@ -1588,6 +1588,147 @@ func TestExecuteAdjacent_RandomNoSeed(t *testing.T) {
 	}
 }
 
+func TestExecuteAdjacent_WithTagPredicate(t *testing.T) {
+	// Tuple cursor with a tag-predicate WHERE: LIMIT 1 must walk past
+	// untagged neighbours and land on the next tagged one.
+	database, env := setupSearchDB(t)
+	ingestTestImage(t, database, env, "adj_tag_a.png")
+	ingestTestImage(t, database, env, "adj_tag_b.png")
+	ingestTestImage(t, database, env, "adj_tag_c.png")
+
+	result, err := Execute(database, Query{Sort: "newest", Order: "desc", Page: 1, Limit: 40})
+	if err != nil || len(result.Results) != 3 {
+		t.Fatalf("setup Execute: err=%v len=%d", err, len(result.Results))
+	}
+	newest, _, oldest := result.Results[0].ID, result.Results[1].ID, result.Results[2].ID
+
+	var generalID int64
+	database.Read.QueryRow(`SELECT id FROM tag_categories WHERE name = 'general'`).Scan(&generalID)
+	var tagID int64
+	if err := database.Write.QueryRow(
+		`INSERT INTO tags (name, category_id, usage_count) VALUES ('blue', ?, 2) RETURNING id`,
+		generalID,
+	).Scan(&tagID); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int64{newest, oldest} {
+		if _, err := database.Write.Exec(
+			`INSERT INTO image_tags (image_id, tag_id, is_auto) VALUES (?, ?, 0)`, id, tagID,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	q := Query{Expr: TagExpr{Tag: "blue"}, Sort: "newest", Order: "desc"}
+
+	prev, next, err := ExecuteAdjacent(database, q, newest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prev != nil {
+		t.Errorf("newest prev = %v, want nil", prev)
+	}
+	if next == nil || *next != oldest {
+		t.Errorf("newest next = %v, want %d", next, oldest)
+	}
+
+	prev, next, _ = ExecuteAdjacent(database, q, oldest)
+	if prev == nil || *prev != newest {
+		t.Errorf("oldest prev = %v, want %d", prev, newest)
+	}
+	if next != nil {
+		t.Errorf("oldest next = %v, want nil", next)
+	}
+}
+
+func TestExecuteAdjacent_RandomBucketBound(t *testing.T) {
+	// Random sort + tag predicate bounds adjacency to a fixed id-range
+	// bucket. Images outside the current image's bucket must not appear
+	// as prev/next, even if they match the predicate.
+	database, env := setupSearchDB(t)
+	ingestTestImage(t, database, env, "rb_a.png")
+	ingestTestImage(t, database, env, "rb_b.png")
+	ingestTestImage(t, database, env, "rb_c.png")
+
+	var nearA, nearB, far int64
+	rows, err := database.Read.Query(`SELECT id FROM images ORDER BY id ASC`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := []int64{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if len(ids) != 3 {
+		t.Fatalf("expected 3 images, got %d", len(ids))
+	}
+	nearA, nearB = ids[0], ids[1]
+	far = int64(randomAdjacencyBucketSize) + 1
+	tx, err := database.Write.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`PRAGMA defer_foreign_keys = 1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`UPDATE images SET id = ? WHERE id = ?`, far, ids[2]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`UPDATE image_paths SET image_id = ? WHERE image_id = ?`, far, ids[2]); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	var generalID int64
+	if err := database.Read.QueryRow(`SELECT id FROM tag_categories WHERE name = 'general'`).Scan(&generalID); err != nil {
+		t.Fatal(err)
+	}
+	var tagID int64
+	if err := database.Write.QueryRow(
+		`INSERT INTO tags (name, category_id, usage_count) VALUES ('rndtag', ?, 3) RETURNING id`,
+		generalID,
+	).Scan(&tagID); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int64{nearA, nearB, far} {
+		if _, err := database.Write.Exec(
+			`INSERT INTO image_tags (image_id, tag_id, is_auto) VALUES (?, ?, 0)`, id, tagID,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	q := Query{Expr: TagExpr{Tag: "rndtag"}, Sort: "random", RandomSeed: 1234567}
+
+	// nearA's bucket holds nearA + nearB; far is in a different bucket.
+	prev, next, err := ExecuteAdjacent(database, q, nearA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []*int64{prev, next} {
+		if p != nil && *p == far {
+			t.Errorf("nearA reached far image %d across bucket boundary", far)
+		}
+	}
+	reachedNearB := (prev != nil && *prev == nearB) || (next != nil && *next == nearB)
+	if !reachedNearB {
+		t.Errorf("nearA did not reach in-bucket peer %d (prev=%v next=%v)", nearB, prev, next)
+	}
+
+	// far is alone in its bucket.
+	prev, next, _ = ExecuteAdjacent(database, q, far)
+	if prev != nil || next != nil {
+		t.Errorf("far alone in bucket: want nil/nil, got prev=%v next=%v", prev, next)
+	}
+}
+
 func TestExecutePosition_Newest(t *testing.T) {
 	database, cfg := setupSearchDB(t)
 	ingestTestImage(t, database, cfg, "pos_a.png")
@@ -1694,6 +1835,62 @@ func TestExecutePosition_UnknownID(t *testing.T) {
 	pos, total, err := ExecutePosition(database, Query{Sort: "newest", Order: "desc"}, 99999)
 	if err != nil || pos != 0 || total != 0 {
 		t.Errorf("unknown id must return 0/0, got pos=%d total=%d err=%v", pos, total, err)
+	}
+}
+
+func TestExecutePosition_TagPredicateSkipped(t *testing.T) {
+	database, cfg := setupSearchDB(t)
+	ingestTestImage(t, database, cfg, "pos_tag_a.png")
+	ingestTestImage(t, database, cfg, "pos_tag_b.png")
+
+	var imgID, generalID int64
+	database.Read.QueryRow(`SELECT id FROM images LIMIT 1`).Scan(&imgID)
+	database.Read.QueryRow(`SELECT id FROM tag_categories WHERE name = 'general'`).Scan(&generalID)
+	var tagID int64
+	database.Write.QueryRow(
+		`INSERT INTO tags (name, category_id, usage_count) VALUES ('blue', ?, 1) RETURNING id`,
+		generalID,
+	).Scan(&tagID)
+	if _, err := database.Write.Exec(
+		`INSERT INTO image_tags (image_id, tag_id, is_auto) VALUES (?, ?, 0)`, imgID, tagID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name string
+		expr Expr
+	}{
+		{"literal tag", TagExpr{Tag: "blue"}},
+		{"wildcard tag", TagExpr{Tag: "blue", Wildcard: "prefix"}},
+		{"NOT tag", NotExpr{Expr: TagExpr{Tag: "blue"}}},
+		{"AND of tags", AndExpr{Left: TagExpr{Tag: "blue"}, Right: TagExpr{Tag: "red"}}},
+		{"cat filter", FilterExpr{Key: "cat", Val: "general"}},
+		{"category-qualified tag", FilterExpr{Key: "general", Val: "blue"}},
+		{"tagged filter", FilterExpr{Key: "tagged", Val: "true"}},
+		{"autotagged filter", FilterExpr{Key: "autotagged", Val: "false"}},
+		{"folder filter", FilterExpr{Key: "folder", Val: "anime"}},
+		{"folderonly filter", FilterExpr{Key: "folderonly", Val: "anime"}},
+	}
+	for _, c := range cases {
+		pos, total, err := ExecutePosition(database, Query{Expr: c.expr, Sort: "newest", Order: "desc"}, imgID)
+		if err != nil {
+			t.Errorf("%s: %v", c.name, err)
+			continue
+		}
+		if pos != 0 || total != 0 {
+			t.Errorf("%s: pos=%d total=%d, want 0/0", c.name, pos, total)
+		}
+	}
+
+	// Sanity: a non-tag-predicate expression still returns a real rank
+	// so the early-return is scoped to the slow shape only.
+	pos, total, err := ExecutePosition(database, Query{Expr: FilterExpr{Key: "fav", Val: "false"}, Sort: "newest", Order: "desc"}, imgID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pos == 0 || total == 0 {
+		t.Errorf("non-tag predicate skipped: pos=%d total=%d", pos, total)
 	}
 }
 

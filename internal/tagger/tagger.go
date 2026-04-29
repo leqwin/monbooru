@@ -129,10 +129,9 @@ type scored struct {
 	taggerName string
 }
 
-// loadedTagger holds one tagger's ORT session and a preprocessing flag
-// derived from the tags-file extension. joytagLayout selects
-// NCHW + RGB + CLIP-normalised input and sigmoid output; WD14 stays on
-// NHWC + BGR + 0..255 with probability output.
+// loadedTagger pairs a cached ORT session with the per-call config the
+// inference loop reads, so threshold edits take effect without
+// rebuilding the session.
 type loadedTagger struct {
 	cfg          config.TaggerInstance
 	session      *ort.DynamicAdvancedSession
@@ -140,74 +139,212 @@ type loadedTagger struct {
 	joytagLayout bool
 }
 
-// RunWithTaggers tags ids through the supplied taggers, merging results
-// so each image ends up with one row per unique tag. Callers must pass
-// only enabled+available taggers; this function does not re-filter.
-// useCUDA overrides cfg.Tagger.UseCUDA so per-request callers can keep
-// single-image runs on the CPU.
-func RunWithTaggers(ctx context.Context, database *db.DB, cfg *config.Config, ids []int64, taggers []TaggerStatus, mgr *jobs.Manager, useCUDA bool) error {
-	if len(taggers) == 0 {
-		return fmt.Errorf("no tagger is enabled or available")
+// loadedSession is the cached half of loadedTagger: ORT state keyed by
+// tagger name. modelFile and tagsFile gate cache reuse - a TOML edit
+// that swaps either invalidates the entry.
+type loadedSession struct {
+	modelFile    string
+	tagsFile     string
+	session      *ort.DynamicAdvancedSession
+	labels       []tagLabel
+	joytagLayout bool
+}
+
+// taggerCache holds the warm ORT environment and per-tagger sessions
+// across RunWithTaggers calls. Without it the bytes ORT frees on
+// teardown stay parked in glibc's arenas; teardown calls mallocTrim to
+// hand them back. inUse blocks the idle reaper from racing a run.
+type taggerCache struct {
+	mu          sync.Mutex
+	inUse       bool
+	initialized bool
+	useCUDA     bool
+	sessionOpts *ort.SessionOptions
+	cudaOpts    *ort.CUDAProviderOptions
+	sessions    map[string]*loadedSession
+	lastUsed    time.Time
+}
+
+var cache taggerCache
+
+// satisfies returns true when the cached set covers every requested
+// tagger with the same execution-provider mode and the same model /
+// tags filenames. Caller must hold c.mu.
+func (c *taggerCache) satisfies(taggers []TaggerStatus, useCUDA bool) bool {
+	if !c.initialized || c.useCUDA != useCUDA {
+		return false
+	}
+	for _, t := range taggers {
+		s, ok := c.sessions[t.Name]
+		if !ok {
+			return false
+		}
+		if s.modelFile != t.ModelFile || s.tagsFile != t.TagsFile {
+			return false
+		}
+	}
+	return true
+}
+
+// ensure populates the cache for (taggers, useCUDA). On signature
+// mismatch the existing cache is torn down first. Caller must hold
+// c.mu.
+func (c *taggerCache) ensure(cfg *config.Config, taggers []TaggerStatus, useCUDA bool) error {
+	if c.satisfies(taggers, useCUDA) {
+		return nil
+	}
+	if c.initialized {
+		c.teardownLocked()
 	}
 
 	ort.SetSharedLibraryPath(sharedLibPath())
 	if err := ort.InitializeEnvironment(); err != nil {
 		return fmt.Errorf("ort init: %w", err)
 	}
-	defer ort.DestroyEnvironment()
+	c.initialized = true
 
-	// Build session options once; on GPU we attach the CUDA execution
-	// provider so every session shares it.
-	var sessionOpts *ort.SessionOptions
 	if useCUDA {
 		opts, err := ort.NewSessionOptions()
 		if err != nil {
+			c.teardownLocked()
 			return fmt.Errorf("ort session options: %w", err)
 		}
-		defer opts.Destroy()
+		c.sessionOpts = opts
 		cudaOpts, err := ort.NewCUDAProviderOptions()
 		if err != nil {
+			c.teardownLocked()
 			return fmt.Errorf("ort cuda options (ensure libonnxruntime was built with CUDA): %w", err)
 		}
-		defer cudaOpts.Destroy()
+		c.cudaOpts = cudaOpts
 		if err := opts.AppendExecutionProviderCUDA(cudaOpts); err != nil {
+			c.teardownLocked()
 			return fmt.Errorf("append cuda provider: %w", err)
 		}
-		sessionOpts = opts
 	}
+	c.useCUDA = useCUDA
 
-	// One ORT session per enabled tagger, reused across images.
-	loaded := make([]loadedTagger, 0, len(taggers))
+	c.sessions = make(map[string]*loadedSession, len(taggers))
 	for _, t := range taggers {
 		onnxPath := filepath.Join(cfg.Paths.ModelPath, t.Name, t.ModelFile)
 		tagsPath := filepath.Join(cfg.Paths.ModelPath, t.Name, t.TagsFile)
 		labels, err := loadLabels(tagsPath)
 		if err != nil {
+			c.teardownLocked()
 			return fmt.Errorf("load labels for %q: %w", t.Name, err)
 		}
 		inputs, outputs, err := ort.GetInputOutputInfo(onnxPath)
 		if err != nil {
+			c.teardownLocked()
 			return fmt.Errorf("inspect ort model for %q: %w", t.Name, err)
 		}
 		if len(inputs) == 0 || len(outputs) == 0 {
+			c.teardownLocked()
 			return fmt.Errorf("ort model for %q has no input/output", t.Name)
 		}
 		session, err := ort.NewDynamicAdvancedSession(onnxPath,
-			[]string{inputs[0].Name}, []string{outputs[0].Name}, sessionOpts)
+			[]string{inputs[0].Name}, []string{outputs[0].Name}, c.sessionOpts)
 		if err != nil {
+			c.teardownLocked()
 			return fmt.Errorf("create ort session for %q: %w", t.Name, err)
 		}
-		loaded = append(loaded, loadedTagger{
-			cfg:          t.TaggerInstance,
+		c.sessions[t.Name] = &loadedSession{
+			modelFile:    t.ModelFile,
+			tagsFile:     t.TagsFile,
 			session:      session,
 			labels:       labels,
 			joytagLayout: !strings.EqualFold(filepath.Ext(t.TagsFile), ".csv"),
-		})
-	}
-	defer func() {
-		for _, l := range loaded {
-			l.session.Destroy()
 		}
+	}
+	return nil
+}
+
+// teardownLocked destroys every cached ORT object and asks glibc to
+// return the freed bytes to the kernel. Caller must hold c.mu.
+func (c *taggerCache) teardownLocked() {
+	for _, s := range c.sessions {
+		s.session.Destroy()
+	}
+	c.sessions = nil
+	if c.cudaOpts != nil {
+		c.cudaOpts.Destroy()
+		c.cudaOpts = nil
+	}
+	if c.sessionOpts != nil {
+		c.sessionOpts.Destroy()
+		c.sessionOpts = nil
+	}
+	if c.initialized {
+		ort.DestroyEnvironment()
+		c.initialized = false
+	}
+	c.useCUDA = false
+	mallocTrim()
+}
+
+// ReleaseIdle tears down the cached session set when it has been idle
+// for at least `after` and no run is in flight. Returns true on
+// teardown so the caller can log it.
+func ReleaseIdle(after time.Duration) bool {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if cache.inUse || !cache.initialized {
+		return false
+	}
+	if time.Since(cache.lastUsed) < after {
+		return false
+	}
+	cache.teardownLocked()
+	return true
+}
+
+// ReleaseAll unconditionally tears down the cached session set, e.g.
+// on shutdown or when use_cuda flips and the cache must be rebuilt.
+func ReleaseAll() {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if cache.initialized {
+		cache.teardownLocked()
+	}
+}
+
+// RunWithTaggers tags ids through the supplied taggers, merging results
+// so each image ends up with one row per unique tag. Callers must pass
+// only enabled+available taggers. useCUDA overrides cfg.Tagger.UseCUDA
+// so per-request callers can keep single-image runs on the CPU.
+// Returns the count of submitted ids left without auto_tagged_at.
+func RunWithTaggers(ctx context.Context, database *db.DB, cfg *config.Config, ids []int64, taggers []TaggerStatus, mgr *jobs.Manager, useCUDA bool) (int, error) {
+	if len(taggers) == 0 {
+		return 0, fmt.Errorf("no tagger is enabled or available")
+	}
+
+	cache.mu.Lock()
+	if err := cache.ensure(cfg, taggers, useCUDA); err != nil {
+		cache.mu.Unlock()
+		return 0, err
+	}
+	loaded := make([]loadedTagger, len(taggers))
+	for i, t := range taggers {
+		s := cache.sessions[t.Name]
+		loaded[i] = loadedTagger{
+			cfg:          t.TaggerInstance,
+			session:      s.session,
+			labels:       s.labels,
+			joytagLayout: s.joytagLayout,
+		}
+	}
+	cache.inUse = true
+	cache.mu.Unlock()
+
+	defer func() {
+		cache.mu.Lock()
+		cache.inUse = false
+		cache.lastUsed = time.Now()
+		// idle_release_after_minutes <= 0 disables caching: tear
+		// down right after the run so RSS drops back to baseline.
+		if cfg.Tagger.IdleReleaseAfterMinutes <= 0 {
+			cache.teardownLocked()
+		}
+		cache.mu.Unlock()
 	}()
 
 	// Names of the taggers running this job; used so the replace step
@@ -289,17 +426,22 @@ func RunWithTaggers(ctx context.Context, database *db.DB, cfg *config.Config, id
 	// processOne runs the per-image tagging pipeline. Called from one
 	// or more worker goroutines; ORT sessions are safe for concurrent
 	// Run calls and the DB write pool serialises storeResults.
+	var skipped atomic.Int64
 	processOne := func(imageID int64) {
 		var canonPath, fileType string
 		if err := database.Read.QueryRowContext(ctx,
 			`SELECT canonical_path, file_type FROM images WHERE id = ?`, imageID,
 		).Scan(&canonPath, &fileType); err != nil {
+			logx.Warnf("tagger: skip image %d: lookup failed: %v", imageID, err)
+			skipped.Add(1)
 			return
 		}
 
 		framePaths, cleanup := framesForTagging(canonPath, fileType)
 		defer cleanup()
 		if len(framePaths) == 0 {
+			logx.Warnf("tagger: skip image %d: no frames available (missing file or ffmpeg)", imageID)
+			skipped.Add(1)
 			return
 		}
 
@@ -357,6 +499,7 @@ func RunWithTaggers(ctx context.Context, database *db.DB, cfg *config.Config, id
 
 		if err := storeResults(ctx, database, imageID, merged, taggerNames); err != nil {
 			logx.Warnf("tagger: store results for image %d: %v", imageID, err)
+			skipped.Add(1)
 		}
 	}
 
@@ -396,7 +539,7 @@ func RunWithTaggers(ctx context.Context, database *db.DB, cfg *config.Config, id
 	close(queue)
 	wg.Wait()
 
-	return ctx.Err()
+	return int(skipped.Load()), ctx.Err()
 }
 
 // framesForTagging returns the file paths to feed the tagger plus a

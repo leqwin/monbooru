@@ -246,7 +246,7 @@ func (s *Server) scheduledAutotag(cx *galleryCtx) {
 		return
 	}
 	ctx := s.jobs.Context()
-	err = tagger.RunWithTaggers(ctx, cx.DB, s.cfg, ids, enabled, s.jobs, s.cfg.Tagger.UseCUDA)
+	skipped, err := tagger.RunWithTaggers(ctx, cx.DB, s.cfg, ids, enabled, s.jobs, s.cfg.Tagger.UseCUDA)
 	if ctx.Err() != nil {
 		s.jobs.Complete(fmt.Sprintf("[%s] auto-tagging cancelled (%d image(s) queued)", cx.Name, len(ids)))
 		return
@@ -254,6 +254,10 @@ func (s *Server) scheduledAutotag(cx *galleryCtx) {
 	if err != nil {
 		s.jobs.Fail(err.Error())
 		logx.Warnf("scheduler autotag %q: %v", cx.Name, err)
+		return
+	}
+	if skipped > 0 {
+		s.jobs.Complete(fmt.Sprintf("[%s] auto-tagged %d of %d image(s), %d skipped", cx.Name, len(ids)-skipped, len(ids), skipped))
 		return
 	}
 	s.jobs.Complete(fmt.Sprintf("[%s] auto-tagged %d image(s)", cx.Name, len(ids)))

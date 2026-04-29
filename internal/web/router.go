@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,6 +24,7 @@ import (
 	"github.com/leqwin/monbooru/internal/jobs"
 	"github.com/leqwin/monbooru/internal/logx"
 	"github.com/leqwin/monbooru/internal/models"
+	"github.com/leqwin/monbooru/internal/tagger"
 	webFS "github.com/leqwin/monbooru/web"
 )
 
@@ -365,10 +368,51 @@ func NewServer(cfg *config.Config, configPath string, jobManager *jobs.Manager) 
 		}
 	}()
 
+	go s.runMemoryReclaim()
+
 	// Daily scheduled maintenance runs driven by cfg.Schedule.
 	go s.runScheduler()
 
 	return s, nil
+}
+
+// runMemoryReclaim wakes every 5 minutes and, when no job is active,
+// shrinks each gallery's SQLite page cache, returns the Go heap, and
+// tears down the cached auto-tagger session set if it has been idle
+// for tagger.idle_release_after_minutes.
+func (s *Server) runMemoryReclaim() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if s.jobs.IsRunning() {
+				continue
+			}
+			s.ctxMu.RLock()
+			ctxs := make([]*galleryCtx, 0, len(s.contexts))
+			for _, cx := range s.contexts {
+				ctxs = append(ctxs, cx)
+			}
+			s.ctxMu.RUnlock()
+			for _, cx := range ctxs {
+				if err := cx.DB.ShrinkMemory(context.Background()); err != nil {
+					logx.Warnf("memory reclaim %q: %v", cx.Name, err)
+				}
+			}
+			debug.FreeOSMemory()
+			s.cfgMu.Lock()
+			mins := s.cfg.Tagger.IdleReleaseAfterMinutes
+			s.cfgMu.Unlock()
+			if mins > 0 {
+				if tagger.ReleaseIdle(time.Duration(mins) * time.Minute) {
+					logx.Infof("memory reclaim: released idle auto-tagger session")
+				}
+			}
+		case <-s.done:
+			return
+		}
+	}
 }
 
 // Active returns the currently-active gallery context.
@@ -746,6 +790,7 @@ func (s *Server) Close() {
 	default:
 		close(s.done)
 	}
+	tagger.ReleaseAll()
 	s.ctxMu.Lock()
 	defer s.ctxMu.Unlock()
 	for _, cx := range s.contexts {
