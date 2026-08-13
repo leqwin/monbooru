@@ -523,24 +523,19 @@ func (s *Server) sidebarBrowse(w http.ResponseWriter, r *http.Request) {
 		sourceLabels []gallery.SourceLabelCount
 		saved        []models.SavedSearch
 	)
+	// Same shape as sidebarLoad: only the saved-search read fans out. A
+	// goroutine per cached cx read takes its own slot against the read pool,
+	// which costs more under concurrent viewers than the reads save.
 	var wg sync.WaitGroup
-	wg.Add(3)
-	go func() {
-		defer wg.Done()
-		if cx := s.Active(); cx != nil {
-			folders, _ = cx.FolderTreeUnder(ceiling)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		if cx := s.Active(); cx != nil {
-			sourceLabels, _ = cx.SourceLabelCountsUnder(ceiling)
-		}
-	}()
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		saved = s.loadSavedSearches("sidebar-browse")
 	}()
+	if cx := s.Active(); cx != nil {
+		folders, _ = cx.FolderTreeUnder(ceiling)
+		sourceLabels, _ = cx.SourceLabelCountsUnder(ceiling)
+	}
 	wg.Wait()
 
 	s.renderTemplate(w, "partials/sidebar_browse.html", map[string]any{
@@ -600,12 +595,8 @@ func computeActiveTagTerms(query string) map[string]bool {
 	if err != nil || expr == nil {
 		return set
 	}
-	var walk func(search.Expr)
-	walk = func(e search.Expr) {
+	search.WalkAndedLeaves(expr, func(e search.Expr) {
 		switch v := e.(type) {
-		case search.AndExpr:
-			walk(v.Left)
-			walk(v.Right)
 		case search.TagExpr:
 			if v.Tag != "" && v.Wildcard == "" {
 				set[v.Tag] = true
@@ -613,8 +604,7 @@ func computeActiveTagTerms(query string) map[string]bool {
 		case search.FilterExpr:
 			set[v.Key+":"+strings.ToLower(v.Val)] = true
 		}
-	}
-	walk(expr)
+	})
 	return set
 }
 
@@ -628,19 +618,11 @@ func inboxFilterActive(expr search.Expr) bool {
 		return false
 	}
 	var found bool
-	var walk func(search.Expr)
-	walk = func(e search.Expr) {
-		switch v := e.(type) {
-		case search.AndExpr:
-			walk(v.Left)
-			walk(v.Right)
-		case search.FilterExpr:
-			if v.Key == "inbox" && strings.ToLower(v.Val) == "true" {
-				found = true
-			}
+	search.WalkAndedLeaves(expr, func(e search.Expr) {
+		if v, ok := e.(search.FilterExpr); ok && v.Key == "inbox" && strings.ToLower(v.Val) == "true" {
+			found = true
 		}
-	}
-	walk(expr)
+	})
 	return found
 }
 
@@ -654,19 +636,11 @@ func collectionFilterActive(expr search.Expr) bool {
 		return false
 	}
 	var found bool
-	var walk func(search.Expr)
-	walk = func(e search.Expr) {
-		switch v := e.(type) {
-		case search.AndExpr:
-			walk(v.Left)
-			walk(v.Right)
-		case search.FilterExpr:
-			if v.Key == "collection" && v.Val != "" {
-				found = true
-			}
+	search.WalkAndedLeaves(expr, func(e search.Expr) {
+		if v, ok := e.(search.FilterExpr); ok && v.Key == "collection" && v.Val != "" {
+			found = true
 		}
-	}
-	walk(expr)
+	})
 	return found
 }
 
@@ -690,28 +664,16 @@ func unknownFilterValues(expr search.Expr) []string {
 	}
 	var out []string
 	seen := map[string]bool{}
-	var walk func(search.Expr)
-	walk = func(e search.Expr) {
-		switch v := e.(type) {
-		case search.AndExpr:
-			walk(v.Left)
-			walk(v.Right)
-		case search.OrExpr:
-			walk(v.Left)
-			walk(v.Right)
-		case search.NotExpr:
-			walk(v.Expr)
-		case search.FilterExpr:
-			if !searchkw.ValueKnown(v.Key, v.Val) {
-				token := v.Key + ":" + v.Val
-				if !seen[token] {
-					seen[token] = true
-					out = append(out, token)
-				}
+	search.WalkLeaves(expr, func(e search.Expr) bool {
+		if v, ok := e.(search.FilterExpr); ok && !searchkw.ValueKnown(v.Key, v.Val) {
+			token := v.Key + ":" + v.Val
+			if !seen[token] {
+				seen[token] = true
+				out = append(out, token)
 			}
 		}
-	}
-	walk(expr)
+		return true
+	})
 	return out
 }
 

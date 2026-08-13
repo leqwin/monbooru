@@ -64,9 +64,7 @@ func buildOriginalLines(original string) []originalLine {
 		if line == "" {
 			continue
 		}
-		lower := strings.ToLower(line)
-		isURL := strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")
-		out = append(out, originalLine{Text: line, IsURL: isURL})
+		out = append(out, originalLine{Text: line, IsURL: gallery.ValidExternalURL(line)})
 	}
 	return out
 }
@@ -123,6 +121,14 @@ type detailData struct {
 	BackOrder         string
 	BackPage          string
 	BackSeed          string
+	// PrevBackPage / PrevBackIdx and their Next twins are the listing
+	// position the neighbour links hand on, so a walk that steps off the
+	// end of a page carries the next page's number with it instead of
+	// asking the database which page it landed on.
+	PrevBackPage string
+	PrevBackIdx  string
+	NextBackPage string
+	NextBackIdx  string
 	// BackQS is the URL-safe `?back_*=...` fragment carrying every back_*
 	// the detail handler saw. Forwarded verbatim on the manga Read /
 	// Pages anchors so click-through preserves the gallery context;
@@ -224,6 +230,7 @@ func (s *Server) detailHandler(w http.ResponseWriter, r *http.Request) {
 	// other reads instead of after them.
 	back := parseBackContext(r)
 	backQ, backSort, backOrder, backPage, backSeed := back.Q, back.Sort, back.Order, back.Page, back.Seed
+	backIdx := r.URL.Query().Get("back_idx")
 
 	// A "ref" query param points at the detail page the user just came from
 	// (a Similar-images click). When set and valid, the gallery-context UI
@@ -250,11 +257,16 @@ func (s *Server) detailHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Resolve back_page so Escape and "← Back" land on the page that
 	// actually contains the current image, even after prev/next walked
-	// past the page the user arrived from. Warm path: slice-scan the
-	// cached match list. Cold path: spawn a COUNT-rank query in the
-	// detail-handler's parallel block so it doesn't extend latency
-	// past the slowest other read; cache miss with a back_q context
-	// is the only time this fires.
+	// past the page the user arrived from.
+	//
+	// The listing position the link carried answers it for nothing: the
+	// grid stamps each thumbnail with its page and its row on that page,
+	// and each prev/next link hands the neighbour's on, rolling over to
+	// the next page when it steps off the end. Every other route to the
+	// page number costs a query the render has to wait for - a slice
+	// scan of the cached match list when there is one, and a rank COUNT
+	// when there is not, which is the one that grows with how deep the
+	// page sits.
 	var rankPage string
 	rankReady := make(chan struct{})
 	rankFired := false
@@ -262,7 +274,16 @@ func (s *Server) detailHandler(w http.ResponseWriter, r *http.Request) {
 	// read below knows whether to look again.
 	pendingKey := ""
 	pageSize := s.pageSize()
-	if wantAdjacent && pageSize > 0 {
+	posPage, posIdx, havePos := 0, 0, false
+	if p, err := strconv.Atoi(backPage); err == nil && p > 0 && pageSize > 0 {
+		if i, err := strconv.Atoi(backIdx); err == nil && i >= 0 && i < pageSize {
+			posPage, posIdx, havePos = p, i, true
+		}
+	}
+	if havePos {
+		backPage = strconv.Itoa(posPage)
+	}
+	if wantAdjacent && pageSize > 0 && !havePos {
 		var seed int64
 		if backSort == "random" && backSeed != "" {
 			seed, _ = strconv.ParseInt(backSeed, 10, 64)
@@ -293,6 +314,12 @@ func (s *Server) detailHandler(w http.ResponseWriter, r *http.Request) {
 				// of it. Overrunning keeps the page the URL carries.
 				ctx, cancel := context.WithTimeout(r.Context(), rankPageBudget)
 				defer cancel()
+				if arrived, err := strconv.Atoi(backPage); err == nil {
+					if page, ok := s.pageHoldingMatch(ctx, sq, id, arrived, pageSize); ok {
+						rankPage = strconv.Itoa(page)
+						return
+					}
+				}
 				rank, err := search.RankInQuery(ctx, s.db(), sq, id)
 				if err != nil || rank < 0 {
 					return
@@ -379,6 +406,24 @@ func (s *Server) detailHandler(w http.ResponseWriter, r *http.Request) {
 	} else if ids, ok := search.AdjacencyCacheGet(pendingKey); ok {
 		if page, found := s.pageOfMatch(ids, id); found {
 			backPage = page
+		}
+	}
+
+	// Hand the neighbours their own listing position so the walk keeps
+	// tracking across a page edge. Without one to carry (a bare link, or
+	// a page the grid never stamped) the links fall back to the page
+	// this render resolved, which is what they carried before.
+	prevBackPage, prevBackIdx, nextBackPage, nextBackIdx := backPage, "", backPage, ""
+	if havePos {
+		if posIdx > 0 {
+			prevBackPage, prevBackIdx = strconv.Itoa(posPage), strconv.Itoa(posIdx-1)
+		} else if posPage > 1 {
+			prevBackPage, prevBackIdx = strconv.Itoa(posPage-1), strconv.Itoa(pageSize-1)
+		}
+		if posIdx+1 < pageSize {
+			nextBackPage, nextBackIdx = strconv.Itoa(posPage), strconv.Itoa(posIdx+1)
+		} else {
+			nextBackPage, nextBackIdx = strconv.Itoa(posPage+1), "0"
 		}
 	}
 
@@ -486,6 +531,10 @@ func (s *Server) detailHandler(w http.ResponseWriter, r *http.Request) {
 		BackOrder:         backOrder,
 		BackPage:          backPage,
 		BackSeed:          backSeed,
+		PrevBackPage:      prevBackPage,
+		PrevBackIdx:       prevBackIdx,
+		NextBackPage:      nextBackPage,
+		NextBackIdx:       nextBackIdx,
 		BackQS:            back.QueryString("?"),
 		BackKVQS:          back.QueryString("&"),
 		EnabledTaggers:    enabledTaggers,
@@ -573,6 +622,37 @@ func (s *Server) pageOfMatch(ids []int64, id int64) (string, bool) {
 		return "", false
 	}
 	return strconv.Itoa(i/s.pageSize() + 1), true
+}
+
+// pageHoldingMatch names the page of q that carries id, looking at the
+// page the operator arrived on and its two neighbours - the only pages
+// prev/next can have walked to from there. Each look is one page-sized
+// read, so it costs the same whether the page is the second or the two
+// hundredth, where counting the rows above the image grows with the
+// depth and gives up once it is deeper than it will count. Not found
+// leaves back_page on whatever the URL carried.
+func (s *Server) pageHoldingMatch(ctx context.Context, sq search.Query, id int64, arrived, pageSize int) (int, bool) {
+	if arrived < 1 || pageSize < 1 {
+		return 0, false
+	}
+	for _, page := range []int{arrived, arrived + 1, arrived - 1} {
+		if page < 1 || ctx.Err() != nil {
+			continue
+		}
+		probe := sq
+		probe.Page, probe.Limit = page, pageSize
+		// No total to report and no list worth caching: this asks one
+		// question about one page.
+		probe.SkipCount, probe.CacheKey = true, ""
+		res, err := search.Execute(s.db(), probe)
+		if err != nil {
+			return 0, false
+		}
+		if slices.ContainsFunc(res.Results, func(img models.Image) bool { return img.ID == id }) {
+			return page, true
+		}
+	}
+	return 0, false
 }
 
 // findAdjacentImages finds the prev/next image IDs in the given search context

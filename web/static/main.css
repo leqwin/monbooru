@@ -1021,6 +1021,7 @@ dialog .series-input-wrap { max-width: 360px; }
 .add-cat-form { display: flex; gap: 6px; align-items: stretch; }
 .add-cat-form input[type="text"] { flex: 1; max-width: 200px; }
 .add-cat-form input[type="color"] { padding: 0; width: 40px; }
+.add-cat-form .cat-hex { flex: none; }
 kbd {
   background: var(--bg-surface);
   border: 1px solid var(--border);
@@ -2385,6 +2386,15 @@ details[open] > .relations-card-summary::before { content: "▼"; }
 .cat-actions { display: inline-flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .cat-actions .field-hint { margin: 0; }
 .cat-action-spacer { visibility: hidden; }
+
+.cat-color-pair { display: inline-flex; gap: 6px; align-items: center; }
+.cat-swatch { padding: 0; width: 30px; height: 22px; }
+/* Reads as the plain hex it replaced until it is hovered or focused. */
+/* Wide enough for the seven characters plus the datalist indicator. */
+.cat-hex { width: 13ch; padding: 1px 4px; background: transparent; border-color: transparent; }
+.cat-hex:hover { border-color: var(--border); }
+.cat-hex:focus { background: var(--bg-input); }
+.cat-hex:invalid { border-color: var(--error); }
 
 .tag-actions {
   display: flex;

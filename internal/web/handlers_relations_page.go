@@ -416,56 +416,30 @@ func loadBrowseCardsByKind(cx *galleryCtx, kind, sort string, limit, offset int,
 	var cards []browseCard
 	var walkedTotal int
 	switch kind {
-	case "duplicate":
-		where, args := groupCardsWhere("dup_group_members", "dup_groups.id")
-		orderBy := dupSortClause(sort)
-		dupRows, err := cx.DB.Read.Query(
-			`SELECT dup_groups.id, dup_groups.original_image_id, dup_groups.created_at FROM dup_groups WHERE 1=1`+where+` `+orderBy+` LIMIT ? OFFSET ?`,
+	case "duplicate", "alternate":
+		g := browseGroupKinds[kind]
+		where, args := groupCardsWhere(g.membersTable, g.groupTable+".id")
+		rows, err := cx.DB.Read.Query(
+			`SELECT `+g.cols+` FROM `+g.groupTable+` WHERE 1=1`+where+` `+g.sortClause(sort)+` LIMIT ? OFFSET ?`,
 			append(args, limit, offset)...,
 		)
 		if err != nil {
 			return nil, 0, err
 		}
-		defer func() { _ = dupRows.Close() }()
-		for dupRows.Next() {
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
 			var id, original int64
 			var createdAt string
-			if err := dupRows.Scan(&id, &original, &createdAt); err != nil {
+			if err := rows.Scan(&id, &original, &createdAt); err != nil {
 				return nil, 0, err
 			}
-			members, mErr := scanGroupMembers(cx, "dup_group_members", id)
+			members, mErr := scanGroupMembers(cx, g.membersTable, id)
 			if mErr != nil {
 				return nil, 0, mErr
 			}
-			cards = append(cards, browseCard{Kind: "duplicate", GroupID: id, Members: members, Original: original, CreatedAt: humanISOTime(createdAt)})
+			cards = append(cards, browseCard{Kind: kind, GroupID: id, Members: members, Original: original, CreatedAt: humanISOTime(createdAt)})
 		}
-		if err := dupRows.Err(); err != nil {
-			return nil, 0, err
-		}
-	case "alternate":
-		where, args := groupCardsWhere("alt_group_members", "alt_groups.id")
-		orderBy := altSortClause(sort)
-		altRows, err := cx.DB.Read.Query(
-			`SELECT alt_groups.id, alt_groups.created_at FROM alt_groups WHERE 1=1`+where+` `+orderBy+` LIMIT ? OFFSET ?`,
-			append(args, limit, offset)...,
-		)
-		if err != nil {
-			return nil, 0, err
-		}
-		defer func() { _ = altRows.Close() }()
-		for altRows.Next() {
-			var id int64
-			var createdAt string
-			if err := altRows.Scan(&id, &createdAt); err != nil {
-				return nil, 0, err
-			}
-			members, mErr := scanGroupMembers(cx, "alt_group_members", id)
-			if mErr != nil {
-				return nil, 0, mErr
-			}
-			cards = append(cards, browseCard{Kind: "alternate", GroupID: id, Members: members, CreatedAt: humanISOTime(createdAt)})
-		}
-		if err := altRows.Err(); err != nil {
+		if err := rows.Err(); err != nil {
 			return nil, 0, err
 		}
 	case "version":
@@ -530,6 +504,19 @@ func loadBrowseCardsByKind(cx *galleryCtx, kind, sort string, limit, offset int,
 // dupSortClause maps the per-kind whitelist value to a static
 // ORDER BY tail. The sort value is already resolved through
 // resolveBrowseSort so it's safe to splice directly.
+// browseGroupKinds describes the two group-card kinds, which differ only in
+// their tables, their sort vocabulary and whether the group names an original.
+// The alternate select pads a zero so both scan the same three columns.
+var browseGroupKinds = map[string]struct {
+	groupTable   string
+	membersTable string
+	cols         string
+	sortClause   func(string) string
+}{
+	"duplicate": {"dup_groups", "dup_group_members", "dup_groups.id, dup_groups.original_image_id, dup_groups.created_at", dupSortClause},
+	"alternate": {"alt_groups", "alt_group_members", "alt_groups.id, 0, alt_groups.created_at", altSortClause},
+}
+
 func dupSortClause(sort string) string {
 	switch sort {
 	case "size":

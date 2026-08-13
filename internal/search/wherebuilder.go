@@ -93,16 +93,16 @@ func sortIndexHint(expr Expr, sort string, hasMissingFilter, ceilingRewrote bool
 	return ""
 }
 
-// walkLeaves visits every leaf of expr, descending through And / Or /
+// WalkLeaves visits every leaf of expr, descending through And / Or /
 // Not. visit returns false to stop the walk early.
-func walkLeaves(expr Expr, visit func(Expr) bool) bool {
+func WalkLeaves(expr Expr, visit func(Expr) bool) bool {
 	switch e := expr.(type) {
 	case AndExpr:
-		return walkLeaves(e.Left, visit) && walkLeaves(e.Right, visit)
+		return WalkLeaves(e.Left, visit) && WalkLeaves(e.Right, visit)
 	case OrExpr:
-		return walkLeaves(e.Left, visit) && walkLeaves(e.Right, visit)
+		return WalkLeaves(e.Left, visit) && WalkLeaves(e.Right, visit)
 	case NotExpr:
-		return walkLeaves(e.Expr, visit)
+		return WalkLeaves(e.Expr, visit)
 	}
 	return visit(expr)
 }
@@ -112,11 +112,11 @@ func walkLeaves(expr Expr, visit func(Expr) bool) bool {
 // as an empty set, and every pred here answers false for it, so both
 // report false on nil.
 func anyLeaf(expr Expr, pred func(Expr) bool) bool {
-	return !walkLeaves(expr, func(e Expr) bool { return !pred(e) })
+	return !WalkLeaves(expr, func(e Expr) bool { return !pred(e) })
 }
 
 func allLeaves(expr Expr, pred func(Expr) bool) bool {
-	return walkLeaves(expr, pred)
+	return WalkLeaves(expr, pred)
 }
 
 func isPureTagExpr(expr Expr) bool {
@@ -260,7 +260,7 @@ const driverIDBoundDensityCutoff = 20
 // semantics.
 func collectAndedTags(expr Expr) []TagExpr {
 	var out []TagExpr
-	walkAndedLeaves(expr, func(e Expr) {
+	WalkAndedLeaves(expr, func(e Expr) {
 		if v, ok := e.(TagExpr); ok && v.Tag != "" {
 			out = append(out, v)
 		}
@@ -268,10 +268,10 @@ func collectAndedTags(expr Expr) []TagExpr {
 	return out
 }
 
-// walkAndedLeaves visits every leaf reachable from expr through AndExpr
+// WalkAndedLeaves visits every leaf reachable from expr through AndExpr
 // nodes only. Descending into Or / Not would change what the caller's
 // driver predicate means, so the walk stops at them.
-func walkAndedLeaves(expr Expr, visit func(Expr)) {
+func WalkAndedLeaves(expr Expr, visit func(Expr)) {
 	var walk func(Expr)
 	walk = func(e Expr) {
 		if v, ok := e.(AndExpr); ok {
@@ -310,7 +310,7 @@ func expensiveAdjacencyTags(expr Expr) bool {
 // obvious non-tag keywords.
 func collectAndedFilterLeaves(expr Expr) []FilterExpr {
 	var out []FilterExpr
-	walkAndedLeaves(expr, func(e Expr) {
+	WalkAndedLeaves(expr, func(e Expr) {
 		v, ok := e.(FilterExpr)
 		if !ok || v.Val == "" || searchkw.IsKeyword(v.Key) {
 			return

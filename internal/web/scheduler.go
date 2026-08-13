@@ -53,9 +53,9 @@ func (s *Server) runScheduler() {
 // nextScheduledFire returns the next local time cfg.Schedule.Time will hit.
 // Returns ok=false when no schedule flag is enabled or the time is unparseable.
 func (s *Server) nextScheduledFire(now time.Time) (time.Time, bool) {
-	s.cfgMu.Lock()
+	s.cfgMu.RLock()
 	sched := s.cfg.Schedule
-	s.cfgMu.Unlock()
+	s.cfgMu.RUnlock()
 	if !schedHasAnyEnabled(sched) {
 		return time.Time{}, false
 	}
@@ -130,9 +130,9 @@ func (s *Server) runScheduledActions() {
 		s.recordScheduleRun(started, time.Since(started), info)
 	}()
 
-	s.cfgMu.Lock()
+	s.cfgMu.RLock()
 	sched := s.cfg.Schedule
-	s.cfgMu.Unlock()
+	s.cfgMu.RUnlock()
 
 	s.ctxMu.RLock()
 	names := make([]string, 0, len(s.contexts))
@@ -241,6 +241,17 @@ func (s *Server) monloaderPTRReady() bool {
 	return ready
 }
 
+// startScheduledPhase claims the job lane for one scheduled phase and returns
+// the context it runs under. phase and gallery name the warning a refused
+// claim logs.
+func (s *Server) startScheduledPhase(jobType, phase, gallery string) (context.Context, error) {
+	if err := s.jobs.StartScheduled(jobType); err != nil {
+		logx.Warnf("scheduler %s %q: %v", phase, gallery, err)
+		return nil, err
+	}
+	return s.jobs.Context(), nil
+}
+
 // nextScheduleOffset returns where this run starts in the gallery list and
 // advances the stored position for the next one.
 func (s *Server) nextScheduleOffset(n int) int {
@@ -263,15 +274,14 @@ func rotateStrings(names []string, offset int) []string {
 }
 
 func (s *Server) scheduledFindRelationPairs(cx *galleryCtx) error {
-	if err := s.jobs.StartScheduled(models.JobTypeRelations); err != nil {
-		logx.Warnf("scheduler find-pairs %q: %v", cx.Name, err)
+	ctx, err := s.startScheduledPhase(models.JobTypeRelations, "find-pairs", cx.Name)
+	if err != nil {
 		return err
 	}
-	ctx := s.jobs.Context()
-	s.cfgMu.Lock()
+	s.cfgMu.RLock()
 	tagPairs := s.cfg.Relations.TagPairs
 	tagPairThreshold := s.cfg.Relations.TagPairThreshold
-	s.cfgMu.Unlock()
+	s.cfgMu.RUnlock()
 	opts := relations.FindPairsOptions{
 		Distance:         int(relations.IncrementalProbeDistance.Load()),
 		Replace:          false,
@@ -293,11 +303,10 @@ func (s *Server) scheduledFindRelationPairs(cx *galleryCtx) error {
 }
 
 func (s *Server) scheduledSync(cx *galleryCtx) error {
-	if err := s.jobs.StartScheduled(models.JobTypeSync); err != nil {
-		logx.Warnf("scheduler sync %q: %v", cx.Name, err)
+	ctx, err := s.startScheduledPhase(models.JobTypeSync, "sync", cx.Name)
+	if err != nil {
 		return err
 	}
-	ctx := s.jobs.Context()
 	result, err := cx.Sync(ctx, s.maxFileSizeMB(), s.jobs.Update)
 	// Match the user-trigger handlers' shape: ctx cancellation produces
 	// a clean Complete summary, only real failures fall to Fail().
@@ -317,11 +326,10 @@ func (s *Server) scheduledSync(cx *galleryCtx) error {
 }
 
 func (s *Server) scheduledRemoveOrphans(cx *galleryCtx) error {
-	if err := s.jobs.StartScheduled(models.JobTypePruneThumbs); err != nil {
-		logx.Warnf("scheduler orphans %q: %v", cx.Name, err)
+	ctx, err := s.startScheduledPhase(models.JobTypePruneThumbs, "orphans", cx.Name)
+	if err != nil {
 		return err
 	}
-	ctx := s.jobs.Context()
 	removed, processed, total, err := s.runOrphanSweep(ctx, cx)
 	if err != nil {
 		s.jobs.Fail(err.Error())
@@ -421,11 +429,10 @@ func (s *Server) scheduledAutotag(cx *galleryCtx) error {
 	if len(enabled) == 0 {
 		return nil
 	}
-	if err := s.jobs.StartScheduled(models.JobTypeAutotag); err != nil {
-		logx.Warnf("scheduler autotag %q: %v", cx.Name, err)
+	ctx, err := s.startScheduledPhase(models.JobTypeAutotag, "autotag", cx.Name)
+	if err != nil {
 		return err
 	}
-	ctx := s.jobs.Context()
 	baseline := readVmRSS()
 	skipped, err := tagger.RunWithTaggers(ctx, cx.DB, cfg, ids, enabled, s.jobs, cfg.Tagger.ExecutionProvider, cx.MangaCacheDir())
 	err = s.completeAutotagRun(cx, ctx, "["+cx.Name+"] ", "",

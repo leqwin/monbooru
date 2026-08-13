@@ -1,0 +1,4 @@
+{{/* One peer's declared buttons, rendered the same in the pairing request
+     panel and in the settings row so an approved peer reads identically
+     before and after. The dot is the button slice. */}}
+{{define "partials/plugin_button_decl.html"}}{{range $i, $b := .}}{{if $i}} · {{end}}<span class="plugin-button-decl">{{$b.Slot}} "{{$b.Label}}" ({{$b.Mode}}{{with $b.Media}}, {{.}}{{end}})</span>{{end}}{{end}}

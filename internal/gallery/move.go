@@ -23,21 +23,10 @@ type MoveImageResult struct {
 // watcher should gate this under a job type the watcher suppresses,
 // otherwise the resulting CREATE/REMOVE events race with the DB update.
 func MoveImage(database *db.DB, galleryPath string, id int64, targetFolder string) (*MoveImageResult, error) {
-	var oldCanonical, oldFolder string
-	var isMissing int
-	if err := database.Read.QueryRow(
-		`SELECT canonical_path, folder_path, is_missing FROM images WHERE id = ?`, id,
-	).Scan(&oldCanonical, &oldFolder, &isMissing); err != nil {
-		return nil, fmt.Errorf("image %d not found: %w", id, err)
-	}
-	if isMissing == 1 {
-		return nil, fmt.Errorf("image %d is missing from disk", id)
-	}
-	// Refuse a source whose canonical_path drifted outside the gallery
-	// root, mirroring DeleteImage; the destination is already root-bounded
-	// by ResolveSubdir.
-	if galleryPath != "" && !PathInside(galleryPath, oldCanonical) {
-		return nil, fmt.Errorf("refusing to move %q outside gallery root %q", oldCanonical, galleryPath)
+	// The destination is already root-bounded by ResolveSubdir.
+	oldCanonical, oldFolder, err := loadMoveSource(database, galleryPath, id, "move")
+	if err != nil {
+		return nil, err
 	}
 
 	destDir, err := ResolveSubdir(galleryPath, targetFolder)
@@ -73,48 +62,11 @@ func MoveImage(database *db.DB, galleryPath string, id int64, targetFolder strin
 	// with no useful diagnostic. Surface the collision up front so the
 	// caller can suggest "prune duplicate paths" from the Settings
 	// maintenance page.
-	var collidingImage int64
-	if err := database.Read.QueryRow(
-		`SELECT image_id FROM image_paths WHERE path = ? AND image_id != ?`,
-		newPath, id,
-	).Scan(&collidingImage); err == nil {
-		return nil, fmt.Errorf("destination collides with an existing alias on image %d", collidingImage)
+	if err := refuseAliasCollision(database, id, newPath); err != nil {
+		return nil, err
 	}
-
-	// Rename inside the open tx so a rename failure rolls the row updates
-	// back automatically. The watcher suppresses events while the move job
-	// runs, so the brief window where on-disk newPath exists but the tx
-	// has not committed yet does not race with concurrent ingest.
-	tx, err := database.Write.Begin()
-	if err != nil {
-		return nil, fmt.Errorf("begin move tx: %w", err)
-	}
-	if _, err := tx.Exec(
-		`UPDATE images SET canonical_path = ?, folder_path = ? WHERE id = ?`,
-		newPath, newFolder, id,
-	); err != nil {
-		_ = tx.Rollback()
-		return nil, fmt.Errorf("update images row: %w", err)
-	}
-	if _, err := tx.Exec(
-		`UPDATE image_paths SET path = ? WHERE image_id = ? AND is_canonical = 1`,
-		newPath, id,
-	); err != nil {
-		_ = tx.Rollback()
-		return nil, fmt.Errorf("update image_paths row: %w", err)
-	}
-	if err := os.Rename(oldCanonical, newPath); err != nil {
-		_ = tx.Rollback()
-		return nil, fmt.Errorf("rename file: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		// Commit failure is rare (SQLite COMMIT is essentially an fsync).
-		// Reverse the rename so disk and DB stay consistent; if that
-		// fails the library is wedged and the operator needs a manual sync.
-		if rnErr := os.Rename(newPath, oldCanonical); rnErr != nil {
-			logx.Errorf("move: reverse rename for %d after commit fail: %v (original: %v)", id, rnErr, err)
-		}
-		return nil, fmt.Errorf("commit move tx: %w", err)
+	if err := commitRename(database, "move", id, oldCanonical, newPath, &newFolder); err != nil {
+		return nil, err
 	}
 
 	return &MoveImageResult{
@@ -132,18 +84,9 @@ func RenameImage(database *db.DB, galleryPath string, id int64, newName string) 
 	if newName == "" || newName != filepath.Base(newName) || newName == "." || newName == ".." {
 		return nil, fmt.Errorf("invalid file name %q", newName)
 	}
-	var oldCanonical, oldFolder string
-	var isMissing int
-	if err := database.Read.QueryRow(
-		`SELECT canonical_path, folder_path, is_missing FROM images WHERE id = ?`, id,
-	).Scan(&oldCanonical, &oldFolder, &isMissing); err != nil {
-		return nil, fmt.Errorf("image %d not found: %w", id, err)
-	}
-	if isMissing == 1 {
-		return nil, fmt.Errorf("image %d is missing from disk", id)
-	}
-	if galleryPath != "" && !PathInside(galleryPath, oldCanonical) {
-		return nil, fmt.Errorf("refusing to rename %q outside gallery root %q", oldCanonical, galleryPath)
+	oldCanonical, oldFolder, err := loadMoveSource(database, galleryPath, id, "rename")
+	if err != nil {
+		return nil, err
 	}
 
 	if ext := filepath.Ext(oldCanonical); !strings.EqualFold(filepath.Ext(newName), ext) {
@@ -158,42 +101,11 @@ func RenameImage(database *db.DB, galleryPath string, id int64, newName string) 
 
 	newPath := uniqueRenamePath(filepath.Dir(oldCanonical), newName)
 
-	// Same alias-collision pre-check as MoveImage: a stale image_paths row
-	// would trip the UNIQUE constraint mid-tx with no useful diagnostic.
-	var collidingImage int64
-	if err := database.Read.QueryRow(
-		`SELECT image_id FROM image_paths WHERE path = ? AND image_id != ?`,
-		newPath, id,
-	).Scan(&collidingImage); err == nil {
-		return nil, fmt.Errorf("destination collides with an existing alias on image %d", collidingImage)
+	if err := refuseAliasCollision(database, id, newPath); err != nil {
+		return nil, err
 	}
-
-	tx, err := database.Write.Begin()
-	if err != nil {
-		return nil, fmt.Errorf("begin rename tx: %w", err)
-	}
-	if _, err := tx.Exec(
-		`UPDATE images SET canonical_path = ? WHERE id = ?`, newPath, id,
-	); err != nil {
-		_ = tx.Rollback()
-		return nil, fmt.Errorf("update images row: %w", err)
-	}
-	if _, err := tx.Exec(
-		`UPDATE image_paths SET path = ? WHERE image_id = ? AND is_canonical = 1`,
-		newPath, id,
-	); err != nil {
-		_ = tx.Rollback()
-		return nil, fmt.Errorf("update image_paths row: %w", err)
-	}
-	if err := os.Rename(oldCanonical, newPath); err != nil {
-		_ = tx.Rollback()
-		return nil, fmt.Errorf("rename file: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		if rnErr := os.Rename(newPath, oldCanonical); rnErr != nil {
-			logx.Errorf("rename: reverse rename for %d after commit fail: %v (original: %v)", id, rnErr, err)
-		}
-		return nil, fmt.Errorf("commit rename tx: %w", err)
+	if err := commitRename(database, "rename", id, oldCanonical, newPath, nil); err != nil {
+		return nil, err
 	}
 
 	return &MoveImageResult{
@@ -202,21 +114,88 @@ func RenameImage(database *db.DB, galleryPath string, id int64, newName string) 
 	}, nil
 }
 
+// loadMoveSource reads the row a move or rename acts on and refuses what
+// neither can handle: a file already gone from disk, and a canonical_path
+// that drifted outside the gallery root (mirroring DeleteImage). verb names
+// the refused action in the error.
+func loadMoveSource(database *db.DB, galleryPath string, id int64, verb string) (oldCanonical, oldFolder string, err error) {
+	var isMissing int
+	if err := database.Read.QueryRow(
+		`SELECT canonical_path, folder_path, is_missing FROM images WHERE id = ?`, id,
+	).Scan(&oldCanonical, &oldFolder, &isMissing); err != nil {
+		return "", "", fmt.Errorf("image %d not found: %w", id, err)
+	}
+	if isMissing == 1 {
+		return "", "", fmt.Errorf("image %d is missing from disk", id)
+	}
+	if galleryPath != "" && !PathInside(galleryPath, oldCanonical) {
+		return "", "", fmt.Errorf("refusing to %s %q outside gallery root %q", verb, oldCanonical, galleryPath)
+	}
+	return oldCanonical, oldFolder, nil
+}
+
+// refuseAliasCollision rejects a destination another image already records
+// as an alias: a stale image_paths row would otherwise trip the UNIQUE
+// constraint mid-tx with no useful diagnostic.
+func refuseAliasCollision(database *db.DB, id int64, newPath string) error {
+	var collidingImage int64
+	if err := database.Read.QueryRow(
+		`SELECT image_id FROM image_paths WHERE path = ? AND image_id != ?`,
+		newPath, id,
+	).Scan(&collidingImage); err == nil {
+		return fmt.Errorf("destination collides with an existing alias on image %d", collidingImage)
+	}
+	return nil
+}
+
+// commitRename repoints both path rows and renames the file inside the open
+// tx, so a rename failure rolls the row updates back automatically. The
+// watcher suppresses events while the job runs, so the window where newPath
+// exists on disk before the commit does not race a concurrent ingest. A
+// commit failure (rare - SQLite COMMIT is essentially an fsync) reverses the
+// rename; if that fails too the library is wedged and needs a manual sync.
+// newFolder nil leaves folder_path alone, which is what a rename in place
+// wants.
+func commitRename(database *db.DB, verb string, id int64, oldCanonical, newPath string, newFolder *string) error {
+	tx, err := database.Write.Begin()
+	if err != nil {
+		return fmt.Errorf("begin %s tx: %w", verb, err)
+	}
+	update, args := `UPDATE images SET canonical_path = ? WHERE id = ?`, []any{newPath, id}
+	if newFolder != nil {
+		update = `UPDATE images SET canonical_path = ?, folder_path = ? WHERE id = ?`
+		args = []any{newPath, *newFolder, id}
+	}
+	if _, err := tx.Exec(update, args...); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("update images row: %w", err)
+	}
+	if _, err := tx.Exec(
+		`UPDATE image_paths SET path = ? WHERE image_id = ? AND is_canonical = 1`,
+		newPath, id,
+	); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("update image_paths row: %w", err)
+	}
+	if err := os.Rename(oldCanonical, newPath); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("rename file: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		if rnErr := os.Rename(newPath, oldCanonical); rnErr != nil {
+			logx.Errorf("%s: reverse rename for %d after commit fail: %v (original: %v)", verb, id, rnErr, err)
+		}
+		return fmt.Errorf("commit %s tx: %w", verb, err)
+	}
+	return nil
+}
+
 // uniqueRenamePath returns dir/filename if free, else appends a
 // zero-padded counter to the stem (name01.png, name02.png, ...) so
 // rename collisions read like the batch rename's numbered sequence
 // instead of UniqueDestPath's `_N` upload suffixes.
 func uniqueRenamePath(dir, filename string) string {
-	dst := filepath.Join(dir, filename)
-	if _, err := os.Stat(dst); os.IsNotExist(err) {
-		return dst
-	}
-	stem := strings.TrimSuffix(filename, filepath.Ext(filename))
-	ext := filepath.Ext(filename)
-	for i := 1; ; i++ {
-		candidate := filepath.Join(dir, fmt.Sprintf("%s%02d%s", stem, i, ext))
-		if _, err := os.Stat(candidate); os.IsNotExist(err) {
-			return candidate
-		}
-	}
+	return uniquePathBy(dir, filename, func(stem, ext string, i int) string {
+		return fmt.Sprintf("%s%02d%s", stem, i, ext)
+	})
 }

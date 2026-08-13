@@ -63,13 +63,13 @@
     <div class="detail-topbar-right">
       <div class="detail-meta-nav">
         {{if .PrevID}}
-        <a href="/images/{{deref64 .PrevID}}?back_q={{urlQ .BackQuery}}&back_sort={{.BackSort}}&back_order={{.BackOrder}}{{if .BackPage}}&back_page={{.BackPage}}{{end}}{{if .BackSeed}}&back_seed={{.BackSeed}}{{end}}"
+        <a href="/images/{{deref64 .PrevID}}?back_q={{urlQ .BackQuery}}&back_sort={{.BackSort}}&back_order={{.BackOrder}}{{if .PrevBackPage}}&back_page={{.PrevBackPage}}{{end}}{{if .PrevBackIdx}}&back_idx={{.PrevBackIdx}}{{end}}{{if .BackSeed}}&back_seed={{.BackSeed}}{{end}}"
            class="nav-arrow" title="Previous image (←)">← Prev</a>
         {{else}}
         <span class="nav-arrow nav-arrow-placeholder" aria-hidden="true">← Prev</span>
         {{end}}
         {{if .NextID}}
-        <a href="/images/{{deref64 .NextID}}?back_q={{urlQ .BackQuery}}&back_sort={{.BackSort}}&back_order={{.BackOrder}}{{if .BackPage}}&back_page={{.BackPage}}{{end}}{{if .BackSeed}}&back_seed={{.BackSeed}}{{end}}"
+        <a href="/images/{{deref64 .NextID}}?back_q={{urlQ .BackQuery}}&back_sort={{.BackSort}}&back_order={{.BackOrder}}{{if .NextBackPage}}&back_page={{.NextBackPage}}{{end}}{{if .NextBackIdx}}&back_idx={{.NextBackIdx}}{{end}}{{if .BackSeed}}&back_seed={{.BackSeed}}{{end}}"
            class="nav-arrow" title="Next image (→)">Next →</a>
         {{else}}
         <span class="nav-arrow nav-arrow-placeholder" aria-hidden="true">Next →</span>

@@ -2590,6 +2590,19 @@ function selectionScopeIds() {
   return ids.map(function(v) { return 'ids=' + encodeURIComponent(v); });
 }
 
+// batchScopeParams resolves a batch dialog's scope into request params: the
+// current search, or the checked thumbs. Returns null after writing the flash
+// when the selection is empty, which is the caller's cue to stop.
+function batchScopeParams(scope, flash) {
+  if (scope === 'search') return searchScopeParts();
+  var ids = selectionScopeIds();
+  if (!ids) {
+    if (flash) flash.innerHTML = '<div class="flash flash-err">No images selected.</div>';
+    return null;
+  }
+  return ids;
+}
+
 // relayPlugin carries a plugin's relay click to the server with the scope
 // its surface holds: the detail page's own image, or the gallery's current
 // selection. The peer's answer comes back as a flash trigger.
@@ -2748,17 +2761,9 @@ function openHxRewriteDialog(formId, attr, url, dialogId) {
 // already-encoded "k=v" parts placed before the scope params.
 function confirmBatchSimple(prefix, endpoint, extraParams, failMsg) {
   var scope = document.getElementById(prefix + '-scope').value;
-  var params = extraParams || [];
-  if (scope === 'search') {
-    params = params.concat(searchScopeParts());
-  } else {
-    var ids = selectionScopeIds();
-    if (!ids) {
-      document.getElementById(prefix + '-flash').innerHTML = '<div class="flash flash-err">No images selected.</div>';
-      return;
-    }
-    params = params.concat(ids);
-  }
+  var scoped = batchScopeParams(scope, document.getElementById(prefix + '-flash'));
+  if (!scoped) return;
+  var params = (extraParams || []).concat(scoped);
   runBatchOp({endpoint: endpoint, scope: scope, params: params,
               dialogId: prefix + '-dialog', flashId: prefix + '-flash', failMsg: failMsg});
 }

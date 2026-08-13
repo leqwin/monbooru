@@ -274,12 +274,12 @@ func (s *Server) promoteCanonicalPath(imageID int64, newPath, promoteSQL string,
 }
 
 const (
-	maxExternalSourceLen  = 200
-	maxExternalURLLen     = 2048
+	maxExternalSourceLen  = gallery.MaxSourceLabelLen
+	maxExternalURLLen     = gallery.MaxSourceURLLen
+	maxImageCommentaryLen = gallery.MaxCommentaryLen
+	maxImageOriginalLen   = gallery.MaxOriginalLen
+	maxAnnotationBodyLen  = gallery.MaxAnnotationBodyLen
 	maxImageNoteLen       = 10000
-	maxImageCommentaryLen = 10000
-	maxImageOriginalLen   = 2048
-	maxAnnotationBodyLen  = 2000
 )
 
 // setSource upserts one origin for an image: adding it, updating its url /
@@ -309,8 +309,7 @@ func (s *Server) setSource(w http.ResponseWriter, r *http.Request) {
 			externalErr(w, r, fmt.Sprintf("url too long (max %d chars)", maxExternalURLLen), http.StatusBadRequest)
 			return
 		}
-		lower := strings.ToLower(url)
-		if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
+		if !gallery.ValidExternalURL(url) {
 			externalErr(w, r, "url must start with http:// or https://", http.StatusBadRequest)
 			return
 		}

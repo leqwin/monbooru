@@ -132,10 +132,8 @@ func peerConn(paused bool, probe string) string {
 func (s *Server) pairedTokenInfo(app string) (string, []string) {
 	s.cfgMu.RLock()
 	defer s.cfgMu.RUnlock()
-	for _, t := range s.cfg.Auth.Tokens {
-		if t.Paired == app {
-			return t.Name, t.Scopes
-		}
+	if t := s.cfg.FindPairedToken(app); t != nil {
+		return t.Name, t.Scopes
 	}
 	return "", nil
 }
@@ -168,14 +166,6 @@ func (s *Server) pairViewData(r *http.Request) map[string]any {
 	}
 }
 
-func (s *Server) renderPluginRowsOOB(w http.ResponseWriter, r *http.Request) {
-	s.renderTemplate(w, "partials/plugin_rows.html", map[string]any{
-		"Rows":      s.pluginRows(),
-		"CSRFToken": s.csrfToken(sessionFromContext(r.Context())),
-		"OOB":       true,
-	})
-}
-
 // pluginPairingFragment serves the pending-request panel's poll. The poll
 // carries the browser's last-rendered pairing count; when it moves (a peer
 // claimed, or a pairing was removed) the rows and the token list need a
@@ -185,7 +175,7 @@ func (s *Server) pluginPairingFragment(w http.ResponseWriter, r *http.Request) {
 	count, _ := data["Paired"].(int)
 	s.renderTemplate(w, "partials/plugin_pairing.html", data)
 	if was := r.URL.Query().Get("paired"); was != "" && was != strconv.Itoa(count) {
-		s.renderPluginRowsOOB(w, r)
+		s.renderPluginRows(w, r, true)
 		s.renderAuthTokensOOB(w, r)
 	}
 }
@@ -233,7 +223,7 @@ func (s *Server) pluginPairRemove(w http.ResponseWriter, r *http.Request) {
 			notifyErr = nil
 		}
 	}
-	s.renderPluginRows(w, r)
+	s.renderPluginRows(w, r, false)
 	s.renderAuthTokensOOB(w, r)
 	if notifyErr != nil {
 		writeFlashOOB(w, "flash-plugins", "warn", "Removed here, but could not reach "+name+" - remove the pairing there too.")
@@ -252,7 +242,7 @@ func (s *Server) pluginPause(w http.ResponseWriter, r *http.Request) {
 		logx.Errorf("plugins: pause %s: %v", name, err)
 	}
 	logx.Infof("plugins: %s %s from %s", name, map[bool]string{true: "paused", false: "resumed"}[paused], clientIP(r))
-	s.renderPluginRows(w, r)
+	s.renderPluginRows(w, r, false)
 }
 
 // pluginStart and pluginStop drive a dropped plugin's process from its row,
@@ -273,7 +263,7 @@ func (s *Server) pluginStart(w http.ResponseWriter, r *http.Request) {
 		s.clearPluginProbe(p.Name)
 		logx.Infof("plugins: started %s from %s", p.Name, clientIP(r))
 	}
-	s.renderPluginRows(w, r)
+	s.renderPluginRows(w, r, false)
 }
 
 func (s *Server) pluginStop(w http.ResponseWriter, r *http.Request) {
@@ -287,7 +277,7 @@ func (s *Server) pluginStop(w http.ResponseWriter, r *http.Request) {
 	s.stopManaged(name)
 	s.markPluginDown(name)
 	logx.Infof("plugins: stopped %s from %s", name, clientIP(r))
-	s.renderPluginRows(w, r)
+	s.renderPluginRows(w, r, false)
 }
 
 // setPluginEnabled records a discovered plugin's boot-start choice, writing
@@ -307,11 +297,13 @@ func (s *Server) setPluginEnabled(name string, enabled bool) {
 }
 
 // renderPluginRows writes the peer rows in place, the shared tail of every
-// row-level action.
-func (s *Server) renderPluginRows(w http.ResponseWriter, r *http.Request) {
+// row-level action. oob swaps them from a response the rows are not the
+// target of.
+func (s *Server) renderPluginRows(w http.ResponseWriter, r *http.Request, oob bool) {
 	s.renderTemplate(w, "partials/plugin_rows.html", map[string]any{
 		"Rows":      s.pluginRows(),
 		"CSRFToken": s.csrfToken(sessionFromContext(r.Context())),
+		"OOB":       oob,
 	})
 }
 

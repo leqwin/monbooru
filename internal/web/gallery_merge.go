@@ -114,53 +114,63 @@ func writeLightManifest(cx *galleryCtx, w io.Writer) error {
 	bw.objStart()
 	bw.field("version", lightManifestVersion)
 	bw.arrayStart("images")
-	fail := func(err error) error {
-		bw.arrayEnd()
-		bw.objEnd()
+	first := true
+	err := walkLightRows(cx.DB.Read, func(sha, relPath string, tags []string) {
+		// A tag-less image ships an empty array, not null.
+		if tags == nil {
+			tags = []string{}
+		}
+		bw.arrayItem(&first, lightManifestImage{SHA256: sha, Path: relPath, Tags: tags})
+	})
+	bw.arrayEnd()
+	bw.objEnd()
+	if err != nil {
 		return err
 	}
+	return bw.err
+}
 
-	rows, err := cx.DB.Read.Query(lightManifestQuery)
+// walkLightRows runs the light-manifest join and calls emit once per image
+// with the tags collected across its rows. The query orders by image id, so
+// grouping rides the cursor rather than a tag query per image.
+func walkLightRows(read *sql.DB, emit func(sha, relPath string, tags []string)) error {
+	rows, err := read.Query(lightManifestQuery)
 	if err != nil {
-		return fail(err)
+		return err
 	}
 	defer func() { _ = rows.Close() }()
 
-	first := true
-	var cur lightManifestImage
 	var curID int64
+	var curSHA, curPath string
+	var tags []string
 	open := false
 	for rows.Next() {
 		var id int64
 		var sha, folder, canonical string
 		var tname, tcat sql.NullString
 		if err := rows.Scan(&id, &sha, &folder, &canonical, &tname, &tcat); err != nil {
-			return fail(err)
+			return err
 		}
 		if !open || id != curID {
 			if open {
-				bw.arrayItem(&first, cur)
+				emit(curSHA, curPath, tags)
 			}
 			curID, open = id, true
-			cur = lightManifestImage{
-				SHA256: sha,
-				Path:   filepath.ToSlash(filepath.Join(folder, storedBasename(canonical))),
-				Tags:   []string{},
-			}
+			curSHA = sha
+			curPath = filepath.ToSlash(filepath.Join(folder, storedBasename(canonical)))
+			tags = nil
 		}
 		if tname.Valid {
-			cur.Tags = append(cur.Tags, tagToken(tcat.String, tname.String))
+			tags = append(tags, tagToken(tcat.String, tname.String))
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return fail(err)
+		return err
 	}
 	if open {
-		bw.arrayItem(&first, cur)
+		emit(curSHA, curPath, tags)
 	}
-	bw.arrayEnd()
-	bw.objEnd()
-	return bw.err
+	return nil
 }
 
 // lightManifestQuery emits one row per (image, tag) pair and a single
@@ -241,16 +251,7 @@ func applyLightReplace(mf lightManifest, files []translatedFile, dbPath, thumbsP
 			return err
 		}
 	}
-	database, err := db.Open(dbPath)
-	if err != nil {
-		return fmt.Errorf("open new db: %w", err)
-	}
-	defer func() { _ = database.Close() }()
-	if err := db.Bootstrap(database); err != nil {
-		return fmt.Errorf("bootstrap: %w", err)
-	}
-	ingestLightManifestEntries(database, galleryPath, thumbsPath, mf.Images, source)
-	return nil
+	return rebuildFromLightManifest(dbPath, galleryPath, thumbsPath, mf.Images, source)
 }
 
 // resetDBAndThumbs removes the live DB sidecars and the thumbnails directory
@@ -290,6 +291,12 @@ func replaceFromLightManifest(srcPath, dbPath, thumbsPath, galleryPath string) e
 	if err := resetDBAndThumbs(dbPath, thumbsPath); err != nil {
 		return err
 	}
+	return rebuildFromLightManifest(dbPath, galleryPath, thumbsPath, mf.Images, importSourceNative)
+}
+
+// rebuildFromLightManifest bootstraps a fresh database at dbPath and ingests
+// every manifest entry into it. The caller has already cleared the old state.
+func rebuildFromLightManifest(dbPath, galleryPath, thumbsPath string, images []lightManifestImage, source string) error {
 	database, err := db.Open(dbPath)
 	if err != nil {
 		return fmt.Errorf("open new db: %w", err)
@@ -298,7 +305,7 @@ func replaceFromLightManifest(srcPath, dbPath, thumbsPath, galleryPath string) e
 	if err := db.Bootstrap(database); err != nil {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
-	ingestLightManifestEntries(database, galleryPath, thumbsPath, mf.Images, importSourceNative)
+	ingestLightManifestEntries(database, galleryPath, thumbsPath, images, source)
 	return nil
 }
 
@@ -460,20 +467,27 @@ func (s *Server) MergeGallery(name, format string, upload io.Reader) error {
 }
 
 func mergeFromDB(cx *galleryCtx, tmpPath string, maxFileSizeMB int) error {
-	if err := validateSQLiteFile(tmpPath); err != nil {
-		return fmt.Errorf("uploaded file is not a valid monbooru database: %w", err)
-	}
-	src, err := db.Open(tmpPath)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = src.Close() }()
-	records, err := readDBMergeRecords(src)
+	records, err := readDBRecordsFromFile(tmpPath, "uploaded file is not a valid monbooru database")
 	if err != nil {
 		return err
 	}
 	applyMergeRecords(cx, records, importSourceNative, maxFileSizeMB)
 	return nil
+}
+
+// readDBRecordsFromFile validates a SQLite file and reads its merge records.
+// invalidMsg names the file in the validation error: an uploaded database and
+// one unpacked from an archive read differently to the operator.
+func readDBRecordsFromFile(path, invalidMsg string) ([]mergeRecord, error) {
+	if err := validateSQLiteFile(path); err != nil {
+		return nil, fmt.Errorf("%s: %w", invalidMsg, err)
+	}
+	src, err := db.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = src.Close() }()
+	return readDBMergeRecords(src)
 }
 
 func mergeFromJSON(cx *galleryCtx, tmpPath string, maxFileSizeMB int) error {
@@ -557,15 +571,7 @@ func mergeFromZip(cx *galleryCtx, tmpPath string, maxFileSizeMB int) error {
 			return err
 		}
 		defer func() { _ = os.Remove(inner) }()
-		if err := validateSQLiteFile(inner); err != nil {
-			return fmt.Errorf("inner db invalid: %w", err)
-		}
-		src, err := db.Open(inner)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = src.Close() }()
-		records, err = readDBMergeRecords(src)
+		records, err = readDBRecordsFromFile(inner, "inner db invalid")
 		if err != nil {
 			return err
 		}
@@ -667,35 +673,10 @@ func applyMergeRecords(cx *galleryCtx, records []mergeRecord, source string, max
 // Rides the same image-ordered join the light export uses, grouping off the
 // cursor rather than issuing a tag query per image.
 func readDBMergeRecords(src *db.DB) ([]mergeRecord, error) {
-	rows, err := src.Read.Query(lightManifestQuery)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-
 	var recs []mergeRecord
-	var curID int64
-	open := false
-	for rows.Next() {
-		var id int64
-		var sha, folder, canonical string
-		var tname, tcat sql.NullString
-		if err := rows.Scan(&id, &sha, &folder, &canonical, &tname, &tcat); err != nil {
-			return nil, err
-		}
-		if !open || id != curID {
-			curID, open = id, true
-			recs = append(recs, mergeRecord{
-				SHA256:     sha,
-				SourcePath: filepath.ToSlash(filepath.Join(folder, storedBasename(canonical))),
-			})
-		}
-		if tname.Valid {
-			last := &recs[len(recs)-1]
-			last.Tags = append(last.Tags, tagToken(tcat.String, tname.String))
-		}
-	}
-	if err := rows.Err(); err != nil {
+	if err := walkLightRows(src.Read, func(sha, relPath string, tags []string) {
+		recs = append(recs, mergeRecord{SHA256: sha, SourcePath: relPath, Tags: tags})
+	}); err != nil {
 		return nil, err
 	}
 	return recs, nil

@@ -266,6 +266,17 @@ func ValidatePluginButtons(buttons []PluginButton) error {
 	return nil
 }
 
+// FindPairedToken returns the token issued to the named peer, or nil. The
+// pairing flow writes at most one per peer. Callers hold the config lock.
+func (cfg *Config) FindPairedToken(app string) *Token {
+	for i := range cfg.Auth.Tokens {
+		if cfg.Auth.Tokens[i].Paired == app {
+			return &cfg.Auth.Tokens[i]
+		}
+	}
+	return nil
+}
+
 // FindPlugin returns the block with the given name, or nil.
 func (cfg *Config) FindPlugin(name string) *PluginConfig {
 	for i := range cfg.Plugins {

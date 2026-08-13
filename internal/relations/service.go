@@ -149,26 +149,48 @@ func (s *Service) AddAlternate(a, b int64) error {
 // the whole component. Mirrors the implications walker's depth budget.
 const MaxVersionChainDepth = 16
 
-// chainReachesTx walks the single-parent chain in table upward from start
-// (parentCol read via childCol) and reports whether target sits anywhere
-// above it. Depth-capped so a malformed cycle in the data can't spin.
-func chainReachesTx(tx *sql.Tx, table, parentCol, childCol string, start, target int64) (bool, error) {
+// ChainPath walks table upward from start, reading selectCol via whereCol,
+// and returns the nodes above it nearest-first (empty when start has none).
+// Both edge tables make the read side a primary key, so every step is a
+// point seek onto at most one row. Depth-capped so a malformed cycle in the
+// data can't spin; q is a transaction or the read pool.
+func ChainPath(q db.Querier, table, selectCol, whereCol string, start int64) ([]int64, error) {
+	var path []int64
 	cur := start
 	for i := 0; i < MaxVersionChainDepth; i++ {
-		var ancestor int64
-		err := tx.QueryRow(`SELECT `+parentCol+` FROM `+table+` WHERE `+childCol+` = ?`, cur).Scan(&ancestor)
-		if errors.Is(err, sql.ErrNoRows) {
-			return false, nil
-		}
+		next, err := db.QueryIDs(q, `SELECT `+selectCol+` FROM `+table+` WHERE `+whereCol+` = ?`, cur)
 		if err != nil {
-			return false, err
+			return nil, err
 		}
-		if ancestor == target {
-			return true, nil
+		if len(next) == 0 {
+			return path, nil
 		}
-		cur = ancestor
+		path = append(path, next[0])
+		cur = next[0]
 	}
-	return false, nil
+	return path, nil
+}
+
+// chainRoot is the top of the chain above start, or start itself when it
+// has none.
+func chainRoot(q db.Querier, table, parentCol, childCol string, start int64) (int64, error) {
+	path, err := ChainPath(q, table, parentCol, childCol, start)
+	if err != nil {
+		return 0, err
+	}
+	if len(path) == 0 {
+		return start, nil
+	}
+	return path[len(path)-1], nil
+}
+
+// chainReachesTx reports whether target sits anywhere above start.
+func chainReachesTx(tx *sql.Tx, table, parentCol, childCol string, start, target int64) (bool, error) {
+	path, err := ChainPath(tx, table, parentCol, childCol, start)
+	if err != nil {
+		return false, err
+	}
+	return slices.Contains(path, target), nil
 }
 
 // chainRelatesTx reports whether a and b sit on one root-to-leaf path of
@@ -186,84 +208,52 @@ func chainRelatesTx(tx *sql.Tx, table, parentCol, childCol string, a, b int64) (
 // descendants. Capped at MaxVersionChainDepth like the other walks; the
 // callers only need to know whether the joined chain would exceed it.
 func chainDepthTx(tx *sql.Tx, table, selectCol, whereCol string, start int64) (int, error) {
-	cur := start
-	for i := 0; i < MaxVersionChainDepth; i++ {
-		var next int64
-		err := tx.QueryRow(`SELECT `+selectCol+` FROM `+table+` WHERE `+whereCol+` = ?`, cur).Scan(&next)
-		if errors.Is(err, sql.ErrNoRows) {
-			return i, nil
-		}
-		if err != nil {
-			return 0, err
-		}
-		cur = next
+	path, err := ChainPath(tx, table, selectCol, whereCol, start)
+	if err != nil {
+		return 0, err
 	}
-	return MaxVersionChainDepth, nil
+	return len(path), nil
 }
 
 // derivativeHeightTx returns the number of edge levels beneath start in
 // the derivative tree, capped at MaxVersionChainDepth like the chain
 // walks.
 func derivativeHeightTx(tx *sql.Tx, start int64) (int, error) {
-	frontier := []int64{start}
-	height := 0
-	for level := 0; level < MaxVersionChainDepth && len(frontier) > 0; level++ {
-		var next []int64
-		for _, parent := range frontier {
-			ids, err := db.QueryIDs(tx, `SELECT derivative_image_id FROM derivative_edges WHERE source_image_id = ?`, parent)
-			if err != nil {
-				return 0, err
-			}
-			next = append(next, ids...)
-		}
-		if len(next) == 0 {
-			break
-		}
-		height++
-		frontier = next
-	}
-	return height, nil
+	_, levels, err := chainSpanTx(tx, "derivative_edges", "derivative_image_id", "source_image_id", start)
+	return levels, err
 }
 
 // chainSpanTx collects start plus everything reachable from it through
 // selectCol/whereCol: the single-parent chain when the columns read
 // upward, the whole subtree when they read downward. Level-capped like
 // the other walks.
-func chainSpanTx(tx *sql.Tx, table, selectCol, whereCol string, start int64) ([]int64, error) {
+func chainSpanTx(tx *sql.Tx, table, selectCol, whereCol string, start int64) ([]int64, int, error) {
 	span := []int64{start}
 	frontier := []int64{start}
+	levels := 0
 	for level := 0; level < MaxVersionChainDepth && len(frontier) > 0; level++ {
 		var next []int64
 		for _, id := range frontier {
 			ids, err := db.QueryIDs(tx, `SELECT `+selectCol+` FROM `+table+` WHERE `+whereCol+` = ?`, id)
 			if err != nil {
-				return nil, err
+				return nil, 0, err
 			}
 			next = append(next, ids...)
 		}
+		if len(next) == 0 {
+			break
+		}
+		levels++
 		span = append(span, next...)
 		frontier = next
 	}
-	return span, nil
+	return span, levels, nil
 }
 
 // walkToRootTx follows the single-parent chain in table upward from start
-// and returns the root - start itself when it has no parent. Depth-capped
-// like chainReachesTx.
+// and returns the root - start itself when it has no parent.
 func walkToRootTx(tx *sql.Tx, table, parentCol, childCol string, start int64) (int64, error) {
-	cur := start
-	for i := 0; i < MaxVersionChainDepth; i++ {
-		var parent int64
-		err := tx.QueryRow(`SELECT `+parentCol+` FROM `+table+` WHERE `+childCol+` = ?`, cur).Scan(&parent)
-		if errors.Is(err, sql.ErrNoRows) {
-			return cur, nil
-		}
-		if err != nil {
-			return 0, err
-		}
-		cur = parent
-	}
-	return cur, nil
+	return chainRoot(tx, table, parentCol, childCol, start)
 }
 
 // AddVersionEdge declares child as the newer version of parent. The
@@ -793,21 +783,13 @@ func collectVersionChainMembersTx(tx *sql.Tx, anyMember int64) ([]int64, error) 
 	if err != nil {
 		return nil, err
 	}
-	members := []int64{root}
-	cur := root
-	for i := 0; i < MaxVersionChainDepth; i++ {
-		var child int64
-		err := tx.QueryRow(`SELECT child_image_id FROM version_edges WHERE parent_image_id = ?`, cur).Scan(&child)
-		if errors.Is(err, sql.ErrNoRows) {
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
-		members = append(members, child)
-		cur = child
+	// parent_image_id is UNIQUE, so the descent is the same point seek the
+	// upward walk makes, one child per step.
+	below, err := ChainPath(tx, "version_edges", "child_image_id", "parent_image_id", root)
+	if err != nil {
+		return nil, err
 	}
-	return members, nil
+	return append([]int64{root}, below...), nil
 }
 
 // collectDerivativeTreeMembersTx walks the derivative tree containing
@@ -834,21 +816,8 @@ func collectDerivativeTreeMembersTx(tx *sql.Tx, anyMember int64) ([]int64, error
 	// a wide tree (single source with >256 derivatives) silently
 	// truncated at the 256th child; the cap should describe the tree's
 	// vertical reach, not its fan-out.
-	members := []int64{root}
-	frontier := []int64{root}
-	for level := 0; level < MaxVersionChainDepth && len(frontier) > 0; level++ {
-		var next []int64
-		for _, parent := range frontier {
-			ids, err := db.QueryIDs(tx, `SELECT derivative_image_id FROM derivative_edges WHERE source_image_id = ?`, parent)
-			if err != nil {
-				return nil, err
-			}
-			next = append(next, ids...)
-		}
-		members = append(members, next...)
-		frontier = next
-	}
-	return members, nil
+	members, _, err := chainSpanTx(tx, "derivative_edges", "derivative_image_id", "source_image_id", root)
+	return members, err
 }
 
 // deleteEdgesByEndpointsTx removes every row in `table` whose `colA` or
@@ -1282,11 +1251,11 @@ func pruneQueueForGroupTx(tx *sql.Tx, table string, anchor int64) error {
 // queued, and the session went on asking about images the tree already
 // related.
 func pruneQueueForChainTx(tx *sql.Tx, table, parentCol, childCol string, parent, child int64) error {
-	above, err := chainSpanTx(tx, table, parentCol, childCol, parent)
+	above, _, err := chainSpanTx(tx, table, parentCol, childCol, parent)
 	if err != nil {
 		return err
 	}
-	below, err := chainSpanTx(tx, table, childCol, parentCol, child)
+	below, _, err := chainSpanTx(tx, table, childCol, parentCol, child)
 	if err != nil {
 		return err
 	}

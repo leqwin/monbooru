@@ -43,7 +43,7 @@ func containedCanonical(w http.ResponseWriter, g Gallery, id int64) (canonPath, 
 		apiError(w, http.StatusNotFound, "not_found", "image not found")
 		return "", "", false
 	}
-	if !pathInsideGallery(g.GalleryPath, canonPath) {
+	if !gallery.ResolvedInside(g.GalleryPath, canonPath) {
 		apiError(w, http.StatusNotFound, "not_found", "image not found")
 		return "", "", false
 	}
@@ -109,19 +109,4 @@ func (h *Handler) serveMangaPagePath(
 		return
 	}
 	http.ServeFile(w, r, page)
-}
-
-// pathInsideGallery resolves both paths and reports whether target sits
-// under the gallery root, the same gate serveImageFile uses on the web
-// side. A resolution failure counts as outside.
-func pathInsideGallery(galleryPath, target string) bool {
-	galleryAbs, err := filepath.Abs(galleryPath)
-	if err != nil {
-		return false
-	}
-	targetAbs, err := filepath.Abs(target)
-	if err != nil {
-		return false
-	}
-	return gallery.PathInside(galleryAbs, targetAbs)
 }

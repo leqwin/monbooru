@@ -77,23 +77,7 @@ func CommonDerivativeAncestor(database *db.DB, a, b int64) (int64, bool, error) 
 // derivative_image_id), so every step is a point seek. Depth-capped
 // like the service's chain walks.
 func derivativeAncestors(database *db.DB, imageID int64) ([]int64, error) {
-	var out []int64
-	cur := imageID
-	for i := 0; i < MaxVersionChainDepth; i++ {
-		var source int64
-		err := database.Read.QueryRow(
-			`SELECT source_image_id FROM derivative_edges WHERE derivative_image_id = ?`, cur,
-		).Scan(&source)
-		if err == sql.ErrNoRows {
-			return out, nil
-		}
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, source)
-		cur = source
-	}
-	return out, nil
+	return ChainPath(database.Read, "derivative_edges", "source_image_id", "derivative_image_id", imageID)
 }
 
 // LoadImageRelations gathers every relation the image participates in.

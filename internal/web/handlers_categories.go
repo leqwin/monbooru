@@ -7,9 +7,19 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/monbooru/monbooru/internal/config"
 	"github.com/monbooru/monbooru/internal/logx"
+	"github.com/monbooru/monbooru/internal/models"
 	"github.com/monbooru/monbooru/internal/tags"
 )
+
+// categoriesData is the /categories page. Galleries shadows the layout's
+// own list with the config rows this page's picker renders.
+type categoriesData struct {
+	baseData
+	Galleries  []config.Gallery
+	Categories []models.TagCategory
+}
 
 func (s *Server) categoriesHandler(w http.ResponseWriter, r *http.Request) {
 	cats, err := s.tagSvc().ListCategories()
@@ -18,10 +28,11 @@ func (s *Server) categoriesHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data := s.base(r, "categories", "Categories - "+s.booruName()).AsMap()
-	data["Galleries"] = s.galleryList()
-	data["Categories"] = cats
-	s.renderTemplate(w, "categories.html", data)
+	s.renderTemplate(w, "categories.html", categoriesData{
+		baseData:   s.base(r, "categories", "Categories - "+s.booruName()),
+		Galleries:  s.galleryList(),
+		Categories: cats,
+	})
 }
 
 // categoryColors returns a name → color map for every row in
@@ -88,13 +99,31 @@ func (s *Server) updateCategoryPatch(w http.ResponseWriter, r *http.Request) {
 	if !parseFormOK(w, r) {
 		return
 	}
-	color := r.FormValue("color")
-	if err := s.tagSvc().UpdateCategoryColor(id, color); err != nil {
+	err := s.tagSvc().UpdateCategoryColor(id, r.FormValue("color"))
+	if err != nil {
 		logx.Warnf("update category %d color: %v", id, err)
-		writeInlineFlash(w, "err", err.Error())
+	}
+	if !isHTMXRequest(r) {
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		http.Redirect(w, r, "/categories", http.StatusSeeOther)
 		return
 	}
-	hxDone(w, r, "Category color updated.", "/categories", "/categories")
+	// The row is the answer: it carries the new colour, the two inputs
+	// that just disagreed, and whether a reset is still on offer. A
+	// refused colour rides the flash channel and the row swaps back to
+	// what storage holds.
+	if err != nil {
+		setFlashHeader(w, err.Error(), "err", nil)
+	}
+	cat, err := s.tagSvc().GetCategory(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	s.renderTemplate(w, "partials/category_row.html", cat)
 }
 
 func (s *Server) deleteCategoryDelete(w http.ResponseWriter, r *http.Request) {

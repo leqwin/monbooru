@@ -17,6 +17,7 @@ import (
 	"github.com/monbooru/monbooru/internal/db"
 	"github.com/monbooru/monbooru/internal/gallery"
 	"github.com/monbooru/monbooru/internal/logx"
+	"github.com/monbooru/monbooru/internal/lookup"
 	"github.com/monbooru/monbooru/internal/models"
 	"github.com/monbooru/monbooru/internal/search"
 )
@@ -163,6 +164,18 @@ func (s *Server) startBulkDelete(w http.ResponseWriter, targets []search.DeleteT
 // targeted recalc scoped to the tag IDs actually touched by the cascade
 // (collected from image_tags before the DELETE), avoiding a full-table Recalc
 // that would walk every tag in the library.
+// recalcAffectedTags reconciles usage counts for the tags a batch touched,
+// reporting the step on the job bar. logCtx names the caller in the warning.
+func (s *Server) recalcAffectedTags(affected []int64, processed, total int, logCtx string) {
+	if len(affected) == 0 {
+		return
+	}
+	s.jobs.Update(processed, total, "reconciling tag counts…")
+	if err := s.tagSvc().RecalcIDs(affected); err != nil {
+		logx.Warnf("%s recalc IDs: %v", logCtx, err)
+	}
+}
+
 func (s *Server) runBulkDelete(targets []search.DeleteTarget) {
 	ctx := s.jobs.Context()
 	total := len(targets)
@@ -204,12 +217,7 @@ func (s *Server) runBulkDelete(targets []search.DeleteTarget) {
 		return
 	}
 
-	if len(affectedTags) > 0 {
-		s.jobs.Update(processed, total, "reconciling tag counts…")
-		if err := s.tagSvc().RecalcIDs(affectedTags); err != nil {
-			logx.Warnf("bulk delete recalc IDs: %v", err)
-		}
-	}
+	s.recalcAffectedTags(affectedTags, processed, total, "bulk delete")
 
 	if processed > 0 {
 		s.Active().InvalidateCaches()
@@ -602,12 +610,7 @@ func (s *Server) runBatchStrip(ids []int64, mode, filterName string) {
 		removed += int64(orphans)
 	}
 
-	if len(affectedTags) > 0 {
-		s.jobs.Update(processed, total, "reconciling tag counts…")
-		if err := s.tagSvc().RecalcIDs(affectedTags); err != nil {
-			logx.Warnf("batch-strip recalc IDs: %v", err)
-		}
-	}
+	s.recalcAffectedTags(affectedTags, processed, total, "batch-strip")
 	s.Active().InvalidateCaches()
 
 	s.finishJob(nil, cancelled, fmt.Sprintf("%s cancelled (%d/%d processed)", label, processed, total),
@@ -959,8 +962,8 @@ func (s *Server) runBatchLookup(opts batchLookupOpts, ids []int64) {
 					continue
 				}
 				var jobID int64
-				if jobID, err = s.EnqueueHashLookup(ctx, id, cx.Name, "booru", md5, sha, true, false); err == nil {
-					s.recordLookupEnqueued(cx, id, "booru", jobID)
+				if jobID, err = s.EnqueueHashLookup(ctx, id, cx.Name, lookup.BackendBooru, md5, sha, true, false); err == nil {
+					s.recordLookupEnqueued(cx, id, lookup.BackendBooru, jobID)
 				}
 			}
 			if err != nil {
@@ -1028,15 +1031,20 @@ func (s *Server) batchPTRLookup(ctx context.Context, cx *galleryCtx, ids []int64
 	matched := 0
 	for start := 0; start < len(ids) && ctx.Err() == nil; start += ptrLookupChunk {
 		chunk := ids[start:min(start+ptrLookupChunk, len(ids))]
-		byHash := map[string]int64{}
-		images := make([]ptrLookupImage, 0, len(chunk))
-		for _, id := range chunk {
-			var sha string
-			if err := cx.DB.Read.QueryRow(`SELECT sha256 FROM images WHERE id = ?`, id).Scan(&sha); err != nil {
-				continue
-			}
-			byHash[sha] = id
-			images = append(images, ptrLookupImage{ImageID: id, SHA256: sha})
+		placeholders, args := db.InPlaceholders(chunk)
+		hashes, err := db.QueryAll(cx.DB.Read, func(rows *sql.Rows) (ptrLookupImage, error) {
+			var v ptrLookupImage
+			err := rows.Scan(&v.ImageID, &v.SHA256)
+			return v, err
+		}, `SELECT id, sha256 FROM images WHERE id IN (`+placeholders+`)`, args...)
+		if err != nil {
+			return matched, err
+		}
+		byHash := make(map[string]int64, len(hashes))
+		images := make([]ptrLookupImage, 0, len(hashes))
+		for _, h := range hashes {
+			byHash[h.SHA256] = h.ImageID
+			images = append(images, h)
 		}
 		if len(images) == 0 {
 			continue
@@ -1073,11 +1081,7 @@ func (s *Server) runBatchSchedule(ctx context.Context, cx *galleryCtx, on bool, 
 		if !on {
 			return nil
 		}
-		_, err := cx.DB.Write.Exec(
-			`UPDATE image_lookups SET attempts = 0, next_due_at = ?, ptr_cursor = NULL
-			 WHERE image_id IN (`+placeholders+`)`,
-			append([]any{time.Now().UTC().Format("2006-01-02T15:04:05Z")}, args...)...)
-		return err
+		return lookup.ResetMany(cx.DB.Write, placeholders, args, time.Now())
 	})
 	cx.InvalidateCaches()
 	switch {
@@ -1098,26 +1102,16 @@ func (s *Server) runBatchSchedule(ctx context.Context, cx *galleryCtx, on bool, 
 // rather than failing the batch. Returns how many jobs were queued.
 func (s *Server) enqueueSourceFetches(ctx context.Context, cx *galleryCtx, id int64, sha string) (int, error) {
 	galleryName := cx.Name
-	rows, err := cx.DB.Read.Query(
-		`SELECT site, url FROM image_sources WHERE image_id = ? ORDER BY rowid`, id)
-	if err != nil {
-		logx.Warnf("source fetch origins for image %d: %v", id, err)
-		return 0, nil
-	}
 	type origin struct{ site, url string }
-	var origins []origin
-	for rows.Next() {
-		var o origin
-		if rows.Scan(&o.site, &o.url) == nil {
-			origins = append(origins, o)
-		}
-	}
-	iterErr := rows.Err()
-	_ = rows.Close()
 	// Fetching the origins a partial read did reach would queue less work than
 	// the summary claims, with nothing saying so.
-	if iterErr != nil {
-		logx.Warnf("source fetch origins for image %d: %v", id, iterErr)
+	origins, err := db.QueryAll(cx.DB.Read, func(rows *sql.Rows) (origin, error) {
+		var o origin
+		err := rows.Scan(&o.site, &o.url)
+		return o, err
+	}, `SELECT site, url FROM image_sources WHERE image_id = ? ORDER BY rowid`, id)
+	if err != nil {
+		logx.Warnf("source fetch origins for image %d: %v", id, err)
 		return 0, nil
 	}
 
@@ -1135,19 +1129,19 @@ func (s *Server) enqueueSourceFetches(ctx context.Context, cx *galleryCtx, id in
 			if err := s.EnqueueMetadataFetch(ctx, id, galleryName, u); err != nil {
 				return queued, err
 			}
-		case strings.EqualFold(strings.TrimSpace(o.site), "ptr"):
+		case strings.EqualFold(strings.TrimSpace(o.site), lookup.BackendPTR):
 			if ptrDone {
 				continue
 			}
 			ptrDone = true
-			jobID, err := s.EnqueueHashLookup(ctx, id, galleryName, "ptr", "", sha, true, false)
+			jobID, err := s.EnqueueHashLookup(ctx, id, galleryName, lookup.BackendPTR, "", sha, true, false)
 			if err != nil {
 				if errors.Is(err, errPTRUnavailable) {
 					continue
 				}
 				return queued, err
 			}
-			s.recordLookupEnqueued(cx, id, "ptr", jobID)
+			s.recordLookupEnqueued(cx, id, lookup.BackendPTR, jobID)
 		default:
 			continue
 		}

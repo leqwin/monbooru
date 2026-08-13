@@ -1,6 +1,7 @@
 package web
 
 import (
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -94,9 +95,6 @@ func (s *Server) listThemes() []themeEntry {
 			if _, err := os.Stat(logo); err == nil {
 				e.Logo = logo
 			}
-			if prev, clash := byName[e.Name]; clash && !prev.Builtin {
-				logx.Warnf("themes: %q exists as both a folder and a .css file; the folder wins", e.Name)
-			}
 			byName[e.Name] = e
 			continue
 		}
@@ -123,11 +121,9 @@ func orderThemes(byName map[string]themeEntry) []themeEntry {
 			delete(byName, b.Name)
 		}
 	}
-	rest := make([]themeEntry, 0, len(byName))
-	for _, e := range byName {
-		rest = append(rest, e)
-	}
-	slices.SortFunc(rest, func(a, b themeEntry) int { return strings.Compare(a.Name, b.Name) })
+	rest := slices.SortedFunc(maps.Values(byName), func(a, b themeEntry) int {
+		return strings.Compare(a.Name, b.Name)
+	})
 	return append(out, rest...)
 }
 

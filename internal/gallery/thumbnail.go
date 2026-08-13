@@ -2,6 +2,7 @@ package gallery
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"image"
 	"image/color"
@@ -16,6 +17,7 @@ import (
 	"golang.org/x/image/draw"
 	_ "golang.org/x/image/webp"
 
+	"github.com/monbooru/monbooru/internal/db"
 	"github.com/monbooru/monbooru/internal/logx"
 )
 
@@ -358,6 +360,18 @@ func writeJPEGAtomic(img image.Image, path string, quality int) error {
 		}
 		return nil
 	})
+}
+
+// RegenerateDerived renders the thumbnail and, on success, the phash. Neither
+// failure is fatal: a missing thumbnail is regenerated on demand, and a NULL
+// phash keeps the row out of the relations system until a recompute lands
+// rather than leaving a stale value behind. logCtx names the caller.
+func RegenerateDerived(database *db.DB, thumbnailsPath, path string, imageID int64, fileType, logCtx string) {
+	if err := Generate(path, thumbnailsPath, imageID, fileType); err != nil {
+		logx.Warnf("%s: thumbnail for %q: %v", logCtx, path, err)
+	} else if err := RecomputeAndStorePhash(context.Background(), database, imageID, thumbnailsPath); err != nil {
+		logx.Warnf("%s: phash for %q: %v", logCtx, path, err)
+	}
 }
 
 // writeAtomic runs write against a temp file beside path and renames it

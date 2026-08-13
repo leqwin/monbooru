@@ -118,16 +118,7 @@ func DiscoverTaggers(cfg *config.Config) []TaggerStatus {
 // page itself); per-gallery callers should use EnabledTaggersForGallery
 // instead.
 func EnabledTaggers(cfg *config.Config) []TaggerStatus {
-	if !buildSupportsInference() {
-		return nil
-	}
-	var out []TaggerStatus
-	for _, t := range DiscoverTaggers(cfg) {
-		if t.Enabled && t.Available {
-			out = append(out, t)
-		}
-	}
-	return out
+	return enabledTaggers(cfg, nil)
 }
 
 // EnabledTaggersForGallery filters EnabledTaggers down to the rows whose
@@ -136,6 +127,13 @@ func EnabledTaggers(cfg *config.Config) []TaggerStatus {
 // per-job entry point so a tagger configured for `default` doesn't fire
 // on `stock` and vice versa.
 func EnabledTaggersForGallery(cfg *config.Config, gallery string) []TaggerStatus {
+	return enabledTaggers(cfg, func(t TaggerStatus) bool { return t.AppliesToGallery(gallery) })
+}
+
+// enabledTaggers backs both listings. A gallery-scoped tagger answers false
+// to AppliesToGallery(""), so the unscoped listing passes no extra predicate
+// rather than an empty gallery name.
+func enabledTaggers(cfg *config.Config, extra func(TaggerStatus) bool) []TaggerStatus {
 	if !buildSupportsInference() {
 		return nil
 	}
@@ -144,7 +142,7 @@ func EnabledTaggersForGallery(cfg *config.Config, gallery string) []TaggerStatus
 		if !t.Enabled || !t.Available {
 			continue
 		}
-		if !t.AppliesToGallery(gallery) {
+		if extra != nil && !extra(t) {
 			continue
 		}
 		out = append(out, t)

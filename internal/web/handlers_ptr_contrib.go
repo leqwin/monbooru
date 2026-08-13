@@ -1,7 +1,6 @@
 package web
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -110,20 +109,7 @@ func (s *Server) monloaderContribSend(ctx context.Context, origin string, items 
 // decodes a JSON reply, mapping a 409 to errPTRUnavailable so callers
 // collapse the surface in place.
 func (s *Server) monloaderContribJSON(ctx context.Context, method, path string, body []byte, out any) error {
-	base := strings.TrimRight(s.monloaderAPIBase(), "/")
-	s.cfgMu.RLock()
-	token := s.cfg.Monloader.APIToken
-	s.cfgMu.RUnlock()
-	if base == "" || token == "" {
-		return fmt.Errorf("monloader is not configured")
-	}
-	req, err := http.NewRequestWithContext(ctx, method, base+path, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := monloaderClient.Do(req)
+	resp, err := s.monloaderDo(ctx, method, path, body)
 	if err != nil {
 		return err
 	}

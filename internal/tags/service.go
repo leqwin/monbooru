@@ -53,6 +53,21 @@ var (
 // shape the UI form enforces.
 func IsValidCategoryColor(s string) bool { return categoryColorRe.MatchString(s) }
 
+// normalizeCategoryColor folds a valid colour to the lowercase six-digit
+// form a theme's --cat-<rrggbb> variable is keyed on, so a colour typed
+// by hand still matches the mapping. Anything else comes back untouched
+// for the caller's validation to refuse.
+func normalizeCategoryColor(s string) string {
+	if !IsValidCategoryColor(s) {
+		return s
+	}
+	s = strings.ToLower(s)
+	if len(s) == 4 {
+		return string([]byte{'#', s[1], s[1], s[2], s[2], s[3], s[3]})
+	}
+	return s
+}
+
 // SafeCategoryColor returns s when it's a valid hex colour, otherwise
 // the neutral fallback ("#888888"). Used on rows arriving from outside
 // the UI form layer (JSON / DB imports) so foreign payloads never

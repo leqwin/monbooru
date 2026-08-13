@@ -34,6 +34,19 @@ func (s *Service) ListCategories() ([]models.TagCategory, error) {
 	return cats, rows.Err()
 }
 
+func (s *Service) GetCategory(id int64) (models.TagCategory, error) {
+	var c models.TagCategory
+	var isBuiltin int
+	err := s.db.Read.QueryRow(
+		`SELECT id, name, color, is_builtin FROM tag_categories WHERE id = ?`, id,
+	).Scan(&c.ID, &c.Name, &c.Color, &isBuiltin)
+	if err == sql.ErrNoRows {
+		return c, ErrCategoryNotFound
+	}
+	c.IsBuiltin = isBuiltin == 1
+	return c, err
+}
+
 func (s *Service) CreateCategory(name, color string) (*models.TagCategory, error) {
 	name = strings.TrimSpace(strings.ToLower(name))
 	if name == "" {
@@ -49,6 +62,7 @@ func (s *Service) CreateCategory(name, color string) (*models.TagCategory, error
 	if !categoryColorRe.MatchString(color) {
 		return nil, ErrInvalidCategoryColor
 	}
+	color = normalizeCategoryColor(color)
 	var id int64
 	err := s.db.Write.QueryRow(
 		`INSERT INTO tag_categories (name, color) VALUES (?, ?) RETURNING id`,
@@ -63,13 +77,33 @@ func (s *Service) CreateCategory(name, color string) (*models.TagCategory, error
 	return &models.TagCategory{ID: id, Name: name, Color: color}, nil
 }
 
+// builtinCategoryColors mirrors the tag_categories seed in schema.sql; a
+// theme's --cat-<rrggbb> variables name these values, so returning to one
+// is what puts a recoloured category back under the theme.
+var builtinCategoryColors = map[string]string{
+	"general":   "#3d90e3",
+	"character": "#00aa00",
+	"artist":    "#cc0000",
+	"copyright": "#aa00aa",
+	"meta":      "#ffaa00",
+	"rating":    "#996666",
+	"medium":    "#7d4fbf",
+	"person":    "#b85c9e",
+	"year":      "#4a8fa8",
+	"species":   "#ed5d1f",
+}
+
+// DefaultCategoryColor returns the seeded colour of a built-in category,
+// or "" for one the operator created.
+func DefaultCategoryColor(name string) string { return builtinCategoryColors[name] }
+
 func (s *Service) UpdateCategoryColor(id int64, color string) error {
 	color = strings.TrimSpace(color)
 	if !categoryColorRe.MatchString(color) {
 		return ErrInvalidCategoryColor
 	}
 	_, err := s.db.Write.Exec(
-		`UPDATE tag_categories SET color = ? WHERE id = ?`, color, id,
+		`UPDATE tag_categories SET color = ? WHERE id = ?`, normalizeCategoryColor(color), id,
 	)
 	return err
 }

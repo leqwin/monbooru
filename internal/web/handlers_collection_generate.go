@@ -23,33 +23,49 @@ func (s *Server) generateMangaCollection(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	if !parseFormOK(w, r) {
+	name, cx, uploadFolder, ok := s.collectionJobPrologue(w, r)
+	if !ok {
 		return
 	}
-	name := strings.TrimSpace(r.FormValue("collection"))
+	s.goGenerationJob(func(ctx context.Context) (string, error) {
+		done, err := s.runMangaCollection(ctx, cx, img, name, uploadFolder)
+		return fmt.Sprintf("Generated %d page(s) into collection %q.", done, name), err
+	})
+	w.WriteHeader(http.StatusAccepted)
+}
+
+// collectionJobPrologue validates a generation request's label, claims the
+// job lane, and snapshots what the job runs against. SwitchGallery refuses
+// swaps while a job runs, so the snapshot stays valid for its lifetime.
+func (s *Server) collectionJobPrologue(w http.ResponseWriter, r *http.Request) (name string, cx *galleryCtx, uploadFolder string, ok bool) {
+	if !parseFormOK(w, r) {
+		return "", nil, "", false
+	}
+	name = strings.TrimSpace(r.FormValue("collection"))
 	if name == "" {
 		flashStatus(w, http.StatusBadRequest, "Collection label required.")
-		return
+		return "", nil, "", false
 	}
 	if len(name) > maxExternalSourceLen {
 		flashStatus(w, http.StatusBadRequest, "Collection label too long.")
-		return
+		return "", nil, "", false
 	}
-	if cx := s.Active(); cx == nil || cx.Degraded {
+	if active := s.Active(); active == nil || active.Degraded {
 		flashStatus(w, http.StatusServiceUnavailable, "Generation unavailable: gallery path is unreadable.")
-		return
+		return "", nil, "", false
 	}
 	if !s.startJob(w, models.JobTypeTag) {
-		return
+		return "", nil, "", false
 	}
-	// Snapshot the active gallery under the request's RLock: SwitchGallery
-	// refuses swaps while a job runs, so cx stays valid for the job.
-	cx := s.Active()
-	uploadFolder := s.defaultUploadFolder()
+	return name, s.Active(), s.defaultUploadFolder(), true
+}
+
+// goGenerationJob runs one generation in the claimed lane. A user cancel is
+// checked before the error so it surfaces as a summary, not a failure.
+func (s *Server) goGenerationJob(run func(ctx context.Context) (string, error)) {
 	go func() {
 		ctx := s.jobs.Context()
-		done, err := s.runMangaCollection(ctx, cx, img, name, uploadFolder)
-		// Cancel first: a user cancel surfaces as a summary, not a failure.
+		summary, err := run(ctx)
 		if ctx.Err() != nil {
 			s.jobs.Complete("generation cancelled")
 			return
@@ -58,9 +74,8 @@ func (s *Server) generateMangaCollection(w http.ResponseWriter, r *http.Request)
 			s.jobs.Fail(err.Error())
 			return
 		}
-		s.jobs.Complete(fmt.Sprintf("Generated %d page(s) into collection %q.", done, name))
+		s.jobs.Complete(summary)
 	}()
-	w.WriteHeader(http.StatusAccepted)
 }
 
 // runMangaCollection extracts every page of img into cx's gallery,
@@ -117,41 +132,14 @@ func (s *Server) runMangaCollection(ctx context.Context, cx *galleryCtx, img *mo
 // while a tag-type job runs (see Watcher.jobSuppressesIngest), so the
 // mid-job archive is not double-ingested behind us.
 func (s *Server) generateCollectionCBZ(w http.ResponseWriter, r *http.Request) {
-	if !parseFormOK(w, r) {
+	name, cx, uploadFolder, ok := s.collectionJobPrologue(w, r)
+	if !ok {
 		return
 	}
-	name := strings.TrimSpace(r.FormValue("collection"))
-	if name == "" {
-		flashStatus(w, http.StatusBadRequest, "Collection label required.")
-		return
-	}
-	if len(name) > maxExternalSourceLen {
-		flashStatus(w, http.StatusBadRequest, "Collection label too long.")
-		return
-	}
-	if cx := s.Active(); cx == nil || cx.Degraded {
-		flashStatus(w, http.StatusServiceUnavailable, "Generation unavailable: gallery path is unreadable.")
-		return
-	}
-	if !s.startJob(w, models.JobTypeTag) {
-		return
-	}
-	cx := s.Active()
-	uploadFolder := s.defaultUploadFolder()
-	go func() {
-		ctx := s.jobs.Context()
+	s.goGenerationJob(func(ctx context.Context) (string, error) {
 		res, err := s.runCollectionCBZ(ctx, cx, name, uploadFolder)
-		// Cancel first: a user cancel surfaces as a summary, not a failure.
-		if ctx.Err() != nil {
-			s.jobs.Complete("generation cancelled")
-			return
-		}
-		if err != nil {
-			s.jobs.Fail(err.Error())
-			return
-		}
-		s.jobs.Complete(res.summary())
-	}()
+		return res.summary(), err
+	})
 	w.WriteHeader(http.StatusAccepted)
 }
 
@@ -213,15 +201,7 @@ func (s *Server) runCollectionCBZ(ctx context.Context, cx *galleryCtx, name, upl
 	// whose canonical path is the new file is a reactivated archive the
 	// operator had deleted, so that copy stays.
 	if isDup && archive.CanonicalPath != dst {
-		if _, delErr := cx.DB.Write.Exec(
-			`DELETE FROM image_paths WHERE image_id = ? AND path = ? AND is_canonical = 0`,
-			archive.ID, dst,
-		); delErr != nil {
-			logx.Warnf("generate cbz: drop duplicate alias for %q: %v", dst, delErr)
-		}
-		if rmErr := os.Remove(dst); rmErr != nil && !os.IsNotExist(rmErr) {
-			logx.Warnf("generate cbz: remove duplicate copy %q: %v", dst, rmErr)
-		}
+		gallery.DropDuplicateCopy(cx.DB, archive.ID, dst, "generate cbz")
 		res.Existing = filepath.Base(archive.CanonicalPath)
 	}
 	cx.InvalidateCaches()
@@ -242,10 +222,7 @@ func collectionCBZFilename(name string) string {
 // shortHash returns the first 8 hex chars of a sha256 (or all of it);
 // used to build unique folder names for generated content.
 func shortHash(hash string) string {
-	if len(hash) > 8 {
-		return hash[:8]
-	}
-	return hash
+	return hash[:min(8, len(hash))]
 }
 
 // maxCBZStemBytes leaves room under the usual 255-byte filename limit
@@ -311,15 +288,7 @@ func (s *Server) extractMangaPageToGallery(cx *galleryCtx, img *models.Image, n 
 	if isDup && page.CanonicalPath != dstPath {
 		// Same unwind as the upload drop zone: the bytes already live in
 		// the gallery, so the fresh copy and its alias ingest are dead weight.
-		if _, delErr := cx.DB.Write.Exec(
-			`DELETE FROM image_paths WHERE image_id = ? AND path = ? AND is_canonical = 0`,
-			page.ID, dstPath,
-		); delErr != nil {
-			logx.Warnf("extract: drop duplicate alias for %q: %v", dstPath, delErr)
-		}
-		if rmErr := os.Remove(dstPath); rmErr != nil && !os.IsNotExist(rmErr) {
-			logx.Warnf("extract: remove duplicate copy %q: %v", dstPath, rmErr)
-		}
+		gallery.DropDuplicateCopy(cx.DB, page.ID, dstPath, "extract")
 	}
 	if cx.RelationsSvc != nil {
 		// A conflicting relation or existing source is a standing operator

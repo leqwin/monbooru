@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/monbooru/monbooru/internal/db"
 	"github.com/monbooru/monbooru/internal/gallery"
 	"github.com/monbooru/monbooru/internal/logx"
 	"github.com/monbooru/monbooru/internal/models"
@@ -296,23 +297,17 @@ func reorderSelfFirst(members []int64, self int64) []int64 {
 	return out
 }
 
-// walkRelationToRoot walks the parentCol -> childCol edge upward from
-// start, bounded by MaxVersionChainDepth so a corrupt cycle can't
-// loop. Shared by the version chain and derivative tree builders.
-func walkRelationToRoot(cx *galleryCtx, table, parentCol, childCol string, start int64) (int64, error) {
-	cur := start
-	for i := 0; i < relations.MaxVersionChainDepth; i++ {
-		var next int64
-		err := cx.DB.Read.QueryRow(`SELECT `+parentCol+` FROM `+table+` WHERE `+childCol+` = ?`, cur).Scan(&next)
-		if errors.Is(err, sql.ErrNoRows) {
-			return cur, nil
-		}
-		if err != nil {
-			return 0, err
-		}
-		cur = next
+// relationRoot is the top of the parentCol -> childCol chain above start,
+// read off the gallery's pool.
+func relationRoot(cx *galleryCtx, table, parentCol, childCol string, start int64) (int64, error) {
+	path, err := relations.ChainPath(cx.DB.Read, table, parentCol, childCol, start)
+	if err != nil {
+		return 0, err
 	}
-	return cur, nil
+	if len(path) == 0 {
+		return start, nil
+	}
+	return path[len(path)-1], nil
 }
 
 // versionChainGensForImage walks the version chain that contains
@@ -322,7 +317,7 @@ func walkRelationToRoot(cx *galleryCtx, table, parentCol, childCol string, start
 // descendant. Capped at MaxVersionChainDepth steps in each direction
 // so a corrupt cycle can't loop indefinitely.
 func versionChainGensForImage(cx *galleryCtx, imageID int64) ([][]int64, error) {
-	root, err := walkRelationToRoot(cx, "version_edges", "parent_image_id", "child_image_id", imageID)
+	root, err := relationRoot(cx, "version_edges", "parent_image_id", "child_image_id", imageID)
 	if err != nil {
 		return nil, err
 	}
@@ -356,7 +351,7 @@ func versionChainGensForImage(cx *galleryCtx, imageID int64) ([][]int64, error) 
 // renders as CSS-drawn branch lines. Same depth budget as the version
 // chain walk for safety.
 func derivativeTreeRowsForImage(cx *galleryCtx, imageID int64) ([]treeRow, error) {
-	root, err := walkRelationToRoot(cx, "derivative_edges", "source_image_id", "derivative_image_id", imageID)
+	root, err := relationRoot(cx, "derivative_edges", "source_image_id", "derivative_image_id", imageID)
 	if err != nil {
 		return nil, err
 	}
@@ -380,27 +375,13 @@ func dfsDerivativeChildren(cx *galleryCtx, parent int64, depth int, ancestorTrun
 	if depth > relations.MaxVersionChainDepth {
 		return nil
 	}
-	children, err := cx.DB.Read.Query(
+	ids, err := db.QueryIDs(cx.DB.Read,
 		`SELECT derivative_image_id FROM derivative_edges WHERE source_image_id = ? ORDER BY derivative_image_id`,
 		parent,
 	)
 	if err != nil {
 		return err
 	}
-	var ids []int64
-	for children.Next() {
-		var d int64
-		if scanErr := children.Scan(&d); scanErr != nil {
-			_ = children.Close()
-			return scanErr
-		}
-		ids = append(ids, d)
-	}
-	if err := children.Err(); err != nil {
-		_ = children.Close()
-		return err
-	}
-	_ = children.Close()
 	for i, id := range ids {
 		isLast := i == len(ids)-1
 		*rows = append(*rows, treeRow{ID: id, Depth: depth, Trunks: rowTrunks(ancestorTrunks, depth, isLast), Source: parent})
@@ -735,6 +716,14 @@ func (s *Server) removeRelationPost(w http.ResponseWriter, r *http.Request) {
 	writeInlineFlash(w, "ok", msg)
 }
 
+// reviewAgainRemovers drops the edge behind each pair-shaped review-again
+// kind. The group kinds are absent: they dissolve a group by id instead.
+var reviewAgainRemovers = map[string]func(*relations.Service, int64, int64) error{
+	"version":     (*relations.Service).RemoveVersionEdge,
+	"derivative":  (*relations.Service).RemoveDerivativeEdge,
+	"not_related": (*relations.Service).RemoveNotRelated,
+}
+
 // reviewAgainPost dissolves a 2-member relation, clears any matching
 // not_related_pairs row so the find-pairs job stops skipping it, queues
 // the pair onto potential_relation_pairs, and redirects to the session
@@ -778,32 +767,12 @@ func reviewAgainPost(w http.ResponseWriter, r *http.Request, cx *galleryCtx) {
 				return
 			}
 		}
-	case "version":
+	case "version", "derivative", "not_related":
 		ar, br, ok := parseRelationPair(w, r)
 		if !ok {
 			return
 		}
-		if err := cx.RelationsSvc.RemoveVersionEdge(ar, br); err != nil {
-			writeRelationError(w, err)
-			return
-		}
-		a, b = ar, br
-	case "derivative":
-		ar, br, ok := parseRelationPair(w, r)
-		if !ok {
-			return
-		}
-		if err := cx.RelationsSvc.RemoveDerivativeEdge(ar, br); err != nil {
-			writeRelationError(w, err)
-			return
-		}
-		a, b = ar, br
-	case "not_related":
-		ar, br, ok := parseRelationPair(w, r)
-		if !ok {
-			return
-		}
-		if err := cx.RelationsSvc.RemoveNotRelated(ar, br); err != nil {
+		if err := reviewAgainRemovers[subkind](cx.RelationsSvc, ar, br); err != nil {
 			writeRelationError(w, err)
 			return
 		}

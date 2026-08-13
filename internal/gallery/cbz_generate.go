@@ -55,81 +55,65 @@ func WriteCollectionCBZ(ctx context.Context, dstPath string, members []CBZMember
 	if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
 		return 0, 0, fmt.Errorf("create output dir: %w", err)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(dstPath), ".cbz-generate-*")
-	if err != nil {
-		return 0, 0, fmt.Errorf("create temp cbz: %w", err)
-	}
-	tmpName := tmp.Name()
-	zw := zip.NewWriter(tmp)
-	// A successful rename moves the temp file away, so the unlink is a
-	// no-op on the happy path and the cleanup on every other one.
-	defer func() {
-		if err != nil {
-			_ = zw.Close()
-		}
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
-	}()
-
-	for _, m := range members {
-		if ctx != nil && ctx.Err() != nil {
-			return pages, skipped, ctx.Err()
-		}
-		// The file can have vanished between the member query and now (a
-		// concurrent delete); skip it rather than failing the generation.
-		f, openErr := os.Open(m.Path)
-		if openErr != nil {
-			skipped++
-			continue
-		}
-		// Entry extension from the stored file type, not the on-disk
-		// name, so extension-less files still produce recognized pages.
-		// Numbered off the written count, not the member index, so a
-		// skipped member leaves no gap in the page sequence.
-		entry, err := zw.CreateHeader(&zip.FileHeader{
-			Name:   fmt.Sprintf("%04d.%s", pages+1, m.FileType),
-			Method: zip.Store,
-		})
-		if err != nil {
+	err = writeAtomic(dstPath, ".cbz-generate-*", func(tmp *os.File) error {
+		zw := zip.NewWriter(tmp)
+		for _, m := range members {
+			if ctx != nil && ctx.Err() != nil {
+				return ctx.Err()
+			}
+			// The file can have vanished between the member query and now (a
+			// concurrent delete); skip it rather than failing the generation.
+			f, openErr := os.Open(m.Path)
+			if openErr != nil {
+				skipped++
+				continue
+			}
+			// Entry extension from the stored file type, not the on-disk
+			// name, so extension-less files still produce recognized pages.
+			// Numbered off the written count, not the member index, so a
+			// skipped member leaves no gap in the page sequence.
+			entry, err := zw.CreateHeader(&zip.FileHeader{
+				Name:   fmt.Sprintf("%04d.%s", pages+1, m.FileType),
+				Method: zip.Store,
+			})
+			if err != nil {
+				_ = f.Close()
+				return err
+			}
+			_, copyErr := io.Copy(entry, f)
 			_ = f.Close()
-			return pages, skipped, err
+			if copyErr != nil {
+				return fmt.Errorf("write page %d: %w", pages+1, copyErr)
+			}
+			pages++
+			if progress != nil {
+				progress(pages, total, "generating…")
+			}
 		}
-		_, copyErr := io.Copy(entry, f)
-		_ = f.Close()
-		if copyErr != nil {
-			return pages, skipped, fmt.Errorf("write page %d: %w", pages+1, copyErr)
+		if pages == 0 {
+			return errors.New("every member's file is missing from disk")
 		}
-		pages++
-		if progress != nil {
-			progress(pages, total, "generating…")
-		}
-	}
-	if pages == 0 {
-		return 0, skipped, errors.New("every member's file is missing from disk")
-	}
 
-	// ComicInfo.xml is deflated since it is text; readers locate it by
-	// name, so its position in the archive is irrelevant.
-	ci, err := metadata.MarshalComicInfo(title, pages)
+		// ComicInfo.xml is deflated since it is text; readers locate it by
+		// name, so its position in the archive is irrelevant.
+		ci, err := metadata.MarshalComicInfo(title, pages)
+		if err != nil {
+			return fmt.Errorf("comic info: %w", err)
+		}
+		ciEntry, err := zw.CreateHeader(&zip.FileHeader{Name: "ComicInfo.xml", Method: zip.Deflate})
+		if err != nil {
+			return err
+		}
+		if _, err := ciEntry.Write(ci); err != nil {
+			return fmt.Errorf("write comic info: %w", err)
+		}
+		if err := zw.Close(); err != nil {
+			return fmt.Errorf("close zip: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
-		return 0, skipped, fmt.Errorf("comic info: %w", err)
-	}
-	ciEntry, err := zw.CreateHeader(&zip.FileHeader{Name: "ComicInfo.xml", Method: zip.Deflate})
-	if err != nil {
-		return 0, skipped, err
-	}
-	if _, err := ciEntry.Write(ci); err != nil {
-		return 0, skipped, fmt.Errorf("write comic info: %w", err)
-	}
-
-	if err := zw.Close(); err != nil {
-		return 0, skipped, fmt.Errorf("close zip: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return 0, skipped, err
-	}
-	if err := os.Rename(tmpName, dstPath); err != nil {
-		return 0, skipped, fmt.Errorf("install cbz: %w", err)
+		return pages, skipped, err
 	}
 	// CreateTemp leaves 0600; align with the 0644 of files that land in
 	// the gallery through other paths so host-side tooling sees the same

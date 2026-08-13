@@ -1,0 +1,44 @@
+{{define "partials/category_row.html"}}
+<tr id="cat-row-{{.ID}}">
+  <td><span style="color:{{catColor .Color}}">{{.Name}}</span>{{if .IsBuiltin}} <span class="field-hint">(built-in)</span>{{end}}</td>
+  <td>
+    <span class="cat-color-pair">
+      {{/* Both inputs answer with this row, so a commit from either one
+           writes back the other and the reset offer in the same swap. */}}
+      <input type="color" id="cat-swatch-{{.ID}}" name="color" value="{{.Color}}"
+             class="cat-swatch" aria-label="Color for {{.Name}}"
+             hx-patch="/settings/categories/{{.ID}}" hx-trigger="change"
+             hx-target="#cat-row-{{.ID}}" hx-swap="outerHTML">
+      <input type="text" id="cat-hex-{{.ID}}" name="color" value="{{.Color}}"
+             class="cat-hex mono-small" style="color:{{catColor .Color}}"
+             list="cat-palette" pattern="#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})" maxlength="7" required
+             spellcheck="false" autocomplete="off" aria-label="Hex color for {{.Name}}"
+             hx-patch="/settings/categories/{{.ID}}" hx-trigger="change" hx-validate="true"
+             hx-target="#cat-row-{{.ID}}" hx-swap="outerHTML">
+    </span>
+  </td>
+  <td>
+    <div class="cat-actions">
+      {{$default := catDefault .Name}}
+      {{if and $default (ne .Color $default)}}
+      <button type="button" class="btn-sm btn-cat-reset"
+              hx-patch="/settings/categories/{{.ID}}"
+              hx-vals='{"color":"{{$default}}"}'
+              hx-target="#cat-row-{{.ID}}" hx-swap="outerHTML">Reset</button>
+      {{else}}
+      <button class="btn-sm cat-action-spacer" tabindex="-1" aria-hidden="true">Reset</button>
+      {{end}}
+      {{if not .IsBuiltin}}
+      <button class="btn-sm btn-cat-rename-trigger"
+              data-id="{{.ID}}" data-name="{{.Name}}">Rename</button>
+      {{else}}
+      <button class="btn-sm cat-action-spacer" tabindex="-1" aria-hidden="true">Rename</button>
+      {{end}}
+      {{if not .IsBuiltin}}
+      <button class="btn-sm btn-danger btn-delete-category"
+              data-id="{{.ID}}" data-name="{{.Name}}">Delete</button>
+      {{end}}
+    </div>
+  </td>
+</tr>
+{{end}}

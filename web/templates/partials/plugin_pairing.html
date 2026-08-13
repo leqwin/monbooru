@@ -15,7 +15,7 @@
         <td>{{.Source}}</td>
         <td>{{range $i, $s := .Scopes}}{{if $i}} {{end}}{{$s}}{{end}}</td>
         <td>
-          {{range $i, $b := .Buttons}}{{if $i}} · {{end}}<span class="plugin-button-decl">{{$b.Slot}} "{{$b.Label}}" ({{$b.Mode}}{{with $b.Media}}, {{.}}{{end}})</span>{{end}}
+          {{template "partials/plugin_button_decl.html" .Buttons}}
           {{if not .Buttons}}<span class="status-dim">none</span>{{end}}
         </td>
         <td>

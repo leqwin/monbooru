@@ -1,5 +1,24 @@
 # Changelog
 
+## [v1.18.1] - 2026-08-13
+### Added
+- Add a reset button for category colors. ([#113](https://github.com/monbooru/monbooru/issues/113))
+- The CPU Docker image is published for arm64 alongside amd64. ([#96](https://github.com/monbooru/monbooru/issues/96))
+
+### Changed
+- Category colors are set in the row by typing hex. ([#109](https://github.com/monbooru/monbooru/issues/109))
+- The detail page opens faster from deep pages of a large result set.
+
+### Fixed
+- The footer's help link points at the current documentation site for non docker builds. ([#112](https://github.com/monbooru/monbooru/issues/112))
+
+Thanks to @gary-host-laptop for the suggestion (https://github.com/monbooru/monbooru/issues/113).
+Thanks to @283375 for the suggestion (https://github.com/monbooru/monbooru/issues/96).
+Thanks to @CeareDelafont for the suggestion (https://github.com/monbooru/monbooru/issues/109).
+Thanks to @PROP65 for the fix (https://github.com/monbooru/monbooru/issues/112).
+
+Co-authored-by: PROP65 <132837123+PROP65@users.noreply.github.com>
+
 ## [v1.18.0] - 2026-08-10
 ### Added
 - Plugin support with buttons on the image and batch surfaces. Drop a plugin folder in config/plugins/ and monbooru launches and supervises it.   ([#78](https://github.com/monbooru/monbooru/issues/78))

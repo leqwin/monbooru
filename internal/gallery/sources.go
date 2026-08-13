@@ -10,6 +10,24 @@ import (
 	"github.com/monbooru/monbooru/internal/models"
 )
 
+// Caps on the operator-editable provenance fields. The detail-page editor
+// and the API both write these columns, so both refuse at the same length.
+const (
+	MaxSourceLabelLen    = 200
+	MaxSourceURLLen      = 2048
+	MaxCommentaryLen     = 10000
+	MaxOriginalLen       = 2048
+	MaxAnnotationBodyLen = 2000
+)
+
+// ValidExternalURL reports whether s carries a scheme monbooru will render
+// as a link: both html/template's sanitiser and the explicit allowlist
+// refuse anything but http(s), so an accepted value would render inert.
+func ValidExternalURL(s string) bool {
+	lower := strings.ToLower(s)
+	return strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")
+}
+
 // updateSourceField writes one column on an existing origin row, keyed by
 // site+post_id, never creating one. Callers guard the no-op case (empty
 // string / zero score) first; col is a trusted constant, never caller input.

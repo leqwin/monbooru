@@ -91,6 +91,12 @@ type Querier interface {
 	Query(query string, args ...any) (*sql.Rows, error)
 }
 
+// Execer is Querier's write surface: a helper takes one so the caller
+// decides whether the writes land on the pool or inside its transaction.
+type Execer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
 // CtxQuerier is Querier's context-carrying twin.
 type CtxQuerier interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)

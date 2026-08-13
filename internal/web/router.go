@@ -722,7 +722,7 @@ var RepoURL = "https://github.com/monbooru/monbooru"
 
 // DocURL is the online documentation URL, set at build time via -ldflags from
 // DOC.md.
-var DocURL = "https://leqwin.github.io/mondocs/index.html"
+var DocURL = "https://monbooru.github.io/mondocs/index.html"
 
 // Variant identifies the build flavour (e.g. "cuda") and is injected at
 // build time via -ldflags from the CUDA Dockerfile. Empty for the default
@@ -833,48 +833,6 @@ type baseData struct {
 	// MonloaderPTRSyncing caveats the lookup backend dialog while the PTR
 	// index is still building: it answers on partial data by design.
 	MonloaderPTRSyncing bool
-}
-
-// AsMap renders baseData as a string→any map for handlers that pass
-// the layout fields into renderTemplate without a typed page struct.
-// Drift between sites (one carrying CustomCSS, another not) closes
-// because every map starts with the same canonical set.
-func (b baseData) AsMap() map[string]any {
-	return map[string]any{
-		"Title":               b.Title,
-		"ActiveNav":           b.ActiveNav,
-		"CSRFToken":           b.CSRFToken,
-		"AuthEnabled":         b.AuthEnabled,
-		"Degraded":            b.Degraded,
-		"Version":             b.Version,
-		"RepoURL":             b.RepoURL,
-		"DocURL":              b.DocURL,
-		"Variant":             b.Variant,
-		"CustomCSS":           b.CustomCSS,
-		"Theme":               b.Theme,
-		"BooruName":           b.BooruName,
-		"BooruLogo":           b.BooruLogo,
-		"BooruFavicon":        b.BooruFavicon,
-		"MonloaderURL":        b.MonloaderURL,
-		"MonloaderPaired":     b.MonloaderPaired,
-		"MonloaderUsable":     b.MonloaderUsable,
-		"MonloaderConn":       b.MonloaderConn,
-		"MonloaderVersion":    b.MonloaderVersion,
-		"MonloaderPTR":        b.MonloaderPTR,
-		"MonloaderPTRSyncing": b.MonloaderPTRSyncing,
-		"MonloaderContrib":    b.MonloaderContrib,
-		"ActiveGallery":       b.ActiveGallery,
-		"Galleries":           b.Galleries,
-		"VisibleCount":        b.VisibleCount,
-		"InboxCount":          b.InboxCount,
-		"InboxNavActive":      b.InboxNavActive,
-		"TagCount":            b.TagCount,
-		"CollectionsCount":    b.CollectionsCount,
-		"HiddenByCeiling":     b.HiddenByCeiling,
-		"RatingLevels":        b.RatingLevels,
-		"ActiveRating":        b.ActiveRating,
-		"RequestStart":        b.RequestStart,
-	}
 }
 
 func (s *Server) base(r *http.Request, nav, title string) baseData {
@@ -1308,12 +1266,7 @@ func (s *Server) resolveMangaImage(idStr string) (string, bool) {
 	}
 	// Refuse a canonical_path that drifted outside the gallery root before
 	// the archive extractor opens it, mirroring serveImageFile.
-	absPath, err := filepath.Abs(canonPath)
-	if err != nil {
-		return "", false
-	}
-	galleryAbs, err := filepath.Abs(cx.GalleryPath)
-	if err != nil || !gallery.PathInside(galleryAbs, absPath) {
+	if !gallery.ResolvedInside(cx.GalleryPath, canonPath) {
 		return "", false
 	}
 	return canonPath, true
@@ -1404,13 +1357,7 @@ func (s *Server) serveImageBytes(w http.ResponseWriter, r *http.Request, scaled 
 	// arbitrary files. Use filepath.Rel so a sibling directory that shares a
 	// literal prefix with the gallery root (e.g. `/data/gallery_backup` vs
 	// `/data/gallery`) is correctly rejected.
-	absPath, err := filepath.Abs(canonPath)
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	galleryAbs, err := filepath.Abs(cx.GalleryPath)
-	if err != nil || !gallery.PathInside(galleryAbs, absPath) {
+	if !gallery.ResolvedInside(cx.GalleryPath, canonPath) {
 		http.NotFound(w, r)
 		return
 	}

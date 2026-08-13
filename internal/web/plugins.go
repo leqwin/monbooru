@@ -77,10 +77,8 @@ func (s *Server) pluginAddress(p config.PluginConfig) string {
 	if u := strings.TrimSpace(p.APIURL); u != "" {
 		return strings.TrimRight(u, "/")
 	}
-	for _, t := range s.cfg.Auth.Tokens {
-		if t.Paired == p.Name {
-			return strings.TrimRight(t.PeerURL, "/")
-		}
+	if t := s.cfg.FindPairedToken(p.Name); t != nil {
+		return strings.TrimRight(t.PeerURL, "/")
 	}
 	return ""
 }
@@ -141,13 +139,14 @@ func (s *Server) setPluginProbe(name string, pr pluginProbe) {
 
 // probePeer reports whether base answers a health probe, and the version it
 // names when it reports one. Any other body is ignored, so answering 200 with
-// nothing is enough to pass.
-func probePeer(ctx context.Context, base string) (string, bool) {
+// nothing is enough to pass. The client is the caller's: monloader and the
+// plugins keep separate pools.
+func probePeer(ctx context.Context, client *http.Client, base string) (string, bool) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(base, "/")+"/health", nil)
 	if err != nil {
 		return "", false
 	}
-	resp, err := pluginClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", false
 	}
@@ -210,7 +209,7 @@ func (s *Server) refreshPluginProbes(ctx context.Context) {
 		wg.Add(1)
 		go func(name, base string) {
 			defer wg.Done()
-			version, ok := probePeer(ctx, base)
+			version, ok := probePeer(ctx, pluginClient, base)
 			pr := pluginProbe{conn: "down", checkedAt: time.Now()}
 			if ok {
 				// A peer that stops reporting its version keeps the one it

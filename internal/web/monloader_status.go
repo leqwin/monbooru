@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -22,26 +22,41 @@ import (
 // still commit.
 var monloaderClient = &http.Client{Timeout: 15 * time.Second}
 
-// monloaderPost sends one JSON body to a monloader API path and returns
+// errMonloaderUnconfigured is what every outbound call answers before any
+// I/O when no link is set up.
+var errMonloaderUnconfigured = errors.New("monloader is not configured")
+
+// monloaderDo issues one authed request to a monloader API path and returns
 // the live response for the caller to map. The token read happens under
-// cfgMu; the Do call must not, so a slow monloader can't block a
-// settings write. An unconfigured link short-circuits before any I/O.
-func (s *Server) monloaderPost(ctx context.Context, path string, payload map[string]any) (*http.Response, error) {
+// cfgMu; the Do call must not, so a slow monloader can't block a settings
+// write. A nil body sends no payload and no content type.
+func (s *Server) monloaderDo(ctx context.Context, method, path string, body []byte) (*http.Response, error) {
 	base := strings.TrimRight(s.monloaderAPIBase(), "/")
 	s.cfgMu.RLock()
 	token := s.cfg.Monloader.APIToken
 	s.cfgMu.RUnlock()
 	if base == "" || token == "" {
-		return nil, fmt.Errorf("monloader is not configured")
+		return nil, errMonloaderUnconfigured
 	}
-	body, _ := json.Marshal(payload)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+path, bytes.NewReader(body))
+	var payload io.Reader
+	if body != nil {
+		payload = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, base+path, payload)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	return monloaderClient.Do(req)
+}
+
+// monloaderPost sends one JSON body to a monloader API path.
+func (s *Server) monloaderPost(ctx context.Context, path string, payload map[string]any) (*http.Response, error) {
+	body, _ := json.Marshal(payload)
+	return s.monloaderDo(ctx, http.MethodPost, path, body)
 }
 
 // enqueueMonloader posts one enqueue payload and maps the reply: any
@@ -192,21 +207,10 @@ type ptrTagInfo struct {
 // ptrTagLookup asks monloader's PTR index for the alias / implication graph
 // of the given monbooru-form tag names (at most ptrLookupBatch per call).
 func (s *Server) ptrTagLookup(ctx context.Context, names []string) (map[string]ptrTagInfo, error) {
-	resp, err := s.monloaderPost(ctx, "/api/v1/ptr/tags", map[string]any{"tags": names})
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == http.StatusConflict {
-		return nil, errPTRUnavailable
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("monloader returned %s", resp.Status)
-	}
-	var out struct {
+	out, err := monloaderPostJSON[struct {
 		Results map[string]ptrTagInfo `json:"results"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	}](s, ctx, "/api/v1/ptr/tags", map[string]any{"tags": names})
+	if err != nil {
 		return nil, err
 	}
 	return out.Results, nil
@@ -226,10 +230,8 @@ func (s *Server) monloaderAPIBase() string {
 	if u := strings.TrimSpace(s.cfg.Monloader.APIURL); u != "" {
 		return u
 	}
-	for _, t := range s.cfg.Auth.Tokens {
-		if t.Paired == "monloader" {
-			return t.PeerURL
-		}
+	if t := s.cfg.FindPairedToken(monloaderApp); t != nil {
+		return t.PeerURL
 	}
 	return ""
 }
@@ -243,7 +245,7 @@ func (s *Server) monloaderUsable() bool {
 	if s.monloaderPaused() {
 		return false
 	}
-	return s.pairedWith("monloader") && conn != "down" && conn != "rejected"
+	return s.pairedWith(monloaderApp) && conn != "down" && conn != "rejected"
 }
 
 // monloaderPaused reports whether the operator has suspended the monloader
@@ -264,22 +266,10 @@ func (s *Server) checkMonloader(ctx context.Context) (status, version string, pt
 	if base == "" {
 		return "", "", false, false, false, 0, false
 	}
-	hreq, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/health", nil)
-	if err != nil {
+	version, up := probePeer(ctx, monloaderClient, base)
+	if !up {
 		return "down", "", false, false, false, 0, false
 	}
-	hresp, err := monloaderClient.Do(hreq)
-	if err != nil {
-		return "down", "", false, false, false, 0, false
-	}
-	defer func() { _ = hresp.Body.Close() }()
-	if hresp.StatusCode != http.StatusOK {
-		return "down", "", false, false, false, 0, false
-	}
-	var h struct {
-		Version string `json:"version"`
-	}
-	_ = json.NewDecoder(hresp.Body).Decode(&h)
 	s.cfgMu.RLock()
 	tok := s.cfg.Monloader.APIToken
 	s.cfgMu.RUnlock()
@@ -289,7 +279,7 @@ func (s *Server) checkMonloader(ctx context.Context) (status, version string, pt
 		if qresp, qerr := monloaderClient.Do(qreq); qerr == nil {
 			defer func() { _ = qresp.Body.Close() }()
 			if qresp.StatusCode == http.StatusUnauthorized || qresp.StatusCode == http.StatusForbidden {
-				return "rejected", h.Version, false, false, false, 0, false
+				return "rejected", version, false, false, false, 0, false
 			}
 		}
 		preq, _ := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/v1/ptr/status", nil)
@@ -331,27 +321,18 @@ func (s *Server) checkMonloader(ctx context.Context) (status, version string, pt
 			}
 		}
 	}
-	return "ok", h.Version, ptrReady, ptrSyncing, ptrContrib, contribFailed, contribBanned
+	return "ok", version, ptrReady, ptrSyncing, ptrContrib, contribFailed, contribBanned
 }
 
 // monloaderReachable reports whether monloader answers a health probe at base.
 // Approving a pairing monbooru can't reach would leave a dead pairing (no light,
 // no refetch), so the operator is blocked until the api url responds.
 func (s *Server) monloaderReachable(ctx context.Context, base string) bool {
-	base = strings.TrimRight(base, "/")
-	if base == "" {
+	if strings.TrimRight(base, "/") == "" {
 		return false
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/health", nil)
-	if err != nil {
-		return false
-	}
-	resp, err := monloaderClient.Do(req)
-	if err != nil {
-		return false
-	}
-	defer func() { _ = resp.Body.Close() }()
-	return resp.StatusCode == http.StatusOK
+	_, up := probePeer(ctx, monloaderClient, base)
+	return up
 }
 
 // monloaderStatusTTL bounds how often the footer light re-probes monloader, so
@@ -410,7 +391,7 @@ func (s *Server) monloaderStatusCached(ctx context.Context) (status, version str
 }
 
 func (s *Server) monloaderStatusHandler(w http.ResponseWriter, r *http.Request) {
-	if !s.pairedWith("monloader") {
+	if !s.pairedWith(monloaderApp) {
 		// Stop polling and clear the light once the pairing is gone.
 		_, _ = w.Write([]byte(`<span id="monloader-light"></span>`))
 		return

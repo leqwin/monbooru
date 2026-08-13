@@ -108,8 +108,7 @@ func (s *Server) pluginRelay(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.markPluginDown(name)
 		logx.Warnf("plugin relay %s: %v", name, err)
-		setFlashHeader(w, "plugin "+name+" did not answer", "err", nil)
-		w.WriteHeader(http.StatusNoContent)
+		relayRefused(w, "plugin "+name+" did not answer")
 		return
 	}
 	message := truncateRunes(answer.Message, pluginMessageMax)
@@ -117,8 +116,7 @@ func (s *Server) pluginRelay(w http.ResponseWriter, r *http.Request) {
 		if message == "" {
 			message = "plugin " + name + " refused the request"
 		}
-		setFlashHeader(w, message+narrowed, "err", nil)
-		w.WriteHeader(http.StatusNoContent)
+		relayRefused(w, message+narrowed)
 		return
 	}
 	setFlashHeader(w, message+narrowed, "ok", nil)
@@ -203,8 +201,12 @@ func (s *Server) callPluginRelay(ctx context.Context, peer, target, token string
 
 // truncateRunes clips s to at most n runes, so a peer's message can't push
 // arbitrary length into the flash slot and a multi-byte character is never
-// cut in half.
+// cut in half. Byte length bounds rune count, so the first check skips the
+// conversion for a short string.
 func truncateRunes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
 	runes := []rune(s)
 	if len(runes) <= n {
 		return s

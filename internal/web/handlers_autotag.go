@@ -214,15 +214,7 @@ func (s *Server) uploadPost(w http.ResponseWriter, r *http.Request) {
 			// otherwise cost another 1 GB with no UI to reclaim it. Drop
 			// the file and the alias ingest just recorded; the API's
 			// multipart path does the same.
-			if _, delErr := s.db().Write.Exec(
-				`DELETE FROM image_paths WHERE image_id = ? AND path = ? AND is_canonical = 0`,
-				img.ID, dstPath,
-			); delErr != nil {
-				logx.Warnf("upload: drop duplicate alias for %q: %v", dstPath, delErr)
-			}
-			if rmErr := os.Remove(dstPath); rmErr != nil && !os.IsNotExist(rmErr) {
-				logx.Warnf("upload: remove duplicate copy %q: %v", dstPath, rmErr)
-			}
+			gallery.DropDuplicateCopy(s.db(), img.ID, dstPath, "upload")
 			dupeIDs = append(dupeIDs, img.ID)
 			dupes++
 			continue

@@ -2,7 +2,6 @@ package gallery
 
 import (
 	"cmp"
-	"context"
 	"database/sql"
 	"fmt"
 	"image"
@@ -376,15 +375,7 @@ func ingestWithHash(database *db.DB, galleryPath, thumbnailsPath, path, hash, or
 		return nil, false, fmt.Errorf("committing ingest: %w", err)
 	}
 
-	if err := Generate(path, thumbnailsPath, imgID, fileType); err != nil {
-		logx.Warnf("thumbnail generation failed for %q: %v", path, err)
-	} else if err := RecomputeAndStorePhash(context.Background(), database, imgID, thumbnailsPath); err != nil {
-		// Phash failures on a successful thumbnail are rare (decode
-		// shouldn't fail on a JPEG we just wrote). Log and continue -
-		// images.phash stays NULL and the row is invisible to the
-		// relations system until a future recompute lands.
-		logx.Warnf("phash compute failed for %q: %v", path, err)
-	}
+	RegenerateDerived(database, thumbnailsPath, path, imgID, fileType, "ingest")
 
 	img := &models.Image{
 		ID:            imgID,
@@ -469,4 +460,21 @@ func insertMangaMeta(tx *sql.Tx, m *models.MangaMetadata) error {
 		toNullFloat(m.CommunityRating), toNullInt(m.XMLPageCount), m.RawXML,
 	)
 	return err
+}
+
+// DropDuplicateCopy removes the file and the alias row an ingest recorded for
+// bytes the gallery already holds under another path. A re-uploaded archive
+// would otherwise cost its own size again with no UI to reclaim it. logCtx
+// names the caller in the warnings; failures are logged, never fatal, since
+// the row the caller keeps is already correct.
+func DropDuplicateCopy(database *db.DB, imageID int64, path, logCtx string) {
+	if _, err := database.Write.Exec(
+		`DELETE FROM image_paths WHERE image_id = ? AND path = ? AND is_canonical = 0`,
+		imageID, path,
+	); err != nil {
+		logx.Warnf("%s: drop duplicate alias for %q: %v", logCtx, path, err)
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		logx.Warnf("%s: remove duplicate copy %q: %v", logCtx, path, err)
+	}
 }

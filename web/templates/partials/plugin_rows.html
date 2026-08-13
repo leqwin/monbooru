@@ -27,7 +27,7 @@
     {{end}}
     {{if .Buttons}}
     <div class="peer-line"><span class="peer-label">buttons</span>
-      {{range $i, $b := .Buttons}}{{if $i}} · {{end}}<span class="plugin-button-decl">{{$b.Slot}} "{{$b.Label}}" ({{$b.Mode}}{{with $b.Media}}, {{.}}{{end}})</span>{{end}}
+      {{template "partials/plugin_button_decl.html" .Buttons}}
     </div>
     {{end}}
     {{if .Command}}

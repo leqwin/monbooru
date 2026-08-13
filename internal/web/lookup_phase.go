@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/monbooru/monbooru/internal/api"
+	"github.com/monbooru/monbooru/internal/db"
 	"github.com/monbooru/monbooru/internal/gallery"
 	"github.com/monbooru/monbooru/internal/logx"
 	"github.com/monbooru/monbooru/internal/lookup"
@@ -128,19 +130,7 @@ func applyPTRResults(g api.Gallery, cx *galleryCtx, byHash map[string]int64, res
 // ptrIndexCursor reads monloader's applied-update position once per run, so
 // the due gate sees a fresh value even on a box nobody has a page open on.
 func (s *Server) ptrIndexCursor(ctx context.Context) (uint64, error) {
-	base := strings.TrimRight(s.monloaderAPIBase(), "/")
-	s.cfgMu.RLock()
-	token := s.cfg.Monloader.APIToken
-	s.cfgMu.RUnlock()
-	if base == "" || token == "" {
-		return 0, errors.New("monloader is not configured")
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/v1/ptr/status", nil)
-	if err != nil {
-		return 0, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := monloaderClient.Do(req)
+	resp, err := s.monloaderDo(ctx, http.MethodGet, "/api/v1/ptr/status", nil)
 	if err != nil {
 		return 0, err
 	}
@@ -164,27 +154,17 @@ func (s *Server) ptrIndexCursor(ctx context.Context) (uint64, error) {
 // whole set without an offset.
 func (s *Server) dueLookupCandidates(cx *galleryCtx, backend string, limit int) ([]lookupCandidate, error) {
 	due, args := lookup.DueClause(backend, time.Now())
-	rows, err := cx.DB.Read.Query(
-		`SELECT i.id, i.sha256, i.canonical_path
+	return db.QueryAll(cx.DB.Read, func(rows *sql.Rows) (lookupCandidate, error) {
+		var c lookupCandidate
+		err := rows.Scan(&c.id, &c.sha256, &c.canonicalPath)
+		return c, err
+	}, `SELECT i.id, i.sha256, i.canonical_path
 		 FROM images i
 		 LEFT JOIN image_lookups l ON l.image_id = i.id AND l.backend = ?
 		 WHERE `+lookup.CandidateClause(backend)+` AND `+due+`
 		 ORDER BY l.next_due_at IS NOT NULL, l.next_due_at, i.id
 		 LIMIT ?`,
 		append(append([]any{backend}, args...), limit)...)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	var out []lookupCandidate
-	for rows.Next() {
-		var c lookupCandidate
-		if err := rows.Scan(&c.id, &c.sha256, &c.canonicalPath); err != nil {
-			return nil, err
-		}
-		out = append(out, c)
-	}
-	return out, rows.Err()
 }
 
 // dueLookupCount is how many images a backend still owes, for the summaries.
@@ -272,11 +252,10 @@ func (s *Server) runOnlineLookupPhase(ctx context.Context, cx *galleryCtx) (onli
 
 // scheduledOnlineLookup is the scheduler's online phase.
 func (s *Server) scheduledOnlineLookup(cx *galleryCtx) error {
-	if err := s.jobs.StartScheduled(models.JobTypeLookup); err != nil {
-		logx.Warnf("scheduler online lookup %q: %v", cx.Name, err)
+	ctx, err := s.startScheduledPhase(models.JobTypeLookup, "online lookup", cx.Name)
+	if err != nil {
 		return err
 	}
-	ctx := s.jobs.Context()
 	res, err := s.runOnlineLookupPhase(ctx, cx)
 	if err != nil {
 		s.jobs.Fail(err.Error())
@@ -368,11 +347,10 @@ func (s *Server) lookupDuePost(w http.ResponseWriter, r *http.Request) {
 // scheduledPTRLookup is the scheduler's PTR phase: one job so the bar shows a
 // real count and Cancel works.
 func (s *Server) scheduledPTRLookup(cx *galleryCtx) error {
-	if err := s.jobs.StartScheduled(models.JobTypeLookup); err != nil {
-		logx.Warnf("scheduler ptr lookup %q: %v", cx.Name, err)
+	ctx, err := s.startScheduledPhase(models.JobTypeLookup, "ptr lookup", cx.Name)
+	if err != nil {
 		return err
 	}
-	ctx := s.jobs.Context()
 	checked, matched, err := s.runPTRLookupPhase(ctx, cx)
 	summary := fmt.Sprintf("[%s] PTR lookup: %d checked, %d matched, %d no match.",
 		cx.Name, checked, matched, checked-matched)

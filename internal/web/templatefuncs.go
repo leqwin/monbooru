@@ -56,6 +56,9 @@ func templateFuncs() template.FuncMap {
 			}
 			return template.CSS("var(--cat-" + strings.ToLower(strings.TrimPrefix(color, "#")) + "," + color + ")")
 		},
+		// catDefault is the colour the Categories page's Reset writes back,
+		// empty for a category the operator created.
+		"catDefault": tags.DefaultCategoryColor,
 		// urlQ percent-encodes a query value with uppercase hex pairs so
 		// the links the sidebar emits match the case the browser writes
 		// back into the address bar (browsers normalize to uppercase per
@@ -266,16 +269,7 @@ func templateFuncs() template.FuncMap {
 			}
 			return strings.TrimPrefix(u.Host, "www.")
 		},
-		"truncate": func(s string, n int) string {
-			if len(s) <= n {
-				return s
-			}
-			r := []rune(s)
-			if len(r) <= n {
-				return s
-			}
-			return string(r[:n])
-		},
+		"truncate": truncateRunes,
 		// hasFavFilter reports whether the search query contains a `fav:true`
 		// token, regardless of position or surrounding tags. Drives the gallery
 		// header's ♥ toggle's active class so the button doesn't go inactive

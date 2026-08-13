@@ -108,24 +108,11 @@ func nextAttempts(database *db.DB, imageID int64, backend, result string) (int, 
 // the callback implies one. A row nobody is waiting on is left alone, so a
 // plain source refetch cannot conclude a lookup that never ran.
 func RecordInFlight(database *db.DB, imageID int64, backend, result string, now time.Time) error {
-	rows, err := database.Read.Query(
+	backends, err := db.QueryStrings(database.Read,
 		`SELECT backend FROM image_lookups
 		 WHERE image_id = ? AND queued_at IS NOT NULL AND (? = '' OR backend = ?)`,
 		imageID, backend, backend)
 	if err != nil {
-		return err
-	}
-	var backends []string
-	for rows.Next() {
-		var b string
-		if err := rows.Scan(&b); err != nil {
-			_ = rows.Close()
-			return err
-		}
-		backends = append(backends, b)
-	}
-	_ = rows.Close()
-	if err := rows.Err(); err != nil {
 		return err
 	}
 	for _, b := range backends {
@@ -140,22 +127,12 @@ func RecordInFlight(database *db.DB, imageID int64, backend, result string, now 
 // sweep. The partial in-flight index keeps this proportional to the rows
 // actually waiting.
 func Waiting(database *db.DB, cutoff time.Time) ([]InFlight, error) {
-	rows, err := database.Read.Query(
-		`SELECT image_id, backend, COALESCE(job_id, 0) FROM image_lookups
-		 WHERE queued_at IS NOT NULL AND queued_at <= ?`, stamp(cutoff))
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	var out []InFlight
-	for rows.Next() {
+	return db.QueryAll(database.Read, func(rows *sql.Rows) (InFlight, error) {
 		var f InFlight
-		if err := rows.Scan(&f.ImageID, &f.Backend, &f.JobID); err != nil {
-			return nil, err
-		}
-		out = append(out, f)
-	}
-	return out, rows.Err()
+		err := rows.Scan(&f.ImageID, &f.Backend, &f.JobID)
+		return f, err
+	}, `SELECT image_id, backend, COALESCE(job_id, 0) FROM image_lookups
+		 WHERE queued_at IS NOT NULL AND queued_at <= ?`, stamp(cutoff))
 }
 
 // Reset puts an image back in the running on one backend: the ladder is
@@ -166,6 +143,16 @@ func Reset(database *db.DB, imageID int64, backend string, now time.Time) error 
 	_, err := database.Write.Exec(
 		`UPDATE image_lookups SET attempts = 0, next_due_at = ?, ptr_cursor = NULL
 		 WHERE image_id = ? AND backend = ?`, stamp(now), imageID, backend)
+	return err
+}
+
+// ResetMany is Reset across a set of images on every backend at once, for the
+// bulk opt-in. whereIDs is the caller's `image_id IN (...)` placeholder list
+// and args its binds.
+func ResetMany(e execer, whereIDs string, args []any, now time.Time) error {
+	_, err := e.Exec(
+		`UPDATE image_lookups SET attempts = 0, next_due_at = ?, ptr_cursor = NULL
+		 WHERE image_id IN (`+whereIDs+`)`, append([]any{stamp(now)}, args...)...)
 	return err
 }
 

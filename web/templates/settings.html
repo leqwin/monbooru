@@ -36,13 +36,13 @@
 </div>
 {{template "layout_mid" .}}
 
-{{$csrf := index . "CSRFToken"}}
-{{$cfg  := index . "Config"}}
-{{$galleries := index . "Galleries"}}
-{{$active := index . "ActiveGallery"}}
-{{$pluginPending := index . "PluginPending"}}
-{{$pluginPaired := index . "PluginPaired"}}
-{{$pluginRows := index . "PluginRows"}}
+{{$csrf := .CSRFToken}}
+{{$cfg  := .Config}}
+{{$galleries := .Galleries}}
+{{$active := .ActiveGallery}}
+{{$pluginPending := .PluginPending}}
+{{$pluginPaired := .PluginPaired}}
+{{$pluginRows := .PluginRows}}
 
 <div id="settings-page">
   <h2>Settings</h2>
@@ -477,16 +477,16 @@
     <div class="settings-sub">
       <div class="settings-sub-head">
         <h4>Installed</h4>
-        <p class="field-hint">Put a plugin folder in <code>{{index . "PluginsDir"}}</code>.</p>
+        <p class="field-hint">Put a plugin folder in <code>{{.PluginsDir}}</code>.</p>
       </div>
       {{template "partials/plugin_rows.html" (dict "Rows" $pluginRows "CSRFToken" $csrf)}}
     </div>
 
-    {{$themes := index . "Themes"}}
+    {{$themes := .Themes}}
     <div class="settings-sub">
       <div class="settings-sub-head">
         <h4>Themes</h4>
-        <p class="field-hint">Put a theme folder in <code>{{index . "ThemesDir"}}</code>.</p>
+        <p class="field-hint">Put a theme folder in <code>{{.ThemesDir}}</code>.</p>
       </div>
       {{template "partials/theme_cluster.html" (dict "Names" $themes.Names "Active" $themes.Active "CSRFToken" $csrf)}}
     </div>
@@ -498,8 +498,8 @@
       {{template "partials/tagger_mode_badge.html" (dict "Provider" $cfg.Tagger.ExecutionProvider)}}
     </div>
     <div id="flash-tagger"></div>
-    {{$taggers := index . "Taggers"}}
-    {{$rows := index . "TaggerRows"}}
+    {{$taggers := .Taggers}}
+    {{$rows := .TaggerRows}}
     <form hx-post="/settings/tagger" hx-target="#flash-tagger" hx-swap="innerHTML">
       <input type="hidden" name="_csrf" value="{{$csrf}}">
       <div class="settings-sub">
@@ -508,7 +508,7 @@
           <div class="field">
             <label>Execution provider</label>
             <div class="radio-grid">
-              {{range index . "ExecutionProviders"}}
+              {{range .ExecutionProviders}}
               <label><input type="radio" name="execution_provider" value="{{.Name}}"{{if eq $cfg.Tagger.ExecutionProvider .Name}} checked{{end}}> {{.Label}}</label>
               {{end}}
             </div>
@@ -730,7 +730,7 @@
   </section>
 
   {{$sched := $cfg.Schedule}}
-  {{$schedSt := index . "ScheduleStatus"}}
+  {{$schedSt := .ScheduleStatus}}
   <section id="schedule" class="settings-section">
     <h3>Schedule</h3>
     <div id="flash-schedule"></div>
@@ -777,7 +777,7 @@
     </form>
   </section>
 
-  {{$stats := index . "Stats"}}
+  {{$stats := .Stats}}
   <section id="stats" class="settings-section">
     <h3>Stats</h3>
     <div class="stats-cols">

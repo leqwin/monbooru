@@ -775,16 +775,9 @@ function confirmBatchStrip() {
       params.push('source=' + encodeURIComponent(src));
     }
   }
-  if (scope === 'search') {
-    params = params.concat(searchScopeParts());
-  } else {
-    var ids = selectionScopeIds();
-    if (!ids) {
-      if (flash) flash.innerHTML = '<div class="flash flash-err">No images selected.</div>';
-      return;
-    }
-    params = params.concat(ids);
-  }
+  var scoped = batchScopeParams(scope, flash);
+  if (!scoped) return;
+  params = params.concat(scoped);
   runBatchOp({endpoint: url, scope: scope, params: params,
               dialogId: 'batch-strip-dialog', flashId: 'batch-strip-flash', failMsg: 'Remove failed.'});
 }
@@ -828,17 +821,9 @@ function confirmBatchTag() {
     if (flash) flash.innerHTML = '<div class="flash flash-err">No tags provided.</div>';
     return;
   }
-  var params = ['op=add', 'tags=' + encodeURIComponent(tags)];
-  if (scope === 'search') {
-    params = params.concat(searchScopeParts());
-  } else {
-    var ids = selectionScopeIds();
-    if (!ids) {
-      if (flash) flash.innerHTML = '<div class="flash flash-err">No images selected.</div>';
-      return;
-    }
-    params = params.concat(ids);
-  }
+  var scoped = batchScopeParams(scope, flash);
+  if (!scoped) return;
+  var params = ['op=add', 'tags=' + encodeURIComponent(tags)].concat(scoped);
   runBatchOp({endpoint: '/internal/batch-tag', scope: scope, params: params,
               dialogId: 'batch-tag-dialog', flashId: 'batch-tag-flash', failMsg: 'Tag operation failed.'});
 }

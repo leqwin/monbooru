@@ -469,28 +469,18 @@ func ReorderCollection(database *db.DB, name string, ids []int64) error {
 // rather than just the reorder window, and applies the result through
 // ReorderCollection.
 func SortCollectionByFilename(database *db.DB, name string) error {
-	rows, err := database.Read.Query(
-		`SELECT c.image_id, basename(i.canonical_path)
-		 FROM image_collections c JOIN images i ON i.id = c.image_id
-		 WHERE c.name = ? AND i.is_missing = 0`, name)
-	if err != nil {
-		return err
-	}
 	type member struct {
 		id       int64
 		filename string
 	}
-	var members []member
-	for rows.Next() {
+	members, err := db.QueryAll(database.Read, func(rows *sql.Rows) (member, error) {
 		var m member
-		if err := rows.Scan(&m.id, &m.filename); err != nil {
-			_ = rows.Close()
-			return err
-		}
-		members = append(members, m)
-	}
-	_ = rows.Close()
-	if err := rows.Err(); err != nil {
+		err := rows.Scan(&m.id, &m.filename)
+		return m, err
+	}, `SELECT c.image_id, basename(i.canonical_path)
+		 FROM image_collections c JOIN images i ON i.id = c.image_id
+		 WHERE c.name = ? AND i.is_missing = 0`, name)
+	if err != nil {
 		return err
 	}
 	sort.SliceStable(members, func(i, j int) bool {

@@ -44,15 +44,10 @@ func applyCreateProvenance(g Gallery, imageID int64, source, postID, url, md5, p
 			return err
 		}
 	}
-	if source != "" && commentary != "" {
-		if err := gallery.SetSourceCommentary(g.DB, imageID, source, postID, commentary); err != nil {
-			return err
-		}
-	}
-	if source != "" && original != "" {
-		if err := gallery.SetSourceOriginal(g.DB, imageID, source, postID, original); err != nil {
-			return err
-		}
+	// Annotations stay with the caller: a failed note write warns rather than
+	// failing a create whose row already landed.
+	if _, err := applySourceProvenance(g, imageID, source, postID, commentary, original, nil); err != nil {
+		return err
 	}
 	if collection != "" {
 		return gallery.SetHomeCollection(g.DB, imageID, collection, order)
@@ -1261,15 +1256,7 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 		aliasAdded := true
 		if in.uploadedToDisk {
 			aliasAdded = false
-			if _, delErr := g.DB.Write.Exec(
-				`DELETE FROM image_paths WHERE image_id = ? AND path = ? AND is_canonical = 0`,
-				img.ID, in.imgPath,
-			); delErr != nil {
-				logx.Warnf("api createImage drop duplicate alias: %v", delErr)
-			}
-			if rmErr := os.Remove(in.imgPath); rmErr != nil && !os.IsNotExist(rmErr) {
-				logx.Warnf("api createImage remove duplicate upload %q: %v", in.imgPath, rmErr)
-			}
+			gallery.DropDuplicateCopy(g.DB, img.ID, in.imgPath, "api createImage")
 		}
 		sum, tagWarnings, mergeErr := mergeSource(g, img.ID, in.source, in.postID, in.url, in.md5, in.parentURL, in.initialTags)
 		if mergeErr != nil {
@@ -1647,12 +1634,7 @@ func (h *Handler) listImageTags(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusNotFound, "not_found", "image not found")
 		return
 	}
-	resp, err := h.buildImageResponse(g, id)
-	if err != nil {
-		apiError(w, http.StatusNotFound, "not_found", "image not found")
-		return
-	}
-	writeJSON(w, http.StatusOK, resp.Tags)
+	writeJSON(w, http.StatusOK, loadImageTagsJSON(g, id))
 }
 
 // addImageTags handles POST /api/v1/images/:id/tags. Each entry can
@@ -1699,19 +1681,30 @@ func (h *Handler) addImageTags(w http.ResponseWriter, r *http.Request) {
 // remove handlers: the image's tag list, wrapped with warnings when any
 // token failed to resolve.
 func (h *Handler) writeImageTagsResponse(w http.ResponseWriter, g Gallery, id int64, tagWarnings []string) {
-	resp, err := h.buildImageResponse(g, id)
-	if err != nil {
-		apiError(w, http.StatusNotFound, "not_found", "image not found")
-		return
-	}
+	tags := loadImageTagsJSON(g, id)
 	if len(tagWarnings) > 0 {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"tags":         resp.Tags,
+			"tags":         tags,
 			"tag_warnings": tagWarnings,
 		})
 		return
 	}
-	writeJSON(w, http.StatusOK, resp.Tags)
+	writeJSON(w, http.StatusOK, tags)
+}
+
+// loadImageTagsJSON reads just the tag list the tag endpoints answer with.
+// The full image response carries the same join, but its provenance,
+// collection and lookup reads are freight no tag response serves.
+func loadImageTagsJSON(g Gallery, imageID int64) []imageTagJSON {
+	byID, err := loadTagsForImages(g, []int64{imageID})
+	if err != nil {
+		logx.Warnf("image tags: %v", err)
+		return []imageTagJSON{}
+	}
+	if tags := byID[imageID]; tags != nil {
+		return tags
+	}
+	return []imageTagJSON{}
 }
 
 // imageExists short-circuits the tag-mutation handlers so a request
@@ -1777,11 +1770,18 @@ func resolveCategoryTag(g Gallery, input string) (int64, string, error) {
 	catName := "general"
 	tagName := input
 	if idx := strings.Index(input, ":"); idx > 0 {
-		if catID, ok := categoryIDByName(g, input[:idx]); ok {
+		catID, ok, err := categoryIDByName(g, input[:idx])
+		if err != nil {
+			return 0, "", err
+		}
+		if ok {
 			return catID, input[idx+1:], nil
 		}
 	}
-	catID, ok := categoryIDByName(g, catName)
+	catID, ok, err := categoryIDByName(g, catName)
+	if err != nil {
+		return 0, "", err
+	}
 	if !ok {
 		return 0, "", fmt.Errorf("unknown category %q", catName)
 	}
@@ -1852,7 +1852,11 @@ func (h *Handler) resolveImageTagID(g Gallery, imageID int64, tagName string) (i
 	tagName = strings.TrimSpace(tagName)
 	if idx := strings.Index(tagName, ":"); idx > 0 {
 		catName := tagName[:idx]
-		if _, ok := categoryIDByName(g, catName); ok {
+		_, ok, err := categoryIDByName(g, catName)
+		if err != nil {
+			return 0, err
+		}
+		if ok {
 			bareName := tagName[idx+1:]
 			var tagID int64
 			if err := g.DB.Read.QueryRow(

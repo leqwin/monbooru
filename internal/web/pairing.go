@@ -181,12 +181,7 @@ func writePairJSON(w http.ResponseWriter, status int, v any) {
 func (s *Server) pairedWith(app string) bool {
 	s.cfgMu.RLock()
 	defer s.cfgMu.RUnlock()
-	for _, t := range s.cfg.Auth.Tokens {
-		if t.Paired == app {
-			return true
-		}
-	}
-	return false
+	return s.cfg.FindPairedToken(app) != nil
 }
 
 // pairRequest receives a pairing offer from a peer. It issues nothing; an

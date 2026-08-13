@@ -56,6 +56,25 @@ func providerDisplayLabel(name string) string {
 	}
 }
 
+// settingsData is the /settings page. Galleries shadows the layout's list
+// with the richer per-gallery rows this page's table renders.
+type settingsData struct {
+	baseData
+	Galleries          []galleryRow
+	Config             *config.Config
+	Taggers            []tagger.TaggerStatus
+	TaggerRows         []taggerRow
+	ScheduleStatus     ScheduleStatus
+	Stats              statsData
+	ExecutionProviders []executionProviderRow
+	PluginPending      []pairReq
+	PluginPaired       int
+	PluginRows         []pluginRowView
+	PluginsDir         string
+	Themes             themeCluster
+	ThemesDir          string
+}
+
 func (s *Server) settingsHandler(w http.ResponseWriter, r *http.Request) {
 	base := s.base(r, "settings", "Settings - "+s.booruName())
 	s.disableUnavailableTaggers()
@@ -110,21 +129,22 @@ func (s *Server) settingsHandler(w http.ResponseWriter, r *http.Request) {
 		unsupportedRows = append(unsupportedRows, s.installedTaggerRow(t, totalGalleries, modelPath))
 	}
 	taggerRows := append(supportedRows, unsupportedRows...)
-	data := base.AsMap()
-	data["Galleries"] = s.galleryRowsWithSnapshot(s.activeName, base.VisibleCount, base.TagCount)
-	data["Config"] = s.cfgSnapshot()
-	data["Taggers"] = taggers
-	data["TaggerRows"] = taggerRows
-	data["ScheduleStatus"] = s.ScheduleStatus()
-	data["Stats"] = s.gatherStats()
-	data["ExecutionProviders"] = executionProviderRows()
-	data["PluginPending"] = s.pairs.listPending()
-	data["PluginPaired"] = s.pairedPeerCount()
-	data["PluginRows"] = s.pluginRows()
-	data["PluginsDir"] = s.pluginsDir()
-	data["Themes"] = s.themeCluster()
-	data["ThemesDir"] = s.themesDir()
-	s.renderTemplate(w, "settings.html", data)
+	s.renderTemplate(w, "settings.html", settingsData{
+		baseData:           base,
+		Galleries:          s.galleryRowsWithSnapshot(s.activeName, base.VisibleCount, base.TagCount),
+		Config:             s.cfgSnapshot(),
+		Taggers:            taggers,
+		TaggerRows:         taggerRows,
+		ScheduleStatus:     s.ScheduleStatus(),
+		Stats:              s.gatherStats(),
+		ExecutionProviders: executionProviderRows(),
+		PluginPending:      s.pairs.listPending(),
+		PluginPaired:       s.pairedPeerCount(),
+		PluginRows:         s.pluginRows(),
+		PluginsDir:         s.pluginsDir(),
+		Themes:             s.themeCluster(),
+		ThemesDir:          s.themesDir(),
+	})
 }
 
 func (s *Server) settingsSchedulePost(w http.ResponseWriter, r *http.Request) {

@@ -382,7 +382,7 @@ func reconcileExistingSHA(database *db.DB, galleryPath string, fi syncFileInfo, 
 	// New path for an existing SHA: a move if the canonical file is gone,
 	// otherwise another copy / alias.
 	if _, canonErr := os.Stat(row.canonicalPath); canonErr != nil {
-		moveCanonical(database, galleryPath, fi.path, row.id)
+		moveCanonical(database, galleryPath, fi.path, row)
 		bySHA[fi.sha256] = syncBySHARow{id: row.id, canonicalPath: fi.path, isMissing: 0}
 		result.Moved++
 		return
@@ -435,27 +435,29 @@ func promoteAliasToCanonical(database *db.DB, galleryPath, newCanonical string, 
 // moveCanonical points the image row at a new on-disk path when the
 // previous canonical file has vanished. The vanished path is dropped
 // from image_paths rather than kept as an alias, so it can't resurface
-// as a phantom duplicate.
-func moveCanonical(database *db.DB, galleryPath, newCanonical string, imageID int64) {
+// as a phantom duplicate. The drop names the vanished path rather than
+// the canonical flag, so a row carrying two canonicals (a crash mid-swap)
+// loses only the path this move replaced.
+func moveCanonical(database *db.DB, galleryPath, newCanonical string, row syncBySHARow) {
 	newFolder := FolderPath(galleryPath, newCanonical)
 	if _, wErr := database.Write.Exec(
 		`UPDATE images SET canonical_path = ?, folder_path = ?, is_missing = 0 WHERE id = ?`,
-		newCanonical, newFolder, imageID,
+		newCanonical, newFolder, row.id,
 	); wErr != nil {
-		logx.Warnf("sync: move %d: %v", imageID, wErr)
+		logx.Warnf("sync: move %d: %v", row.id, wErr)
 	}
 	if _, wErr := database.Write.Exec(
-		`DELETE FROM image_paths WHERE image_id = ? AND is_canonical = 1`,
-		imageID,
+		`DELETE FROM image_paths WHERE image_id = ? AND path = ?`,
+		row.id, row.canonicalPath,
 	); wErr != nil {
-		logx.Warnf("sync: drop old canonical %d: %v", imageID, wErr)
+		logx.Warnf("sync: drop old canonical %d: %v", row.id, wErr)
 	}
 	if _, wErr := database.Write.Exec(
 		`INSERT INTO image_paths (image_id, path, is_canonical) VALUES (?, ?, 1)
 		 ON CONFLICT(path) DO UPDATE SET is_canonical = 1`,
-		imageID, newCanonical,
+		row.id, newCanonical,
 	); wErr != nil {
-		logx.Warnf("sync: install new canonical %d: %v", imageID, wErr)
+		logx.Warnf("sync: install new canonical %d: %v", row.id, wErr)
 	}
 }
 
@@ -665,11 +667,7 @@ func applyInPlaceEdit(database *db.DB, thumbnailsPath, path, newSHA string, newM
 		RemoveMangaCache(thumbnailsPath, imageID)
 	}
 
-	if err := Generate(path, thumbnailsPath, imageID, fileType); err != nil {
-		logx.Warnf("in-place edit: thumbnail regen for %q: %v", path, err)
-	} else if err := RecomputeAndStorePhash(context.Background(), database, imageID, thumbnailsPath); err != nil {
-		logx.Warnf("in-place edit: phash recompute for %q: %v", path, err)
-	}
+	RegenerateDerived(database, thumbnailsPath, path, imageID, fileType, "in-place edit")
 	logx.Infof("in-place edit: image id=%d at %q now carries sha %s", imageID, path, newSHA)
 	return nil
 }

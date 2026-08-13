@@ -256,20 +256,7 @@ func (s *Server) lookupJobOutcome(ctx context.Context, jobID int64) (string, boo
 	if jobID == 0 {
 		return "", true // nothing to ask about; an older monloader reported no id
 	}
-	base := s.monloaderAPIBase()
-	s.cfgMu.RLock()
-	token := s.cfg.Monloader.APIToken
-	s.cfgMu.RUnlock()
-	if base == "" || token == "" {
-		return "", false
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		base+"/api/v1/queue/"+strconv.FormatInt(jobID, 10), nil)
-	if err != nil {
-		return "", false
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := monloaderClient.Do(req)
+	resp, err := s.monloaderDo(ctx, http.MethodGet, "/api/v1/queue/"+strconv.FormatInt(jobID, 10), nil)
 	if err != nil {
 		return "", false
 	}

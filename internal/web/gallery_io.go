@@ -1142,29 +1142,10 @@ func rebaseImagePaths(database *db.DB, targetGalleryPath string) error {
 		return fmt.Errorf("normalize folder paths: %w", err)
 	}
 
-	type imgRow struct {
-		id        int64
-		folder    string
-		canonical string
-	}
-	rows, err := tx.Query(`SELECT id, folder_path, canonical_path FROM images`)
+	imgs, err := loadImagePathRows(tx)
 	if err != nil {
 		return fmt.Errorf("scan images for rebase: %w", err)
 	}
-	var imgs []imgRow
-	for rows.Next() {
-		var r imgRow
-		if err := rows.Scan(&r.id, &r.folder, &r.canonical); err != nil {
-			_ = rows.Close()
-			return err
-		}
-		imgs = append(imgs, r)
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return err
-	}
-	_ = rows.Close()
 
 	// Infer the source-root from the first canonical row: each row
 	// stores canonical_path = <sourceRoot>/<folder_path>/<basename>, so
@@ -1278,13 +1259,8 @@ func rebaseImagePaths(database *db.DB, targetGalleryPath string) error {
 	// clear a row that was exported missing but exists here (otherwise it
 	// stays hidden until a manual Sync the import flow never queues). Mirrors
 	// what Sync does for vanished/reappeared files.
-	for _, r := range imgs {
-		flag := fileMissingFlag(root, r.folder, r.canonical)
-		if _, err := tx.Exec(
-			`UPDATE images SET is_missing = ? WHERE id = ?`, flag, r.id,
-		); err != nil {
-			return fmt.Errorf("reconcile is_missing for image %d: %w", r.id, err)
-		}
+	if err := reconcileMissingFlags(tx, root, imgs); err != nil {
+		return err
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -1305,6 +1281,37 @@ func recalcImportedTagCounts(database *db.DB) error {
 	return nil
 }
 
+// imgPathRow is the stored path triple the rebase and reconcile passes walk.
+type imgPathRow struct {
+	id        int64
+	folder    string
+	canonical string
+}
+
+// loadImagePathRows reads every image's stored paths. The rebase passes its
+// transaction, since it rewrites what it reads; reconcile passes the pool.
+func loadImagePathRows(q db.Querier) ([]imgPathRow, error) {
+	return db.QueryAll(q, func(rows *sql.Rows) (imgPathRow, error) {
+		var r imgPathRow
+		err := rows.Scan(&r.id, &r.folder, &r.canonical)
+		return r, err
+	}, `SELECT id, folder_path, canonical_path FROM images`)
+}
+
+// reconcileMissingFlags re-derives is_missing from what is on disk under
+// root, in both directions: a row whose canonical file is absent is flagged
+// so missing:true surfaces it instead of a healthy-looking row that 404s on
+// click, and a row exported missing but present here is cleared.
+func reconcileMissingFlags(x db.Execer, root string, imgs []imgPathRow) error {
+	for _, r := range imgs {
+		flag := fileMissingFlag(root, r.folder, r.canonical)
+		if _, err := x.Exec(`UPDATE images SET is_missing = ? WHERE id = ?`, flag, r.id); err != nil {
+			return fmt.Errorf("reconcile is_missing for image %d: %w", r.id, err)
+		}
+	}
+	return nil
+}
+
 // fileMissingFlag reports 1 when the image's canonical file is absent from
 // galleryRoot and 0 when it is present, matching what Sync records.
 func fileMissingFlag(galleryRoot, folder, canonical string) int {
@@ -1319,36 +1326,12 @@ func fileMissingFlag(galleryRoot, folder, canonical string) int {
 // this second pass runs once the files are actually on disk.
 func reconcileMissingFiles(database *db.DB, galleryPath string) error {
 	root := strings.TrimRight(galleryPath, "/")
-	rows, err := database.Read.Query(`SELECT id, folder_path, canonical_path FROM images`)
+	imgs, err := loadImagePathRows(database.Read)
 	if err != nil {
 		return fmt.Errorf("scan images for reconcile: %w", err)
 	}
-	type imgRow struct {
-		id        int64
-		folder    string
-		canonical string
-	}
-	var imgs []imgRow
-	for rows.Next() {
-		var r imgRow
-		if err := rows.Scan(&r.id, &r.folder, &r.canonical); err != nil {
-			_ = rows.Close()
-			return err
-		}
-		imgs = append(imgs, r)
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
+	if err := reconcileMissingFlags(database.Write, root, imgs); err != nil {
 		return err
-	}
-	_ = rows.Close()
-	for _, r := range imgs {
-		flag := fileMissingFlag(root, r.folder, r.canonical)
-		if _, err := database.Write.Exec(
-			`UPDATE images SET is_missing = ? WHERE id = ?`, flag, r.id,
-		); err != nil {
-			return fmt.Errorf("reconcile is_missing for image %d: %w", r.id, err)
-		}
 	}
 	return recalcImportedTagCounts(database)
 }

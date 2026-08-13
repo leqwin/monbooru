@@ -65,6 +65,22 @@ func PathInside(root, target string) bool {
 	return !strings.HasPrefix(rel, "..")
 }
 
+// ResolvedInside resolves both paths before asking PathInside, which is the
+// gate every serve path runs before opening a stored file. A path that cannot
+// be resolved counts as outside: this decides whether arbitrary bytes leave
+// the box, so an unanswerable question is refused rather than guessed.
+func ResolvedInside(root, target string) bool {
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	targetAbs, err := filepath.Abs(target)
+	if err != nil {
+		return false
+	}
+	return PathInside(rootAbs, targetAbs)
+}
+
 // ErrUnsupportedType is returned when the file type is not recognized.
 var ErrUnsupportedType = errors.New("unsupported file type")
 
@@ -79,14 +95,23 @@ const SupportedMIMETypes = "image/jpeg,image/png,image/webp,image/gif,video/mp4,
 // rename rule is consistent. The stat check is racy (TOCTOU); callers
 // needing stronger guarantees should O_CREATE|O_EXCL themselves.
 func UniqueDestPath(destDir, filename string) string {
-	dst := filepath.Join(destDir, filename)
+	return uniquePathBy(destDir, filename, func(stem, ext string, i int) string {
+		return fmt.Sprintf("%s_%d%s", stem, i, ext)
+	})
+}
+
+// uniquePathBy returns dir/filename when it is free, else the first name
+// nameNth produces that is. The stat check is racy (TOCTOU); callers needing
+// stronger guarantees should O_CREATE|O_EXCL themselves.
+func uniquePathBy(dir, filename string, nameNth func(stem, ext string, i int) string) string {
+	dst := filepath.Join(dir, filename)
 	if _, err := os.Stat(dst); os.IsNotExist(err) {
 		return dst
 	}
-	stem := strings.TrimSuffix(filename, filepath.Ext(filename))
 	ext := filepath.Ext(filename)
+	stem := strings.TrimSuffix(filename, ext)
 	for i := 1; ; i++ {
-		candidate := filepath.Join(destDir, fmt.Sprintf("%s_%d%s", stem, i, ext))
+		candidate := filepath.Join(dir, nameNth(stem, ext, i))
 		if _, err := os.Stat(candidate); os.IsNotExist(err) {
 			return candidate
 		}
@@ -243,23 +268,7 @@ func IsVideoType(fileType string) bool {
 // or "" when unmapped. Only for files monbooru names itself; an
 // operator's own file keeps the name they gave it.
 func ExtForFileType(fileType string) string {
-	switch fileType {
-	case models.FileTypeJPEG:
-		return ".jpg"
-	case models.FileTypePNG:
-		return ".png"
-	case models.FileTypeWEBP:
-		return ".webp"
-	case models.FileTypeGIF:
-		return ".gif"
-	case models.FileTypeMP4:
-		return ".mp4"
-	case models.FileTypeWEBM:
-		return ".webm"
-	case models.FileTypeCBZ:
-		return ".cbz"
-	}
-	return ""
+	return fileTypeMeta[fileType].ext
 }
 
 // MIMEForFileType maps a stored file type to the media type to serve it
@@ -267,24 +276,20 @@ func ExtForFileType(fileType string) string {
 // http.ServeFile answers from the extension, which the bytes can
 // contradict.
 func MIMEForFileType(fileType string) string {
-	switch fileType {
-	case models.FileTypeJPEG:
-		return "image/jpeg"
-	case models.FileTypePNG:
-		return "image/png"
-	case models.FileTypeWEBP:
-		return "image/webp"
-	case models.FileTypeGIF:
-		return "image/gif"
-	case models.FileTypeMP4:
-		return "video/mp4"
-	case models.FileTypeWEBM:
-		return "video/webm"
-	case models.FileTypeCBZ:
-		// What the stdlib sniffer already answers for a PK archive.
-		return "application/zip"
-	}
-	return ""
+	return fileTypeMeta[fileType].mime
+}
+
+// fileTypeMeta names each stored file type on disk and on the wire. An
+// unmapped type reads as the zero value, which both accessors report as "".
+var fileTypeMeta = map[string]struct{ ext, mime string }{
+	models.FileTypeJPEG: {".jpg", "image/jpeg"},
+	models.FileTypePNG:  {".png", "image/png"},
+	models.FileTypeWEBP: {".webp", "image/webp"},
+	models.FileTypeGIF:  {".gif", "image/gif"},
+	models.FileTypeMP4:  {".mp4", "video/mp4"},
+	models.FileTypeWEBM: {".webm", "video/webm"},
+	// CBZ serves as what the stdlib sniffer already answers for a PK archive.
+	models.FileTypeCBZ: {".cbz", "application/zip"},
 }
 
 // ContentDispositionFor names a download after the file on disk. The byte

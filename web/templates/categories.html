@@ -3,7 +3,7 @@
 <div id="sidebar-inner"></div>
 {{template "layout_mid" .}}
 
-{{$csrf := index . "CSRFToken"}}
+{{$csrf := .CSRFToken}}
 
 <div id="categories-page">
   <h2>Categories</h2>
@@ -12,29 +12,11 @@
   <div id="cat-flash"></div>
   <table class="cat-table">
     <thead><tr><th>Name</th><th>Color</th><th>Actions</th></tr></thead>
-    <tbody id="cat-list">
-      {{range index . "Categories"}}
-      <tr id="cat-row-{{.ID}}">
-        <td><span style="color:{{catColor .Color}}">{{.Name}}</span>{{if .IsBuiltin}} <span class="field-hint">(built-in)</span>{{end}}</td>
-        <td><span style="color:{{catColor .Color}}" class="mono-small">{{.Color}}</span></td>
-        <td>
-          <div class="cat-actions">
-            <button class="btn-sm btn-cat-recolor-trigger"
-                    data-id="{{.ID}}" data-name="{{.Name}}" data-color="{{.Color}}">Recolor</button>
-            {{if not .IsBuiltin}}
-            <button class="btn-sm btn-cat-rename-trigger"
-                    data-id="{{.ID}}" data-name="{{.Name}}">Rename</button>
-            {{else}}
-            <button class="btn-sm cat-action-spacer" tabindex="-1" aria-hidden="true">Rename</button>
-            {{end}}
-            {{if not .IsBuiltin}}
-            <button class="btn-sm btn-danger btn-delete-category"
-                    data-id="{{.ID}}" data-name="{{.Name}}"
-                    data-csrf="{{$csrf}}">Delete</button>
-            {{end}}
-          </div>
-        </td>
-      </tr>
+    {{/* The token rides the tbody so a row swapped in by a recolour
+         inherits it without carrying a copy. */}}
+    <tbody id="cat-list" hx-headers='{"X-CSRF-Token":"{{$csrf}}"}'>
+      {{range .Categories}}
+      {{template "partials/category_row.html" .}}
       {{end}}
     </tbody>
   </table>
@@ -47,9 +29,21 @@
          #888888 fallback so a no-change Add doesn't produce a row whose
          hex blends into the body text. The schema and import-path
          defaults still resolve to #888888 for missing values. */}}
-    <input type="color" name="color" value="#5c6bc0">
+    <span class="cat-color-pair">
+      {{/* Only the hex field is named: inside a form both would post. */}}
+      <input type="color" id="add-cat-swatch" value="#5c6bc0" aria-label="Color for the new category">
+      <input type="text" name="color" id="add-cat-hex" value="#5c6bc0" class="cat-hex mono-small"
+             list="cat-palette" pattern="#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})" maxlength="7" required
+             spellcheck="false" autocomplete="off" aria-label="Hex color for the new category">
+    </span>
     <button type="submit">Add</button>
   </form>
+
+  {{/* Most new categories want a colour the table already carries, so
+       offer them by the name wearing each one. */}}
+  <datalist id="cat-palette">
+    {{range .Categories}}<option value="{{.Color}}">{{.Name}}</option>{{end}}
+  </datalist>
 </div>
 
 <!-- Rename category dialog -->
@@ -69,23 +63,6 @@
   </form>
 </dialog>
 
-<!-- Recolor category dialog -->
-<dialog id="cat-recolor-dialog">
-  <form id="cat-recolor-form" hx-patch="" hx-target="#cat-recolor-error" hx-swap="innerHTML">
-    <input type="hidden" name="_csrf" value="{{$csrf}}">
-    <p>Recolor category <strong id="cat-recolor-src"></strong></p>
-    <div class="field">
-      <label>New color</label>
-      <input type="color" name="color" id="cat-recolor-input" required>
-    </div>
-    <div id="cat-recolor-error"></div>
-    <div class="dialog-actions">
-      <button type="submit">Save</button>
-      <button type="button" onclick="document.getElementById('cat-recolor-dialog').close()">Cancel</button>
-    </div>
-  </form>
-</dialog>
-
 <!-- Delete category dialog -->
 <dialog id="delete-cat-dialog">
   <p>Delete category <strong id="del-cat-name"></strong>?</p>
@@ -94,7 +71,7 @@
     <div class="field">
       <label>Move tags to category:</label>
       <select id="del-cat-target">
-        {{range index . "Categories"}}
+        {{range .Categories}}
         <option value="{{.ID}}"{{if eq .Name "rating"}} data-locked="1"{{end}}>{{.Name}}</option>
         {{end}}
       </select>
@@ -109,91 +86,103 @@
 </dialog>
 
 <script>
-document.querySelectorAll('.btn-cat-rename-trigger').forEach(function(btn) {
-  btn.addEventListener('click', function() {
-    var id = this.dataset.id;
-    var name = this.dataset.name;
-    document.getElementById('cat-rename-src').textContent = name;
-    clearSlots('cat-rename-error');
-    var input = document.getElementById('cat-rename-input');
-    input.value = name;
-    openHxRewriteDialog('cat-rename-form', 'hx-post', '/tags/categories/' + id + '/rename', 'cat-rename-dialog');
-    input.focus();
-    input.select();
-  });
+// A recolour swaps its row, so the row's own buttons are bound through
+// the list rather than on the elements the page shipped with.
+document.getElementById('cat-list').addEventListener('click', function(e) {
+  var rename = e.target.closest('.btn-cat-rename-trigger');
+  if (rename) { openCatRenameDialog(rename.dataset.id, rename.dataset.name); return; }
+  var del = e.target.closest('.btn-delete-category');
+  if (del) openCatDeleteDialog(del.dataset.id, del.dataset.name);
 });
 
-document.querySelectorAll('.btn-cat-recolor-trigger').forEach(function(btn) {
-  btn.addEventListener('click', function() {
-    var id = this.dataset.id;
-    var name = this.dataset.name;
-    var color = this.dataset.color;
-    document.getElementById('cat-recolor-src').textContent = name;
-    clearSlots('cat-recolor-error');
-    document.getElementById('cat-recolor-input').value = color || '#888888';
-    openHxRewriteDialog('cat-recolor-form', 'hx-patch', '/settings/categories/' + id, 'cat-recolor-dialog');
-  });
+// Escape restores the stored colour before the shared handler blurs the
+// field, so leaving it that way carries no change to commit.
+document.getElementById('cat-list').addEventListener('keydown', function(e) {
+  if (e.key === 'Escape' && e.target.classList.contains('cat-hex')) {
+    e.target.value = e.target.defaultValue;
+  }
 });
 
-// Delete category with prompt
-document.querySelectorAll('.btn-delete-category').forEach(function(btn) {
-  btn.addEventListener('click', function() {
-    var catId = this.dataset.id;
-    var catName = this.dataset.name;
-    var csrf = this.dataset.csrf;
-    document.getElementById('del-cat-name').textContent = catName;
-    clearSlots('del-cat-flash');
+// A refused value never reached the server, so the field would otherwise
+// keep showing a colour the row is not on.
+document.getElementById('cat-list').addEventListener('htmx:validation:halted', function(e) {
+  e.target.value = e.target.defaultValue;
+});
 
-    fetch('/tags/categories/' + catId + '/count')
-      .then(function(r) { return r.json(); })
-      .then(function(data) {
-        var count = data.count || 0;
-        var info = document.getElementById('del-cat-tag-info');
-        var moveSection = document.getElementById('del-cat-move-section');
-        var deleteAllBtn = document.getElementById('del-cat-delete-all-btn');
-        var moveBtn = document.getElementById('del-cat-move-btn');
+// The add form's pair has no row to swap it back into agreement.
+var addSwatch = document.getElementById('add-cat-swatch');
+var addHex = document.getElementById('add-cat-hex');
+addSwatch.addEventListener('change', function() { addHex.value = addSwatch.value; });
+addHex.addEventListener('change', function() {
+  if (!addHex.checkValidity()) return;
+  // The picker only displays the six-digit form the save expands to.
+  var v = addHex.value.toLowerCase();
+  addSwatch.value = v.length === 4 ? '#' + v[1] + v[1] + v[2] + v[2] + v[3] + v[3] : v;
+});
 
-        var targetSel = document.getElementById('del-cat-target');
-        Array.from(targetSel.options).forEach(function(opt) {
-          opt.disabled = (opt.value == catId) || opt.dataset.locked === '1';
-          opt.hidden = opt.disabled;
-          if (opt.disabled && targetSel.value == catId) {
-            var first = Array.from(targetSel.options).find(function(o) { return !o.disabled; });
-            if (first) targetSel.value = first.value;
-          }
-        });
+function openCatRenameDialog(id, name) {
+  document.getElementById('cat-rename-src').textContent = name;
+  clearSlots('cat-rename-error');
+  var input = document.getElementById('cat-rename-input');
+  input.value = name;
+  openHxRewriteDialog('cat-rename-form', 'hx-post', '/tags/categories/' + id + '/rename', 'cat-rename-dialog');
+  input.focus();
+  input.select();
+}
 
-        if (count === 0) {
-          info.textContent = 'No tags in this category.';
-          moveSection.style.display = 'none';
-          deleteAllBtn.textContent = 'Delete category';
-          moveBtn.style.display = 'none';
-        } else {
-          info.textContent = count + ' tag(s) will be affected.';
-          moveSection.style.display = '';
-          deleteAllBtn.textContent = 'Delete all ' + count + ' tag(s) & category';
-          moveBtn.style.display = '';
+function openCatDeleteDialog(catId, catName) {
+  document.getElementById('del-cat-name').textContent = catName;
+  clearSlots('del-cat-flash');
+
+  fetch('/tags/categories/' + catId + '/count')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      var count = data.count || 0;
+      var info = document.getElementById('del-cat-tag-info');
+      var moveSection = document.getElementById('del-cat-move-section');
+      var deleteAllBtn = document.getElementById('del-cat-delete-all-btn');
+      var moveBtn = document.getElementById('del-cat-move-btn');
+
+      var targetSel = document.getElementById('del-cat-target');
+      Array.from(targetSel.options).forEach(function(opt) {
+        opt.disabled = (opt.value == catId) || opt.dataset.locked === '1';
+        opt.hidden = opt.disabled;
+        if (opt.disabled && targetSel.value == catId) {
+          var first = Array.from(targetSel.options).find(function(o) { return !o.disabled; });
+          if (first) targetSel.value = first.value;
         }
-
-        deleteAllBtn.onclick = function() {
-          doDeleteCategory(catId, csrf, 'delete_all', null);
-        };
-        moveBtn.onclick = function() {
-          var targetId = document.getElementById('del-cat-target').value;
-          doDeleteCategory(catId, csrf, 'move', targetId);
-        };
-
-        document.getElementById('delete-cat-dialog').showModal();
-      })
-      .catch(function() {
-        showConfirm('Delete category "' + catName + '"?', function() {
-          doDeleteCategory(catId, csrf, 'delete_all', null);
-        }, '', 'Delete');
       });
-  });
-});
 
-function doDeleteCategory(catId, csrf, action, targetCatId) {
+      if (count === 0) {
+        info.textContent = 'No tags in this category.';
+        moveSection.style.display = 'none';
+        deleteAllBtn.textContent = 'Delete category';
+        moveBtn.style.display = 'none';
+      } else {
+        info.textContent = count + ' tag(s) will be affected.';
+        moveSection.style.display = '';
+        deleteAllBtn.textContent = 'Delete all ' + count + ' tag(s) & category';
+        moveBtn.style.display = '';
+      }
+
+      deleteAllBtn.onclick = function() {
+        doDeleteCategory(catId, 'delete_all', null);
+      };
+      moveBtn.onclick = function() {
+        var targetId = document.getElementById('del-cat-target').value;
+        doDeleteCategory(catId, 'move', targetId);
+      };
+
+      document.getElementById('delete-cat-dialog').showModal();
+    })
+    .catch(function() {
+      showConfirm('Delete category "' + catName + '"?', function() {
+        doDeleteCategory(catId, 'delete_all', null);
+      }, '', 'Delete');
+    });
+}
+
+function doDeleteCategory(catId, action, targetCatId) {
   var url = '/tags/categories/' + catId + '?action=' + encodeURIComponent(action);
   if (targetCatId) url += '&target_id=' + encodeURIComponent(targetCatId);
   postForm(url, null, {

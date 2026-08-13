@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/monbooru/monbooru/internal/gallery"
 	"github.com/monbooru/monbooru/internal/models"
 )
 
@@ -38,22 +39,19 @@ func validateVia(via string) error {
 }
 
 const (
-	maxImageSourceLen     = 200
-	maxImageURLLen        = 2048
-	maxImageCommentaryLen = 10000
-	maxImageOriginalLen   = 2048
+	maxImageSourceLen     = gallery.MaxSourceLabelLen
+	maxImageURLLen        = gallery.MaxSourceURLLen
+	maxImageCommentaryLen = gallery.MaxCommentaryLen
+	maxImageOriginalLen   = gallery.MaxOriginalLen
+	maxAnnotationBodyLen  = gallery.MaxAnnotationBodyLen
 	maxAnnotations        = 500
-	maxAnnotationBodyLen  = 2000
 	maxSourceMD5Len       = 64
 	maxSourcePostIDLen    = 64
 )
 
-// validateImageSource / validateImageURL / validateImageCollection
-// mirror the web detail-page editor's rules (internal/web
-// setSource) so the operator-editable provenance fields land
-// under the same caps and the URL stays a renderable target=_blank
-// link. Callers pass the already-trimmed value. Shared by the create
-// (POST /images) and edit (PATCH /images/{id}) paths.
+// validateImageSource / validateImageURL / validateImageCollection carry
+// the caps into the create (POST /images) and edit (PATCH /images/{id})
+// paths. Callers pass the already-trimmed value.
 func validateMaxLen(field, s string, max int) error {
 	if len(s) > max {
 		return fmt.Errorf("%s must be %d characters or less", field, max)
@@ -72,8 +70,7 @@ func validateImageURL(s string) error {
 	if len(s) > maxImageURLLen {
 		return fmt.Errorf("url must be %d characters or less", maxImageURLLen)
 	}
-	lower := strings.ToLower(s)
-	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
+	if !gallery.ValidExternalURL(s) {
 		return fmt.Errorf("url must start with http:// or https://")
 	}
 	return nil

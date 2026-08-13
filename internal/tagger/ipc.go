@@ -266,34 +266,49 @@ func (b *ipcBackend) terminate() {
 	if b.cmd == nil {
 		return
 	}
+	if b.cmd.Process != nil {
+		_ = b.cmd.Process.Signal(syscall.SIGTERM)
+	}
+	b.reapLocked(true, "terminated")
+}
+
+// reapLocked waits for the child to exit, killing it after 5s, then clears
+// the handles it left behind. dropConnFirst closes the socket before the
+// wait, which is what an unresponsive child needs; a graceful shutdown keeps
+// it open until the child has acknowledged and exited. verb names the outcome
+// in the log line. Caller must hold b.mu.
+func (b *ipcBackend) reapLocked(dropConnFirst bool, verb string) {
+	if dropConnFirst && b.conn != nil {
+		_ = b.conn.Close()
+		b.conn = nil
+	}
+	done := make(chan struct{})
+	go func() {
+		if b.cmd != nil {
+			_ = b.cmd.Wait()
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		if b.cmd != nil && b.cmd.Process != nil {
+			_ = b.cmd.Process.Kill()
+		}
+		<-done
+	}
 	if b.conn != nil {
 		_ = b.conn.Close()
 		b.conn = nil
 	}
-	if b.cmd.Process != nil {
-		_ = b.cmd.Process.Signal(syscall.SIGTERM)
-		// Give the child a moment to exit cleanly; if it doesn't,
-		// SIGKILL.
-		done := make(chan struct{})
-		go func() {
-			_ = b.cmd.Wait()
-			close(done)
-		}()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			_ = b.cmd.Process.Kill()
-			<-done
-		}
-	}
 	pid := 0
-	if b.cmd.ProcessState != nil {
+	if b.cmd != nil && b.cmd.ProcessState != nil {
 		pid = b.cmd.ProcessState.Pid()
 	}
 	b.cmd = nil
 	b.childPID.Store(0)
 	b.lastStatus.Store(nil)
-	logx.Infof("tagger-worker: terminated pid=%d", pid)
+	logx.Infof("tagger-worker: %s pid=%d", verb, pid)
 }
 
 // call sends a request and reads the terminal response. Caller must
@@ -464,36 +479,9 @@ func (b *ipcBackend) ReleaseAll() {
 		return
 	}
 
-	// Wait up to 5s for the child to exit cleanly after acknowledging
-	// shutdown.
-	done := make(chan struct{})
-	go func() {
-		if b.cmd != nil {
-			_ = b.cmd.Wait()
-		}
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		if b.cmd != nil && b.cmd.Process != nil {
-			_ = b.cmd.Process.Kill()
-		}
-		<-done
-	}
-
-	if b.conn != nil {
-		_ = b.conn.Close()
-		b.conn = nil
-	}
-	pid := 0
-	if b.cmd != nil && b.cmd.ProcessState != nil {
-		pid = b.cmd.ProcessState.Pid()
-	}
-	b.cmd = nil
-	b.childPID.Store(0)
-	b.lastStatus.Store(nil)
-	logx.Infof("tagger-worker: released pid=%d", pid)
+	// The child keeps the socket until it has acknowledged the shutdown and
+	// exited, so the drop happens after the wait.
+	b.reapLocked(false, "released")
 }
 
 // WorkerPID returns the live child's PID, or (0, false) when no

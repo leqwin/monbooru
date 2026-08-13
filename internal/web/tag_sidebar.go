@@ -3,6 +3,7 @@ package web
 import (
 	"cmp"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"slices"
@@ -208,15 +209,11 @@ func groupTagRowsBySource(imageID int64, imageTags []models.ImageTag,
 		}
 	}
 
-	names := make([]string, 0, len(byLabel))
-	for name := range byLabel {
-		names = append(names, name)
-	}
-	sort.Slice(names, func(i, j int) bool {
-		if ri, rj := rankSource(names[i], taggerNames), rankSource(names[j], taggerNames); ri != rj {
-			return ri < rj
+	names := slices.SortedFunc(maps.Keys(byLabel), func(a, b string) int {
+		if ra, rb := rankSource(a, taggerNames), rankSource(b, taggerNames); ra != rb {
+			return cmp.Compare(ra, rb)
 		}
-		return names[i] < names[j]
+		return strings.Compare(a, b)
 	})
 
 	out := make([]tagSidebarSection, 0, len(names))

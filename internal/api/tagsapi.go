@@ -47,7 +47,11 @@ func (h *Handler) listTags(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if catName != "" {
-		if catID, ok := categoryIDByName(g, catName); ok {
+		catID, ok, err := categoryIDByName(g, catName)
+		if serverError(w, err) {
+			return
+		}
+		if ok {
 			filter.CategoryID = &catID
 		}
 	}

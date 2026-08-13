@@ -431,19 +431,11 @@ func loadCompareFacts(cx *galleryCtx, leftID, rightID int64) (relationCompareFac
 	if err != nil {
 		return left, right, err
 	}
-	const cap = 5
+	const shown = 5
 	left.UniqueTagsTotal = len(leftUnique)
 	right.UniqueTagsTotal = len(rightUnique)
-	if len(leftUnique) > cap {
-		left.UniqueTags = leftUnique[:cap]
-	} else {
-		left.UniqueTags = leftUnique
-	}
-	if len(rightUnique) > cap {
-		right.UniqueTags = rightUnique[:cap]
-	} else {
-		right.UniqueTags = rightUnique
-	}
+	left.UniqueTags = leftUnique[:min(shown, len(leftUnique))]
+	right.UniqueTags = rightUnique[:min(shown, len(rightUnique))]
 	return left, right, nil
 }
 

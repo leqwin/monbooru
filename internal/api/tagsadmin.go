@@ -2,6 +2,7 @@ package api
 
 import (
 	"cmp"
+	"database/sql"
 	"errors"
 	"net/http"
 	"strings"
@@ -33,7 +34,7 @@ func toTagResponse(t *models.Tag) tagResponse {
 // resolveCategoryID maps a category name to its id; an empty name
 // resolves to the built-in general category. The bool reports whether
 // the name named a real category.
-func resolveCategoryID(g Gallery, name string) (int64, bool) {
+func resolveCategoryID(g Gallery, name string) (int64, bool, error) {
 	name = strings.TrimSpace(name)
 	name = cmp.Or(name, "general")
 	return categoryIDByName(g, name)
@@ -41,10 +42,19 @@ func resolveCategoryID(g Gallery, name string) (int64, bool) {
 
 // categoryIDByName looks up a tag category id by exact name, with no
 // empty-name default; resolveCategoryID layers the "general" fallback.
-func categoryIDByName(g Gallery, name string) (int64, bool) {
+// A read failure is reported separately from a name that matched nothing:
+// answering "unknown category" to a broken read would blame the caller for
+// the server's fault.
+func categoryIDByName(g Gallery, name string) (int64, bool, error) {
 	var id int64
 	err := g.DB.Read.QueryRow(`SELECT id FROM tag_categories WHERE name = ?`, name).Scan(&id)
-	return id, err == nil
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return id, true, nil
 }
 
 // sentinelStatus maps one service sentinel to its API status/code pair.
@@ -116,7 +126,10 @@ func (h *Handler) createTag(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusBadRequest, "invalid_request", "name is required")
 		return
 	}
-	catID, found := resolveCategoryID(g, body.Category)
+	catID, found, err := resolveCategoryID(g, body.Category)
+	if serverError(w, err) {
+		return
+	}
 	if !found {
 		apiError(w, http.StatusBadRequest, "invalid_request", "unknown category: "+body.Category)
 		return
@@ -160,7 +173,10 @@ func (h *Handler) patchTag(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if body.Category != nil {
-		catID, found := resolveCategoryID(g, *body.Category)
+		catID, found, cerr := resolveCategoryID(g, *body.Category)
+		if serverError(w, cerr) {
+			return
+		}
 		if !found {
 			apiError(w, http.StatusBadRequest, "invalid_request", "unknown category: "+*body.Category)
 			return
@@ -219,7 +235,10 @@ func (h *Handler) createAlias(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusBadRequest, "invalid_request", "canonical_id is required")
 		return
 	}
-	catID, found := resolveCategoryID(g, body.Category)
+	catID, found, err := resolveCategoryID(g, body.Category)
+	if serverError(w, err) {
+		return
+	}
 	if !found {
 		apiError(w, http.StatusBadRequest, "invalid_request", "unknown category: "+body.Category)
 		return
