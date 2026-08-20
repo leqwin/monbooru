@@ -11,12 +11,16 @@ import (
 )
 
 // pluginButtonView is one rendered button. Href is the substituted target of
-// an open-mode link; Index locates a relay button in its peer's block.
+// an open-mode link; Index locates a relay button in its peer's block. Off
+// marks a button whose peer is paired but paused or unreachable: it renders
+// inert rather than vanishing, so a pause reads as a pause.
 type pluginButtonView struct {
 	Label string
 	Mode  string
 	Href  string
 	Index int
+	Off   bool
+	Why   string
 }
 
 // pluginGroup is one peer's buttons in a slot, under its name.
@@ -50,10 +54,11 @@ func (v pluginSlotView) AnyOpen() bool {
 	return false
 }
 
-// pluginSlot collects the buttons every usable peer declared for a slot,
+// pluginSlot collects the buttons every paired peer declared for a slot,
 // grouped by peer in name order and declaration order within a peer. A peer
-// that is paused, unreachable, or has no address to reach contributes
-// nothing. fileType is the medium the surface holds, empty where it holds
+// that is paused or unreachable still contributes its group, inert; one with
+// no address to reach contributes nothing, since there is no pairing to
+// resume. fileType is the medium the surface holds, empty where it holds
 // several (the gallery).
 func (s *Server) pluginSlot(r *http.Request, slot string, imageID int64, fileType string) pluginSlotView {
 	peers := s.plugins()
@@ -61,12 +66,12 @@ func (s *Server) pluginSlot(r *http.Request, slot string, imageID int64, fileTyp
 	back, gallery := s.pageURL(r), s.activeName
 	view := pluginSlotView{ImageID: imageID}
 	for _, p := range peers {
-		if !s.pluginUsable(p) {
+		// pluginAddress rather than pluginBase: the latter reports a paused
+		// peer as unreachable, which is the state that should render inert.
+		if s.pluginAddress(p) == "" {
 			continue
 		}
-		if s.pluginBase(p) == "" {
-			continue
-		}
+		off := !s.pluginUsable(p)
 		g := pluginGroup{Peer: p.Name}
 		for i, b := range p.Buttons {
 			if b.Slot != slot {
@@ -75,7 +80,10 @@ func (s *Server) pluginSlot(r *http.Request, slot string, imageID int64, fileTyp
 			if fileType != "" && !b.AppliesTo(fileType) {
 				continue
 			}
-			v := pluginButtonView{Label: b.Label, Mode: b.Mode, Index: i}
+			v := pluginButtonView{Label: b.Label, Mode: b.Mode, Index: i, Off: off}
+			if off {
+				v.Why = p.Name + " is " + pluginOffState(p)
+			}
 			if b.Mode == config.ModeOpen {
 				// A peer's own pages ride monbooru's mount, not the address
 				// it pairs on: that one answers from the server, not from

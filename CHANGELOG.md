@@ -1,5 +1,42 @@
 # Changelog
 
+## [v1.19.0] - 2026-08-20
+### Added
+- Filename template for rename, move and upload destinations. ([#75](https://github.com/monbooru/monbooru/issues/75))
+- Files arriving by upload, API, watcher or sync can be named from the upload settings. ([#75](https://github.com/monbooru/monbooru/issues/75))
+- An image's MD5 shows beside its SHA-256, is searchable via `md5:`. ([#76](https://github.com/monbooru/monbooru/issues/76))
+- `upgrade:` finds images whose source serves a different file. ([#80](https://github.com/monbooru/monbooru/issues/80))
+- A source row shows the size, dimensions and type the post declares. ([#80](https://github.com/monbooru/monbooru/issues/80))
+- `[keep local]` allows to decline [upgrade] until the post changes. ([#80](https://github.com/monbooru/monbooru/issues/80))
+- Look a tag up in the PTR under another spelling, or search the PTR's spellings. ([#82](https://github.com/monbooru/monbooru/issues/82))
+- Annotations, the image note and per-source commentary carry links and formatting. ([#84](https://github.com/monbooru/monbooru/issues/84))
+- The sidebar can be hidden at any width, from the topbar toggle or the `b` key. ([#118](https://github.com/monbooru/monbooru/issues/118))
+- An OpenVINO Docker image for auto-tagging on Intel GPUs. ([#119](https://github.com/monbooru/monbooru/issues/119))
+
+### Changed
+- More space and better indentation for long tags in the sidebar. ([#111](https://github.com/monbooru/monbooru/issues/111))
+- The detail page's metadata column is narrower, with hashes elided in the middle.
+- The scheduled lookup gets its own detail page row, one line per backend.
+- A paused companion or plugin controls are dimmed with the reason instead of disappearing.
+- Compute perceptual hashes becomes Compute hashes and fills the MD5 column too.
+- An API push that names no folder now honours the default upload folder.
+
+### Fixed
+- Dialogs, wide tables, the detail page and tag columns have better responsive design for phone or narrow windows.
+- The top nav takes its own row at narrow widths instead of overflowing the bar.
+- A sync reports a file edited into bytes another image holds instead of retrying.
+- The duplicate walkers paginate instead of rendering every match in one response.
+- Saving the schedule no longer switches the PTR lookup phase back off.
+- The Tags page Origin badge counts match the listing they open.
+- The PTR tag card no longer offers a pull or a petition that cannot apply.
+- An upload rescued into bytes the gallery already holds reports the duplicate, not an error.
+
+Thanks to @CeareDelafont for the suggestions (https://github.com/monbooru/monbooru/issues/75, https://github.com/monbooru/monbooru/issues/76, https://github.com/monbooru/monbooru/issues/82, https://github.com/monbooru/monbooru/issues/118).
+Thanks to @gary-host-laptop for the suggestions (https://github.com/monbooru/monbooru/issues/80, https://github.com/monbooru/monbooru/issues/84, https://github.com/monbooru/monbooru/issues/111), (https://github.com/monbooru/monbooru/issues/75).
+Thanks to @XEarthlydust for the OpenVINO dockerfile (https://github.com/monbooru/monbooru/issues/119).
+
+Co-authored-by: Klein <87592342+XEarthlydust@users.noreply.github.com>
+
 ## [v1.18.1] - 2026-08-13
 ### Added
 - Add a reset button for category colors. ([#113](https://github.com/monbooru/monbooru/issues/113))

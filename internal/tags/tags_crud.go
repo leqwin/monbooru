@@ -338,14 +338,7 @@ func (s *Service) ListTags(filter TagFilter) ([]models.Tag, int, error) {
 	)
 	args = append(args, limit, offset)
 
-	rows, err := s.db.Read.Query(query, args...)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	var tagList []models.Tag
-	for rows.Next() {
+	tagList, err := db.QueryAll(s.db.Read, func(rows *sql.Rows) (models.Tag, error) {
 		var t models.Tag
 		var isAlias int
 		var canonicalID sql.NullInt64
@@ -359,7 +352,7 @@ func (s *Service) ListTags(filter TagFilter) ([]models.Tag, int, error) {
 			&t.Origin, &lastUsed, &t.StaleUsage, &foldedInto,
 			&canonName, &canonCatName, &canonCatColor,
 		); err != nil {
-			return nil, 0, err
+			return t, err
 		}
 		if foldedInto.Valid {
 			t.FoldedInto = foldedInto.String
@@ -381,12 +374,11 @@ func (s *Service) ListTags(filter TagFilter) ([]models.Tag, int, error) {
 			t.CanonicalCategoryColor = canonCatColor.String
 		}
 		t.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
-		tagList = append(tagList, t)
-	}
-	if err := rows.Err(); err != nil {
+		return t, nil
+	}, query, args...)
+	if err != nil {
 		return nil, 0, err
 	}
-
 	return tagList, total, nil
 }
 
@@ -434,14 +426,24 @@ type OriginCount struct {
 }
 
 // OriginCounts returns the distinct non-empty creation origins in the
-// catalog, most-populated first, for the /tags sidebar filter.
-func (s *Service) OriginCounts() ([]OriginCount, error) {
+// catalog, most-populated first, for the /tags sidebar filter. typeFilter
+// is the listing's active Type ("tag" / "alias" / ""), applied here too so
+// a badge counts the rows its own link will show.
+func (s *Service) OriginCounts(typeFilter string) ([]OriginCount, error) {
+	where := ""
+	switch typeFilter {
+	case "alias":
+		where = " AND is_alias = 1"
+	case "tag":
+		where = " AND is_alias = 0"
+	}
 	return db.QueryAll(s.db.Read, func(rows *sql.Rows) (OriginCount, error) {
 		var oc OriginCount
 		err := rows.Scan(&oc.Label, &oc.Count)
 		return oc, err
 	},
-		`SELECT origin, COUNT(*) FROM tags WHERE origin <> '' GROUP BY origin ORDER BY COUNT(*) DESC, origin ASC`,
+		`SELECT origin, COUNT(*) FROM tags WHERE origin <> ''`+where+
+			` GROUP BY origin ORDER BY COUNT(*) DESC, origin ASC`,
 	)
 }
 
@@ -469,24 +471,18 @@ func (s *Service) AutoTaggerLabels(labels []string) (map[string]struct{}, error)
 	// The literal IS NOT NULL / != '' terms restate
 	// idx_image_tags_auto_tagger's partial predicate; without them the
 	// planner can't prove the index applies and scans image_tags.
-	rows, err := s.db.Read.Query(
+	labels, err := db.QueryStrings(s.db.Read,
 		`SELECT DISTINCT tagger_name FROM image_tags
 		 WHERE is_auto = 1 AND tagger_name IS NOT NULL AND tagger_name != ''
 		   AND tagger_name IN (`+placeholders+`)`,
-		args...,
-	)
+		args...)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var l string
-		if err := rows.Scan(&l); err != nil {
-			return nil, err
-		}
+	for _, l := range labels {
 		set[l] = struct{}{}
 	}
-	return set, rows.Err()
+	return set, nil
 }
 
 // ListTagIDs returns every tag id matching the filter, ignoring
@@ -503,37 +499,22 @@ func (s *Service) ListTagIDs(filter TagFilter) ([]int64, error) {
 // neighbour there (or id absent from the filtered set).
 func (s *Service) AdjacentTags(filter TagFilter, id int64) (prev, next *int64, err error) {
 	where, args := tagFilterWhere(filter)
-	rows, err := s.db.Read.Query(
-		`SELECT t.id FROM tags t WHERE `+where+` ORDER BY `+tagOrderBy(filter), args...,
-	)
+	ids, err := db.QueryIDs(s.db.Read,
+		`SELECT t.id FROM tags t WHERE `+where+` ORDER BY `+tagOrderBy(filter), args...)
 	if err != nil {
 		return nil, nil, err
 	}
-	defer func() { _ = rows.Close() }()
-
-	var prevID int64
-	havePrev, found := false, false
-	for rows.Next() {
-		var cur int64
-		if err := rows.Scan(&cur); err != nil {
-			return nil, nil, err
-		}
-		if found {
-			next = &cur
-			break
-		}
-		if cur == id {
-			found = true
-			if havePrev {
-				p := prevID
-				prev = &p
-			}
+	for i, cur := range ids {
+		if cur != id {
 			continue
 		}
-		prevID, havePrev = cur, true
-	}
-	if err := rows.Err(); err != nil {
-		return nil, nil, err
+		if i > 0 {
+			prev = &ids[i-1]
+		}
+		if i+1 < len(ids) {
+			next = &ids[i+1]
+		}
+		break
 	}
 	return prev, next, nil
 }
@@ -585,7 +566,20 @@ func (s *Service) AliasesForTagIDs(canonicalIDs []int64) (map[int64][]models.Tag
 	}
 	err := db.Chunked(canonicalIDs, 500, func(batch []int64) error {
 		placeholders, args := db.InPlaceholders(batch)
-		rows, err := s.db.Read.Query(
+		aliases, err := db.QueryAll(s.db.Read, func(rows *sql.Rows) (models.Tag, error) {
+			var t models.Tag
+			var canonicalID int64
+			var stale int64
+			err := rows.Scan(
+				&t.ID, &t.Name, &t.CategoryID, &t.CategoryName, &t.CategoryColor,
+				&canonicalID, &t.Origin, &stale,
+				&t.CanonicalName, &t.CanonicalCategoryName, &t.CanonicalCategoryColor,
+			)
+			t.Stale = stale == 1
+			t.IsAlias = true
+			t.CanonicalTagID = &canonicalID
+			return t, err
+		},
 			`SELECT a.id, a.name, a.category_id, ac.name, ac.color,
 			        a.canonical_tag_id, a.origin, a.stale,
 			        c.name, cc.name, cc.color
@@ -595,29 +589,14 @@ func (s *Service) AliasesForTagIDs(canonicalIDs []int64) (map[int64][]models.Tag
 			 JOIN tag_categories cc ON cc.id = c.category_id
 			 WHERE a.is_alias = 1 AND a.canonical_tag_id IN (`+placeholders+`)
 			 ORDER BY a.name`,
-			args...,
-		)
+			args...)
 		if err != nil {
 			return err
 		}
-		defer func() { _ = rows.Close() }()
-		for rows.Next() {
-			var t models.Tag
-			var canonicalID int64
-			var stale int64
-			if err := rows.Scan(
-				&t.ID, &t.Name, &t.CategoryID, &t.CategoryName, &t.CategoryColor,
-				&canonicalID, &t.Origin, &stale,
-				&t.CanonicalName, &t.CanonicalCategoryName, &t.CanonicalCategoryColor,
-			); err != nil {
-				return err
-			}
-			t.Stale = stale == 1
-			t.IsAlias = true
-			t.CanonicalTagID = &canonicalID
-			out[canonicalID] = append(out[canonicalID], t)
+		for _, t := range aliases {
+			out[*t.CanonicalTagID] = append(out[*t.CanonicalTagID], t)
 		}
-		return rows.Err()
+		return nil
 	})
 	if err != nil {
 		return nil, err

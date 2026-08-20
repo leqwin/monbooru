@@ -1,8 +1,8 @@
 name: Release
 
-# Builds the CPU image for amd64 and arm64 and the CUDA image for amd64,
-# pushes them to GHCR, and creates a GitHub release whose body is the
-# latest CHANGELOG.md entry.
+# Builds the CPU image for amd64 and arm64 and the CUDA and OpenVINO images
+# for amd64, pushes them to GHCR, and creates a GitHub release whose body is
+# the latest CHANGELOG.md entry.
 
 on:
   push:
@@ -33,6 +33,10 @@ jobs:
             dockerfile: docker/Dockerfile.cuda
             arch: amd64
             runner: ubuntu-latest
+          - variant: openvino
+            dockerfile: docker/Dockerfile.openvino
+            arch: amd64
+            runner: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -61,7 +65,7 @@ jobs:
           outputs: type=image,name=ghcr.io/${{ steps.img.outputs.NAME }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Smoke test ${{ matrix.arch }}
-        if: matrix.variant == 'cpu'
+        if: matrix.variant == 'cpu' || matrix.variant == 'openvino'
         run: |
           docker run --rm --entrypoint /usr/local/bin/monbooru \
             ghcr.io/${{ steps.img.outputs.NAME }}@${{ steps.build.outputs.digest }} \
@@ -92,6 +96,8 @@ jobs:
             suffix: ""
           - variant: cuda
             suffix: "-cuda"
+          - variant: openvino
+            suffix: "-openvino"
     steps:
       - name: Lowercase image name
         id: img

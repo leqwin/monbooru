@@ -310,24 +310,19 @@ func (s *Service) ChunkedDeleteWithTagRecalc(
 		if err != nil {
 			return tagIDsFromSet(seen), processed, false, err
 		}
-		tagRows, err := tx.Query(
+		// A short set would leave the tags it missed carrying a usage_count
+		// the delete is about to invalidate, with nothing to say so, which
+		// is why a read failure aborts the chunk rather than shortening it.
+		touched, err := db.QueryIDs(tx,
 			`SELECT DISTINCT tag_id FROM image_tags WHERE image_id IN (`+placeholders+`)`+extraSQL,
-			args...,
-		)
+			args...)
 		if err != nil {
 			_ = tx.Rollback()
 			return tagIDsFromSet(seen), processed, false, err
 		}
-		for tagRows.Next() {
-			var tid int64
-			if scanErr := tagRows.Scan(&tid); scanErr != nil {
-				_ = tagRows.Close()
-				_ = tx.Rollback()
-				return tagIDsFromSet(seen), processed, false, scanErr
-			}
+		for _, tid := range touched {
 			seen[tid] = struct{}{}
 		}
-		_ = tagRows.Close()
 		if err := deleteFn(tx, chunk, placeholders, args); err != nil {
 			_ = tx.Rollback()
 			return tagIDsFromSet(seen), processed, false, err

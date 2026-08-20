@@ -3,6 +3,7 @@ package web
 import (
 	"cmp"
 	"crypto/rand"
+	"database/sql"
 	"encoding/binary"
 	"net/http"
 	"net/url"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/monbooru/monbooru/internal/config"
+	"github.com/monbooru/monbooru/internal/db"
 	"github.com/monbooru/monbooru/internal/gallery"
 	"github.com/monbooru/monbooru/internal/logx"
 	"github.com/monbooru/monbooru/internal/models"
@@ -53,7 +55,9 @@ type galleryData struct {
 	SavedSearches     []models.SavedSearch
 	SidebarURL        string                // populated on full-page renders so the placeholder can lazy-load the sidebar
 	EnabledTaggers    []tagger.TaggerStatus // gates the gallery's Auto-tag controls; mirrors detailData.EnabledTaggers
-	ActiveTagTerms    map[string]bool       // top-level AND-positive terms in the current query, keyed by both "category:name" and bare "name"; drives the sidebar + / - toggle
+	TaggersPresent    bool                  // mirrors detailData.TaggersPresent
+	TaggerReason      string
+	ActiveTagTerms    map[string]bool // top-level AND-positive terms in the current query, keyed by both "category:name" and bare "name"; drives the sidebar + / - toggle
 	// InboxClusterAtIdx is the parallel-to-Result.Results slice that
 	// pins a cluster header in front of the cards that start a fresh
 	// time cluster; nil entries are the in-cluster rows that don't
@@ -299,17 +303,19 @@ func (s *Server) galleryHandler(w http.ResponseWriter, r *http.Request) {
 	// GET /internal/sidebar, so first paint isn't blocked on the folder-tree
 	// aggregation. Search/pagination HTMX responses still need the sidebar
 	// content in the same payload because gallery_htmx.html OOB-swaps it into
-	// the live page.
+	// the live page - unless the operator collapsed the column, in which case
+	// both paths ship the placeholder and the reads wait until it is shown.
 	ids := make([]int64, 0, len(result.Results))
 	for _, img := range result.Results {
 		ids = append(ids, img.ID)
 	}
 
 	var sb sidebarBundle
-	if htmxGridTarget {
+	if htmxGridTarget && !sidebarCollapsed(r) {
 		sb = s.sidebarLoad(ids, ceiling)
 	}
 
+	taggerCfg := s.cfgSnapshot()
 	data := galleryData{
 		baseData:          s.base(r, "gallery", "Images - "+s.booruName()),
 		Query:             queryStr,
@@ -325,7 +331,9 @@ func (s *Server) galleryHandler(w http.ResponseWriter, r *http.Request) {
 		FolderTree:        sb.Folders,
 		SourceLabelCounts: sb.SourceLabels,
 		SavedSearches:     sb.Saved,
-		EnabledTaggers:    tagger.EnabledTaggersForGallery(s.cfgSnapshot(), s.activeName),
+		EnabledTaggers:    tagger.EnabledTaggersForGallery(taggerCfg, s.activeName),
+		TaggersPresent:    tagger.Present(taggerCfg),
+		TaggerReason:      tagger.UnavailableReason(taggerCfg),
 		PluginSlot:        s.pluginSlot(r, config.SlotBatchBar, 0, ""),
 		ActiveTagTerms:    computeActiveTagTerms(queryStr),
 	}
@@ -346,6 +354,9 @@ func (s *Server) galleryHandler(w http.ResponseWriter, r *http.Request) {
 		data.AcceptFileTypes = gallery.SupportedMIMETypes
 	}
 	data.HiddenByCeiling = hiddenByCeiling
+	// Both paths carry it: the collapsed placeholder the HTMX response swaps in
+	// has to hx-get this search's sidebar, not the one the page opened on.
+	data.SidebarURL = buildSidebarURL(queryStr, sortStr, orderStr, pageStr, q.Get("seed"), ids)
 
 	if htmxGridTarget {
 		// The header is outside the swap target, so the sort select rides
@@ -354,7 +365,6 @@ func (s *Server) galleryHandler(w http.ResponseWriter, r *http.Request) {
 		s.renderTemplate(w, "partials/gallery_htmx.html", data)
 		return
 	}
-	data.SidebarURL = buildSidebarURL(queryStr, sortStr, orderStr, pageStr, q.Get("seed"), ids)
 	// The batch-strip dialog's source select rides SourceLabelCounts even on
 	// the full-page render, where the sidebar (and its labels) is lazy-loaded;
 	// fill it from the cheap cached, ceiling-blind count. cx read under the
@@ -380,21 +390,12 @@ type sidebarBundle struct {
 // loadSavedSearches reads every saved search, name-ordered, for the
 // sidebar renders. logLabel names the calling surface in scan warnings.
 func (s *Server) loadSavedSearches(logLabel string) []models.SavedSearch {
-	rows, err := s.db().Read.Query(`SELECT id, name, query, sort, sort_order, seed FROM saved_searches ORDER BY name`)
-	if err != nil {
-		return nil
-	}
-	defer func() { _ = rows.Close() }()
-	var out []models.SavedSearch
-	for rows.Next() {
+	out, err := db.QueryAll(s.db().Read, func(rows *sql.Rows) (models.SavedSearch, error) {
 		var ss models.SavedSearch
-		if err := rows.Scan(&ss.ID, &ss.Name, &ss.Query, &ss.Sort, &ss.Order, &ss.Seed); err != nil {
-			logx.Warnf("%s saved searches scan: %v", logLabel, err)
-			continue
-		}
-		out = append(out, ss)
-	}
-	if err := rows.Err(); err != nil {
+		err := rows.Scan(&ss.ID, &ss.Name, &ss.Query, &ss.Sort, &ss.Order, &ss.Seed)
+		return ss, err
+	}, `SELECT id, name, query, sort, sort_order, seed FROM saved_searches ORDER BY name`)
+	if err != nil {
 		logx.Warnf("%s saved searches: %v", logLabel, err)
 	}
 	return out

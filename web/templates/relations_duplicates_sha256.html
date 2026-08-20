@@ -1,23 +1,5 @@
 {{define "relations_duplicates_sha256.html"}}
-{{template "layout_head" .}}
-<div id="sidebar-inner"></div>
-{{template "layout_mid" .}}
-
-<div id="relations-walker-page" data-esc-back="/relations#duplicates">
-  <div class="detail-topbar">
-    <div class="detail-nav-group">
-      <a href="/relations#duplicates" class="back-link">‹ Relations</a>
-      <span class="detail-nav-sep">/</span>
-      <strong class="walker-page-title">Duplicate files</strong>
-    </div>
-    {{if .Sha256Rows}}
-    <div class="detail-topbar-right">
-      {{template "partials/bulk_delete_form.html" (dict "CSRFToken" .CSRFToken "Action" "/relations/file-duplicates/remove" "Confirm" "Remove every non-canonical duplicate file and its bytes from disk? The canonical path stays." "ConfirmOK" "Remove all" "Label" "Delete all duplicate files" "All" true)}}
-    </div>
-    {{end}}
-  </div>
-
-  <div id="flash-walker-sha256"></div>
+{{template "walker_page_head" .}}
 
   {{if not .Sha256Rows}}
   <section class="session-empty">
@@ -25,6 +7,7 @@
     <p class="field-hint">Every image has a single path on disk. Drop in another sync or upload to surface more candidates.</p>
   </section>
   {{else}}
+  <div class="table-scroll">
   <table class="browse-table">
     <thead>
       <tr>
@@ -59,6 +42,8 @@
       {{end}}
     </tbody>
   </table>
+  </div>
+  {{template "partials/pagination.html" (dict "Base" "/relations/duplicates/sha256?page=" "Page" .Page "Total" .TotalPages)}}
   {{end}}
 </div>
 

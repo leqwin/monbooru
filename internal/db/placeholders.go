@@ -61,6 +61,16 @@ func QueryAll[T any](q Querier, scan func(*sql.Rows) (T, error), query string, a
 	return ScanAll(rows, scan)
 }
 
+// QueryAllContext is QueryAll on a cancellable read.
+func QueryAllContext[T any](ctx context.Context, q CtxQuerier, scan func(*sql.Rows) (T, error), query string, args ...any) ([]T, error) {
+	rows, err := q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	return ScanAll(rows, scan)
+}
+
 // QueryStrings is QueryAll over a single text column.
 func QueryStrings(q Querier, query string, args ...any) ([]string, error) {
 	return QueryAll(q, func(rows *sql.Rows) (string, error) {

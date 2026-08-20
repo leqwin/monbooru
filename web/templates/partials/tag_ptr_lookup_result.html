@@ -1,0 +1,31 @@
+{{/* The look-up dialog's answer for one spelling: a read-only pull preview
+     in the diff idiom (+ would be created, context already declared,
+     ! left alone), then the pull. */}}
+{{define "partials/tag_ptr_lookup_result.html"}}
+{{if .Err}}<p class="flash flash-err">{{.Err}}</p>
+{{else if not .Known}}<p class="ptr-contrib-unknown">the Public Tag Repository does not know {{.Spelling}}.</p>
+{{else}}
+<p class="ptr-lookup-answer"><span style="color:{{catColor .SpellingColor}}">{{.Spelling}}</span> is known; ideal <span style="color:{{catColor .IdealColor}}">{{.Ideal}}</span>. <span class="field-hint">here: {{.LocalStatus}}.</span></p>
+{{range .Groups}}
+<div class="ptr-hunk-wrap">
+  <div class="ptr-hunk-scroll">
+    <div class="ptr-hunk"><span>@@ {{.Title}} &#183; <span class="ptr-live">{{.Adds}} to adopt</span> @@</span>{{if .Note}}<span class="ptr-hunk-note">{{.Note}}</span>{{end}}</div>
+    {{range .Rows}}
+    <div class="ptr-row {{.Class}}"><span class="ptr-gut"></span><span class="ptr-mark"></span><span class="ptr-name" style="color:{{catColor .Color}}">{{.Name}}</span><span class="ptr-note">{{.Note}}</span></div>
+    {{end}}
+  </div>
+</div>
+{{end}}
+{{if not .Groups}}<p class="field-hint">the Public Tag Repository holds no relations for it.</p>{{end}}
+{{end}}
+{{if .Known}}<p class="ptr-contrib-summary">would add {{.AliasAdds}} alias{{if ne .AliasAdds 1}}es{{end}} and {{.ImplAdds}} implication{{if ne .ImplAdds 1}}s{{end}}{{if or .Declared .Skipped}}; {{if .Declared}}{{.Declared}} already declared{{end}}{{if and .Declared .Skipped}}, {{end}}{{if .Skipped}}{{.Skipped}} left as is{{end}}{{end}}.</p>{{end}}
+<div class="dialog-actions">
+  {{/* The answer replaces the candidate list, so the way back to it has to
+       be here; without it the only route is closing and reopening. */}}
+  <button type="button" class="btn-link-accent monloader-accent ptr-lookup-back"
+          hx-get="/tags/{{.TagID}}/ptr-lookup-search"
+          hx-target="#ptr-lookup-result" hx-swap="innerHTML">[back to spellings]</button>
+  <button type="button" onclick="document.getElementById('ptr-lookup-dialog').close()">cancel</button>
+  {{if .Known}}<button type="button" id="ptr-lookup-pull" class="monloader-accent" onclick="pullTagPTRAs({{.Spelling}})"{{if not (add .AliasAdds .ImplAdds)}} disabled{{end}}>pull onto this tag</button>{{end}}
+</div>
+{{end}}

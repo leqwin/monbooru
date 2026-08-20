@@ -324,23 +324,16 @@
       if (!card) return;
       var origID = cb.dataset.originalId || card.dataset.groupOriginal;
       var thumb = '/thumbnails/{{.ActiveGallery}}/' + origID + '.jpg';
-      var li = document.createElement('li');
-      li.className = 'merge-dup-choice';
-      var label = document.createElement('label');
-      var radio = document.createElement('input');
-      radio.type = 'radio';
-      radio.name = 'keep_original_from';
-      radio.value = cb.value;
-      var img = document.createElement('img');
-      img.src = thumb;
-      img.alt = 'image ' + origID;
-      img.className = 'merge-dup-thumb';
-      var meta = document.createElement('span');
-      meta.className = 'merge-dup-meta';
-      meta.textContent = 'Group ' + cb.value + ' (original #' + origID + ')';
-      label.append(radio, img, meta);
-      li.appendChild(label);
-      choices.appendChild(li);
+      choices.appendChild(mergeChoiceItem('keep_original_from', cb.value, false, function(label) {
+        var img = document.createElement('img');
+        img.src = thumb;
+        img.alt = 'image ' + origID;
+        img.className = 'merge-dup-thumb';
+        var meta = document.createElement('span');
+        meta.className = 'merge-dup-meta';
+        meta.textContent = 'Group ' + cb.value + ' (original #' + origID + ')';
+        label.append(img, meta);
+      }));
       var gid = parseInt(cb.value, 10);
       if (defaultGroupID === null || gid < defaultGroupID) {
         defaultGroupID = gid;

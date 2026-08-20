@@ -173,12 +173,7 @@ func suggestUsageRanked(database *db.DB, prefix, categoryName string, requireUsa
 			qargs = append(qargs, nameNotLike)
 		}
 		qargs = append(qargs, remaining)
-		rows, err := database.Read.Query(fmt.Sprintf(baseSQL, usageClause, extra), qargs...)
-		if err != nil {
-			return prior, err
-		}
-		defer func() { _ = rows.Close() }()
-		scanned, err := ScanTags(rows)
+		scanned, err := db.QueryAll(database.Read, ScanTag, fmt.Sprintf(baseSQL, usageClause, extra), qargs...)
 		if err != nil {
 			return prior, err
 		}
@@ -212,7 +207,7 @@ func suggestUsageRanked(database *db.DB, prefix, categoryName string, requireUsa
 // SuggestTagsInCategory returns tags matching prefix in the named
 // category, sorted by usage_count DESC.
 func (s *Service) SuggestTagsInCategory(prefix, categoryName string, limit int) ([]models.Tag, error) {
-	rows, err := s.db.Read.Query(
+	return db.QueryAll(s.db.Read, ScanTag,
 		`SELECT t.id, t.name, tc.name, tc.color, t.usage_count
 		 FROM (SELECT id, name, category_id, usage_count
 		       FROM tags
@@ -222,25 +217,13 @@ func (s *Service) SuggestTagsInCategory(prefix, categoryName string, limit int) 
 		       LIMIT ?) t
 		 JOIN tag_categories tc ON tc.id = t.category_id
 		 ORDER BY t.usage_count DESC`,
-		categoryName, db.EscapeLike(NormalizeTagName(prefix))+"%", limit,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	return ScanTags(rows)
+		categoryName, db.EscapeLike(NormalizeTagName(prefix))+"%", limit)
 }
 
-// ScanTags collects the rows of a five-column tag SELECT (id, name,
-// category name, color, usage_count). The caller owns rows.Close.
-func ScanTags(rows *sql.Rows) ([]models.Tag, error) {
-	var out []models.Tag
-	for rows.Next() {
-		var t models.Tag
-		if err := rows.Scan(&t.ID, &t.Name, &t.CategoryName, &t.CategoryColor, &t.UsageCount); err != nil {
-			return nil, err
-		}
-		out = append(out, t)
-	}
-	return out, rows.Err()
+// ScanTag reads one row of the five-column tag projection (id, name,
+// category name, color, usage_count) that every tag listing selects.
+func ScanTag(rows *sql.Rows) (models.Tag, error) {
+	var t models.Tag
+	err := rows.Scan(&t.ID, &t.Name, &t.CategoryName, &t.CategoryColor, &t.UsageCount)
+	return t, err
 }

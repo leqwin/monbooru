@@ -138,7 +138,7 @@ type tagsSidebarCounts struct {
 // tagsSidebarLoad runs the badge queries side by side, the way the
 // gallery sidebar loads its own aggregates: run in sequence their scans
 // add up to more than the listing they decorate.
-func (s *Server) tagsSidebarLoad() tagsSidebarCounts {
+func (s *Server) tagsSidebarLoad(typeFilter string) tagsSidebarCounts {
 	var c tagsSidebarCounts
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -158,7 +158,7 @@ func (s *Server) tagsSidebarLoad() tagsSidebarCounts {
 	run(func() (err error) { c.Stale, err = svc.StaleUsageCount(); return })
 	run(func() (err error) { c.FullyStale, err = svc.FullyStaleCount(); return })
 	run(func() (err error) { c.Folded, err = svc.FoldedDuplicatesCount(); return })
-	run(func() (err error) { c.Origins, err = svc.OriginCounts(); return })
+	run(func() (err error) { c.Origins, err = svc.OriginCounts(typeFilter); return })
 	run(func() (err error) { c.UsedBy, err = svc.UsedByLabels(); return })
 	wg.Wait()
 	return c
@@ -227,7 +227,7 @@ func (s *Server) tagsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	counts := s.tagsSidebarLoad()
+	counts := s.tagsSidebarLoad(p.Type)
 	if counts.Err != nil {
 		http.Error(w, counts.Err.Error(), http.StatusInternalServerError)
 		return

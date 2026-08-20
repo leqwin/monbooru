@@ -1,9 +1,16 @@
 {{define "partials/gallery_htmx.html"}}
 {{template "partials/thumbnail_grid.html" .}}
-{{/* OOB sidebar update: replaces #sidebar-inner with current page's tags/folders */}}
+{{/* OOB sidebar update: replaces #sidebar-inner with current page's tags/folders.
+     Collapsed, the placeholder is what gets swapped in, so the search pays none
+     of the sidebar's reads and the next show still fetches this query's own. */}}
+{{if .SidebarCollapsed}}
+<div id="sidebar-inner" hx-swap-oob="true" hx-get="{{.SidebarURL}}"
+     hx-trigger="sidebar-shown from:body" hx-swap="innerHTML"></div>
+{{else}}
 <div id="sidebar-inner" hx-swap-oob="true">
   {{template "partials/sidebar_content.html" .}}
 </div>
+{{end}}
 {{/* OOB status line so the match count reflects the new search */}}
 <div id="gallery-status" class="status-bar" hx-swap-oob="true"><span id="result-count" class="result-count">{{.Result.Total}}</span> {{plural .Result.Total "match" "matches"}}</div>
 {{/* OOB search warning so a filter value outside its closed vocabulary is flagged on every search */}}

@@ -14,7 +14,7 @@
                   {{end}}style="display:inline">
               <input type="hidden" name="_csrf" value="{{.CSRF}}">
               {{range $k, $v := .Fields}}<input type="hidden" name="{{$k}}" value="{{$v}}">
-              {{end}}<button type="submit" class="{{if .Danger}}btn-danger {{end}}btn-sm{{if .Accent}} {{.Accent}}{{end}}">{{.Verb}}</button>
+              {{end}}<button type="submit" class="{{if .Danger}}btn-danger {{end}}btn-sm{{if .Accent}} {{.Accent}}{{end}}"{{if .Disabled}} disabled title="{{.DisabledReason}}"{{end}}>{{.Verb}}</button>
             </form>
           </td>
         </tr>
@@ -57,9 +57,36 @@
           <h4>Files</h4>
           {{template "partials/range_field.html" dict "Name" "max_file_size_mb" "Label" "Max file size (MB)" "Min" 1 "Max" 5120 "Step" 1 "Value" $cfg.Gallery.MaxFileSizeMB "Ticks" (list 512 1024 2048 3072 4096 5120) "Hint" "Files larger than this are skipped on upload and during sync."}}
           <div class="field">
-            <label for="default_upload_folder">Default upload folder</label>
-            <input type="text" name="default_upload_folder" id="default_upload_folder" value="{{$cfg.Gallery.DefaultUploadFolder}}" placeholder="(gallery root)">
-            <span class="field-hint">Web uploads land here. Blank means the gallery root.</span>
+            <label>Where received files go</label>
+            <div class="dest-row">
+              <div class="dest-part">
+                <label for="default_upload_folder">folder</label>
+                <input type="text" name="default_upload_folder" id="default_upload_folder" value="{{$cfg.Gallery.DefaultUploadFolder}}" placeholder="(gallery root)">
+              </div>
+              <span class="dest-sep" aria-hidden="true">/</span>
+              <div class="dest-part">
+                <label for="default_upload_name">name</label>
+                <input type="text" name="default_upload_name" id="default_upload_name" value="{{$cfg.Gallery.DefaultUploadName}}" placeholder="(the sender's name)">
+              </div>
+            </div>
+            <div class="dest-hints">
+              <span class="field-hint">Blank = the gallery root.</span>
+              <span class="field-hint">Blank = the sender's name.</span>
+            </div>
+            {{template "partials/name_tokens.html" (dict "Targets" "default_upload_folder default_upload_name" "Received" true)}}
+            <div id="upload-dest-preview"
+                 hx-get="/internal/name/preview"
+                 hx-trigger="input delay:200ms from:#default_upload_folder, input delay:200ms from:#default_upload_name"
+                 hx-target="this"
+                 hx-vals='js:{scope: "upload", folder: document.getElementById("default_upload_folder").value, name: document.getElementById("default_upload_name").value}'
+                 hx-swap="innerHTML"></div>
+          </div>
+          <div class="field">
+            <label>
+              <input type="checkbox" name="rename_on_ingest" {{if $cfg.Gallery.RenameOnIngest}}checked{{end}}>
+              Apply to files found on disk too
+            </label>
+            <span class="field-hint">Files and names what the watcher and a sync pick up, wherever it was dropped. A sync applies it at once; the watcher after a restart.</span>
           </div>
           <div class="field">
             <label>
@@ -704,7 +731,7 @@
         </tr>
         {{template "maintenance_row" dict "CSRF" $csrf "Title" "Orphaned thumbnails" "Desc" "remove thumbnail files with no matching image" "URL" "/settings/maintenance/prune-orphaned-thumbnails" "Verb" "Remove"}}
         {{template "maintenance_row" dict "CSRF" $csrf "Title" "Rebuild thumbnails" "Desc" "regenerate thumbnail files for every image" "URL" "/settings/maintenance/rebuild-thumbnails" "Verb" "Rebuild" "JobKick" true "Confirm" "Rebuild thumbnails for every image in this gallery?" "ConfirmDanger" "Long-running job; blocks other jobs until it finishes." "ConfirmOK" "Rebuild"}}
-        {{template "maintenance_row" dict "CSRF" $csrf "Title" "Compute perceptual hashes" "Desc" "backfill phash for every image that doesn't have one yet" "URL" "/settings/maintenance/compute-phashes" "Verb" "Compute" "JobKick" true "Confirm" "Compute perceptual hashes for every image still missing one?" "ConfirmOK" "Compute"}}
+        {{template "maintenance_row" dict "CSRF" $csrf "Title" "Compute hashes" "Desc" "backfill the perceptual hash and md5 of every image missing one; search -phash: or -md5: to see which" "URL" "/settings/maintenance/compute-hashes" "Verb" "Compute" "JobKick" true "Confirm" "Compute the missing perceptual hashes and md5 digests?" "ConfirmDanger" "The md5 pass reads every file in the gallery from disk. Long-running; blocks other jobs until it finishes. Safe to cancel and resume." "ConfirmOK" "Compute"}}
         {{template "maintenance_row" dict "CSRF" $csrf "Title" "Rebuild pair queue" "Desc" "wipe potential relation pairs and rescan from scratch" "URL" "/relations/find-pairs" "Verb" "Rebuild" "Danger" true "JobKick" true "Confirm" "Wipe the existing pair queue and rescan from scratch?" "ConfirmDanger" "Skipped pairs and any queue work in progress are dropped." "ConfirmOK" "Rebuild" "Fields" (dict "replace" "true" "confirm" "REBUILD")}}
         {{template "maintenance_row" dict "CSRF" $csrf "Title" "Tag counts" "Desc" "recompute usage counts" "URL" "/settings/maintenance/recalc-tags" "Verb" "Recalculate"}}
         <tr>
@@ -717,8 +744,8 @@
           </td>
         </tr>
         {{template "maintenance_row" dict "CSRF" $csrf "Title" "Find folded duplicates" "Desc" "pair pre-widening folded tags with their corrected spelling, then review and merge on the Tags page (Folded dup. filter)" "URL" "/settings/maintenance/find-folded-duplicates" "Verb" "Scan" "JobKick" true}}
-        {{if .MonloaderUsable}}
-        {{template "maintenance_row" dict "CSRF" $csrf "Title" "Look up unsourced images" "Accent" "monloader-accent" "Desc" "run the scheduled lookup now on the images that are due" "URL" "/settings/maintenance/lookup-due" "Verb" "Look up" "JobKick" true "Confirm" "Look up the images that are due now?" "ConfirmDanger" "Online lookups count against monloader's daily budget." "ConfirmOK" "Look up"}}
+        {{if .MonloaderPaired}}
+        {{template "maintenance_row" dict "CSRF" $csrf "Title" "Look up unsourced images" "Accent" "monloader-accent" "Desc" "run the scheduled lookup now on the images that are due" "URL" "/settings/maintenance/lookup-due" "Verb" "Look up" "JobKick" true "Confirm" "Look up the images that are due now?" "ConfirmDanger" "Online lookups count against monloader's daily budget." "ConfirmOK" "Look up" "Disabled" (not .MonloaderUsable) "DisabledReason" (monloaderOffReason .MonloaderConn)}}
         {{end}}
         {{template "maintenance_row" dict "CSRF" $csrf "Title" "Re-extract metadata" "Desc" "re-parse metadata for every image" "URL" "/settings/maintenance/re-extract-metadata" "Verb" "Re-extract" "Confirm" "Re-parse metadata for every image in this gallery?" "ConfirmDanger" "Long-running job; blocks other jobs until it finishes." "ConfirmOK" "Re-extract"}}
         {{template "maintenance_row" dict "CSRF" $csrf "Title" "Vacuum database" "Desc" "compact the SQLite file after mass deletions" "URL" "/settings/maintenance/vacuum-db" "Verb" "Vacuum" "Confirm" "Compact the SQLite database now?" "ConfirmDanger" "Holds a database lock for the duration of the VACUUM; other jobs and queries will wait." "ConfirmOK" "Vacuum"}}
@@ -764,12 +791,17 @@
         <div class="field">
           <label><input type="checkbox" name="find_relation_pairs"{{if $sched.FindRelationPairs}} checked{{end}}> Find relation pairs</label>
         </div>
-        {{if .MonloaderUsable}}
+        {{if .MonloaderPaired}}
+        {{/* Never disabled, whatever monloader is doing: the phase is
+             monbooru's own setting and the run skips it on its own while the
+             backend is unusable, but a disabled checkbox submits nothing, so
+             the next save of this form would clear a stored flag nobody
+             touched. The title carries the reason instead. */}}
         <div class="field">
-          <label class="monloader-accent"{{if .MonloaderPTRSyncing}} title="monloader's PTR index is still syncing"{{else if not .MonloaderPTR}} title="the PTR index is off on monloader"{{end}}><input type="checkbox" name="lookup_ptr"{{if $sched.LookupPTR}} checked{{end}}{{if not .MonloaderPTR}} disabled{{end}}> Look up unsourced images in the Public Tag Repository</label>
+          <label class="monloader-accent{{if not .MonloaderUsable}} label-off{{end}}"{{if not .MonloaderUsable}} title="{{monloaderOffReason .MonloaderConn}}"{{else if .MonloaderPTRSyncing}} title="monloader's PTR index is still syncing"{{else if not .MonloaderPTR}} title="the PTR index is off on monloader"{{end}}><input type="checkbox" name="lookup_ptr"{{if $sched.LookupPTR}} checked{{end}}> Look up unsourced images in the Public Tag Repository</label>
         </div>
         <div class="field">
-          <label class="monloader-accent"><input type="checkbox" name="lookup_booru"{{if $sched.LookupBooru}} checked{{end}}> Look up unsourced images on online boorus</label>
+          <label class="monloader-accent{{if not .MonloaderUsable}} label-off{{end}}"{{if not .MonloaderUsable}} title="{{monloaderOffReason .MonloaderConn}}"{{end}}><input type="checkbox" name="lookup_booru"{{if $sched.LookupBooru}} checked{{end}}> Look up unsourced images on online boorus</label>
         </div>
         {{end}}
       </div>
@@ -783,6 +815,7 @@
     <div class="stats-cols">
     <div class="settings-sub">
       <h4>Process memory</h4>
+      <div class="table-scroll">
       <table class="stats-table">
         <tbody>
           {{if $stats.Mem.Available}}
@@ -808,10 +841,12 @@
           <tr><th>Goroutines</th><td>{{$stats.Mem.Goroutines}}</td></tr>
         </tbody>
       </table>
+      </div>
     </div>
     {{$tg := $stats.Tagger}}
     <div class="settings-sub">
       <h4>Auto-tagger</h4>
+      <div class="table-scroll">
       <table class="stats-table">
         <tbody>
           {{if $tg.Loaded}}
@@ -837,6 +872,7 @@
           {{end}}
         </tbody>
       </table>
+      </div>
     </div>
     <div class="settings-sub">
       <h4>Database size per gallery</h4>

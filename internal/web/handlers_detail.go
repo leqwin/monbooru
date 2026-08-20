@@ -17,6 +17,7 @@ import (
 	"github.com/monbooru/monbooru/internal/config"
 	"github.com/monbooru/monbooru/internal/gallery"
 	"github.com/monbooru/monbooru/internal/logx"
+	"github.com/monbooru/monbooru/internal/markup"
 	meta "github.com/monbooru/monbooru/internal/metadata"
 	"github.com/monbooru/monbooru/internal/models"
 	"github.com/monbooru/monbooru/internal/search"
@@ -35,8 +36,18 @@ const rankPageBudget = 150 * time.Millisecond
 // highlight the box.
 type annotationView struct {
 	ID    int64
-	Body  string
+	Body  template.HTML
 	Style template.CSS
+	doc   markup.Doc
+}
+
+// annotationEntry is one box in an editable list. The lists are control
+// surfaces - one ellipsized line each - so they carry the flattened text while
+// the overlay carries the render, and Body stays the stored markup the edit
+// dialog reopens.
+type annotationEntry struct {
+	models.Annotation
+	Text string
 }
 
 // sourcePanelView is one collapsible per-source provenance panel: the origin
@@ -45,8 +56,10 @@ type annotationView struct {
 // no empty panel.
 type sourcePanelView struct {
 	models.ImageSource
-	Annotations   []models.Annotation
-	OriginalLines []originalLine
+	Annotations    []annotationEntry
+	OriginalLines  []originalLine
+	CommentaryHTML template.HTML
+	doc            markup.Doc
 }
 
 // originalLine is one entry of an origin's newline-joined original source,
@@ -73,7 +86,7 @@ func buildOriginalLines(original string) []originalLine {
 // overlay entries, clamping each box to the image bounds so oversized stored
 // geometry can't drive the overlay outside the media frame. Empty when the
 // image has no known dimensions to scale by.
-func buildAnnotationViews(img *models.Image, anns []models.Annotation) []annotationView {
+func buildAnnotationViews(img *models.Image, anns []models.Annotation, refs markup.Refs) []annotationView {
 	if img.Width == nil || img.Height == nil || *img.Width <= 0 || *img.Height <= 0 || len(anns) == 0 {
 		return nil
 	}
@@ -86,7 +99,21 @@ func buildAnnotationViews(img *models.Image, anns []models.Annotation) []annotat
 		h := min(max(a.H, 0), *img.Height-y)
 		style := fmt.Sprintf("left:%.4f%%;top:%.4f%%;width:%.4f%%;height:%.4f%%",
 			float64(x)/fw*100, float64(y)/fh*100, float64(w)/fw*100, float64(h)/fh*100)
-		out = append(out, annotationView{ID: a.ID, Body: a.Body, Style: template.CSS(style)})
+		doc := markup.Parse(a.Body)
+		doc.Collect(refs)
+		out = append(out, annotationView{ID: a.ID, Style: template.CSS(style), doc: doc})
+	}
+	return out
+}
+
+// buildAnnotationEntries flattens boxes for an editable list.
+func buildAnnotationEntries(anns []models.Annotation) []annotationEntry {
+	if len(anns) == 0 {
+		return nil
+	}
+	out := make([]annotationEntry, 0, len(anns))
+	for _, a := range anns {
+		out = append(out, annotationEntry{Annotation: a, Text: markup.Parse(a.Body).Text()})
 	}
 	return out
 }
@@ -109,7 +136,8 @@ type detailData struct {
 	Sources           []models.ImageSource  // every origin this image came from, primary first
 	Annotations       []annotationView      // positional note boxes overlaid on the media
 	SourcePanels      []sourcePanelView     // per-source panels (commentary + pulled annotations) below the metadata
-	ManualAnnotations []models.Annotation   // operator-drawn boxes, edited under the image beside the Note
+	ManualAnnotations []annotationEntry     // operator-drawn boxes, edited under the image beside the Note
+	NoteHTML          template.HTML         // the operator's note, rendered
 	ImagePaths        []models.ImagePath
 	ThumbnailURL      string
 	PrevID            *int64
@@ -137,11 +165,16 @@ type detailData struct {
 	BackQS         template.URL
 	BackKVQS       template.URL
 	EnabledTaggers []tagger.TaggerStatus // enabled+available taggers offered in the auto-tag control
-	ImageTaggers   []string              // distinct tagger names currently on this image's auto-tags
-	ImageSources   []string              // distinct source labels currently carrying tags on this image (is_auto=0 with a tagger_name)
-	HasUserTags    bool                  // true when at least one operator-added manual tag is on this image
-	HasStaleTags   bool                  // true when at least one tag on this image is stale (a source dropped it)
-	TagSidebar     tagSidebar            // the sidebar's tag listing: sections, provenance markers, implied nesting
+	// TaggersPresent gates the auto-tag control's render where
+	// EnabledTaggers gates whether it is live; TaggerReason titles it
+	// while it is not.
+	TaggersPresent bool
+	TaggerReason   string
+	ImageTaggers   []string   // distinct tagger names currently on this image's auto-tags
+	ImageSources   []string   // distinct source labels currently carrying tags on this image (is_auto=0 with a tagger_name)
+	HasUserTags    bool       // true when at least one operator-added manual tag is on this image
+	HasStaleTags   bool       // true when at least one tag on this image is stale (a source dropped it)
+	TagSidebar     tagSidebar // the sidebar's tag listing: sections, provenance markers, implied nesting
 	// Lookup is the image's scheduled-lookup state: the history line under
 	// the lookup button and the control in the Sources field.
 	Lookup lookupView
@@ -432,7 +465,8 @@ func (s *Server) detailHandler(w http.ResponseWriter, r *http.Request) {
 		comfyNodes = meta.ParseComfyWorkflowNodes(comfyMeta.RawWorkflow)
 	}
 
-	enabledTaggers := tagger.EnabledTaggersForGallery(s.cfgSnapshot(), s.activeName)
+	taggerCfg := s.cfgSnapshot()
+	enabledTaggers := tagger.EnabledTaggersForGallery(taggerCfg, s.activeName)
 	imageTaggers := distinctTaggerNames(imageTags, true)
 	imageSources := distinctTaggerNames(imageTags, false)
 	hasUserTags := false
@@ -461,13 +495,33 @@ func (s *Server) detailHandler(w http.ResponseWriter, r *http.Request) {
 		k := [2]string{a.Site, a.PostID}
 		annBySource[k] = append(annBySource[k], a)
 	}
+	// Every body the page renders is parsed here so the references they carry
+	// resolve against the gallery in one batch rather than one lookup each.
+	mkRefs := markup.NewRefs()
+	noteDoc := markup.Parse(img.Note)
+	noteDoc.Collect(mkRefs)
+	annotationViews := buildAnnotationViews(img, annotations, mkRefs)
 	var sourcePanels []sourcePanelView
 	for _, src := range sources {
 		boxes := annBySource[[2]string{src.Site, src.PostID}]
 		if src.Commentary == "" && src.Original == "" && len(boxes) == 0 {
 			continue
 		}
-		sourcePanels = append(sourcePanels, sourcePanelView{ImageSource: src, Annotations: boxes, OriginalLines: buildOriginalLines(src.Original)})
+		doc := markup.Parse(src.Commentary)
+		doc.Collect(mkRefs)
+		sourcePanels = append(sourcePanels, sourcePanelView{
+			ImageSource:   src,
+			Annotations:   buildAnnotationEntries(boxes),
+			OriginalLines: buildOriginalLines(src.Original),
+			doc:           doc,
+		})
+	}
+	mkRes := s.resolveMarkup(mkRefs)
+	for i := range annotationViews {
+		annotationViews[i].Body = annotationViews[i].doc.Render(mkRes)
+	}
+	for i := range sourcePanels {
+		sourcePanels[i].CommentaryHTML = sourcePanels[i].doc.Render(mkRes)
 	}
 
 	noPreview, previewNote := false, ""
@@ -517,9 +571,10 @@ func (s *Server) detailHandler(w http.ResponseWriter, r *http.Request) {
 		ResumePage:        resumePage(img),
 		Collections:       collections,
 		Sources:           sources,
-		Annotations:       buildAnnotationViews(img, annotations),
+		Annotations:       annotationViews,
 		SourcePanels:      sourcePanels,
-		ManualAnnotations: manualAnnotations,
+		ManualAnnotations: buildAnnotationEntries(manualAnnotations),
+		NoteHTML:          noteDoc.Render(mkRes),
 		ImagePaths:        imagePaths,
 		ThumbnailURL:      fmt.Sprintf("/thumbnails/%s/%d.jpg", s.activeName, id),
 		PrevID:            prevID,
@@ -538,6 +593,8 @@ func (s *Server) detailHandler(w http.ResponseWriter, r *http.Request) {
 		BackQS:            back.QueryString("?"),
 		BackKVQS:          back.QueryString("&"),
 		EnabledTaggers:    enabledTaggers,
+		TaggersPresent:    tagger.Present(taggerCfg),
+		TaggerReason:      tagger.UnavailableReason(taggerCfg),
 		ImageTaggers:      imageTaggers,
 		ImageSources:      imageSources,
 		HasUserTags:       hasUserTags,
@@ -689,4 +746,35 @@ func adjacentSearchQuery(queryStr, sortStr, orderStr, seedStr string, ceiling *C
 		}
 	}
 	return sq
+}
+
+// md5CellGet computes and stores the image's md5, then renders the
+// metadata row's cell. The detail page mounts it on load for rows that
+// predate the column, so an operator never has to run the backfill just
+// to read one digest. A row over the ingest cap is left to the backfill
+// job instead: reading it here would tie up a request per view for a file
+// the operator only opened.
+func (s *Server) md5CellGet(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathInt64(w, r, "id")
+	if !ok {
+		return
+	}
+	cx := s.Active()
+	if cx == nil || cx.DB == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	if maxMB := s.maxFileSizeMB(); maxMB > 0 {
+		var size int64
+		if err := cx.DB.Read.QueryRow(`SELECT file_size FROM images WHERE id = ?`, id).Scan(&size); err == nil &&
+			size > int64(maxMB)*1024*1024 {
+			s.renderTemplate(w, "partials/md5_cell.html", map[string]any{"Deferred": true})
+			return
+		}
+	}
+	sum, err := gallery.ComputeAndStoreMD5(r.Context(), cx.DB, id)
+	if err != nil {
+		logx.Debugf("md5 cell %d: %v", id, err)
+	}
+	s.renderTemplate(w, "partials/md5_cell.html", map[string]any{"MD5": sum})
 }

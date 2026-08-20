@@ -64,7 +64,14 @@
       <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
       <div class="field">
         <input type="text" name="name" id="rename-image-name" class="upload-wide-input"
-               placeholder="New file name..." required autocomplete="off">
+               placeholder="New file name or template..." required autocomplete="off">
+        {{template "partials/name_tokens.html" (dict "Target" "rename-image-name")}}
+        <div id="rename-image-preview"
+             hx-get="/internal/name/preview"
+             hx-trigger="input delay:200ms from:#rename-image-name"
+             hx-target="this"
+             hx-vals='js:{tmpl: document.getElementById("rename-image-name").value, scope: "rename", ids: "{{.ImageID}}"}'
+             hx-swap="innerHTML"></div>
       </div>
       <div class="dialog-actions">
         <button type="submit">Rename</button>
@@ -92,6 +99,13 @@
                hx-vals='js:{prefix: document.getElementById("move-image-folder").value}'
                onkeydown="handleSuggestKey(event, 'move-image-suggest', 'move-image-folder')">
         <div id="move-image-suggest" class="suggest-dropdown folder-suggest-dropdown"></div>
+        {{template "partials/name_tokens.html" (dict "Target" "move-image-folder")}}
+        <div id="move-image-preview"
+             hx-get="/internal/name/preview"
+             hx-trigger="input delay:200ms from:#move-image-folder"
+             hx-target="this"
+             hx-vals='js:{tmpl: document.getElementById("move-image-folder").value, scope: "move", ids: "{{.ImageID}}"}'
+             hx-swap="innerHTML"></div>
       </div>
       <div class="dialog-actions">
         <button type="submit">Move</button>

@@ -1,0 +1,25 @@
+{{/* What each backend has already done, beside the button that does it by
+     hand. The pending pill above covers the first few minutes of an attempt
+     and then abandons it at its poll cap; this reads from the recorded row,
+     so an image never looks like nothing ever happened. */}}
+{{define "partials/lookup_history.html"}}
+{{$l := .Lookup}}
+{{$csrf := .CSRFToken}}
+<div id="lookup-history"{{if .OOB}} hx-swap-oob="true"{{end}}>
+  {{range $l.Backends}}
+  {{if .Tried}}
+  <div class="field-hint lookup-history">{{.Label}}:
+    {{if not .QueuedAt.IsZero}}queued {{localTime .QueuedAt}}, waiting on monloader.
+    {{else if .Exhausted}}nothing found after {{.Attempts}} tries, last on {{localDate .LastAt}}.
+    {{else}}{{lookupResultLabel .LastResult}} on {{localDate .LastAt}}{{if not .NextDueAt.IsZero}}, due again {{localDate .NextDueAt}}{{end}}.{{end}}
+    {{if and .Exhausted $l.Candidate}}<form hx-post="/images/{{$l.ImageID}}/scheduled-lookup/reset" hx-target="#scheduled-lookup" hx-swap="outerHTML"
+          hx-headers='{"X-CSRF-Token":"{{$csrf}}"}' style="display:inline">
+      <input type="hidden" name="_csrf" value="{{$csrf}}">
+      <input type="hidden" name="backend" value="{{.Backend}}">
+      <button type="submit" class="btn-link-accent" title="Put this image back in the schedule">[look again]</button>
+    </form>{{end}}
+  </div>
+  {{end}}
+  {{end}}
+</div>
+{{end}}

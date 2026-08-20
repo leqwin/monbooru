@@ -307,12 +307,11 @@ func (s *Server) scheduledSync(cx *galleryCtx) error {
 	if err != nil {
 		return err
 	}
-	result, err := cx.Sync(ctx, s.maxFileSizeMB(), s.jobs.Update)
+	result, err := cx.Sync(ctx, s.maxFileSizeMB(), s.ingestNaming(cx.Name), s.jobs.Update)
 	// Match the user-trigger handlers' shape: ctx cancellation produces
 	// a clean Complete summary, only real failures fall to Fail().
 	if ctx.Err() != nil {
-		s.jobs.Complete(fmt.Sprintf("[%s] sync cancelled (%d added, %d missing, %d moved)",
-			cx.Name, result.Added, result.Removed, result.Moved))
+		s.jobs.Complete(fmt.Sprintf("[%s] sync cancelled (%s)", cx.Name, result.Summary()))
 		return nil
 	}
 	if err != nil {
@@ -320,8 +319,7 @@ func (s *Server) scheduledSync(cx *galleryCtx) error {
 		logx.Warnf("scheduler sync %q: %v", cx.Name, err)
 		return err
 	}
-	s.jobs.Complete(fmt.Sprintf("[%s] %d added, %d missing, %d moved",
-		cx.Name, result.Added, result.Removed, result.Moved))
+	s.jobs.Complete(fmt.Sprintf("[%s] %s", cx.Name, result.Summary()))
 	return nil
 }
 

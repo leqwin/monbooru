@@ -61,26 +61,15 @@ func SourceLabelCountsUnderQuery(database *db.DB, limit int, excludeIDs []int64)
 	}
 	exclude, args := excludeNotExists("s.image_id", excludeIDs)
 	args = append(args, limit)
-	rows, err := database.Read.Query(
+	return db.QueryAll(database.Read, func(rows *sql.Rows) (SourceLabelCount, error) {
+		var c SourceLabelCount
+		err := rows.Scan(&c.Source, &c.Count)
+		return c, err
+	},
 		`SELECT s.site, COUNT(DISTINCT s.image_id) c FROM image_sources s
 		 WHERE s.site != '' AND EXISTS (SELECT 1 FROM images i WHERE i.id = s.image_id AND i.is_missing = 0)`+exclude+`
 		 GROUP BY s.site ORDER BY c DESC, s.site ASC LIMIT ?`,
-		args...,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	var out []SourceLabelCount
-	for rows.Next() {
-		var label string
-		var count int
-		if err := rows.Scan(&label, &count); err != nil {
-			return out, err
-		}
-		out = append(out, SourceLabelCount{Source: label, Count: count})
-	}
-	return out, rows.Err()
+		args...)
 }
 
 // FolderTreeUnder mirrors FolderTree with the ceiling predicate folded
@@ -93,17 +82,11 @@ func FolderTreeUnder(database *db.DB, excludeIDs []int64) ([]FolderNode, error) 
 		return FolderTree(database)
 	}
 	where, args := excludeNotExists("i.id", excludeIDs)
-	rows, err := database.Read.Query(
+	flat, err := db.QueryAll(database.Read, scanFolderRow,
 		`SELECT COALESCE(i.folder_path, ''), COUNT(*) FROM images i
 		 WHERE i.is_missing = 0`+where+`
 		 GROUP BY i.folder_path ORDER BY i.folder_path`,
-		args...,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	flat, err := scanFolderRows(rows)
+		args...)
 	if err != nil {
 		return nil, err
 	}
@@ -115,19 +98,12 @@ type folderCount struct {
 	count int
 }
 
-// scanFolderRows drains the (path, count) result set produced by
-// FolderTree's and FolderTreeUnder's SELECTs.
-func scanFolderRows(rows *sql.Rows) ([]folderCount, error) {
-	var flat []folderCount
-	for rows.Next() {
-		var fc folderCount
-		if err := rows.Scan(&fc.path, &fc.count); err != nil {
-			return nil, fmt.Errorf("scanning folder row: %w", err)
-		}
-		flat = append(flat, fc)
+// scanFolderRow reads one (path, count) row of FolderTree's and
+// FolderTreeUnder's shared projection.
+func scanFolderRow(rows *sql.Rows) (folderCount, error) {
+	var fc folderCount
+	if err := rows.Scan(&fc.path, &fc.count); err != nil {
+		return fc, fmt.Errorf("scanning folder row: %w", err)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return flat, nil
+	return fc, nil
 }

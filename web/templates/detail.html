@@ -209,6 +209,7 @@
       <div class="field">
         <label>Commentary text</label>
         <textarea id="commentary-body" name="commentary" rows="6" maxlength="10000"></textarea>
+        {{template "partials/markup_bar.html" (dict "Target" "commentary-body" "ImageID" .Image.ID)}}
       </div>
       <div id="commentary-error"></div>
       <div class="dialog-actions">
@@ -259,7 +260,8 @@
       </div>
       <div class="field">
         <label>Text</label>
-        <textarea id="annotation-body" name="body" rows="3" maxlength="2000"></textarea>
+        <textarea id="annotation-body" name="body" rows="3" maxlength="4000"></textarea>
+        {{template "partials/markup_bar.html" (dict "Target" "annotation-body" "ImageID" .Image.ID)}}
       </div>
       <div id="annotation-error"></div>
       <div class="dialog-actions">
@@ -279,6 +281,7 @@
       <div class="field">
         <label>Your note (max 10000 chars)</label>
         <textarea id="note-body" name="note" rows="6" maxlength="10000"></textarea>
+        {{template "partials/markup_bar.html" (dict "Target" "note-body" "ImageID" .Image.ID)}}
       </div>
       <div id="note-error"></div>
       <div class="dialog-actions">
@@ -562,7 +565,7 @@
             <button type="button" class="btn-link-accent btn-edit-note" data-note="" title="Add note">[+ add note]</button>
             {{end}}
           </div>
-          {{if .Image.Note}}<div class="commentary-body">{{.Image.Note}}</div>{{end}}
+          {{if .Image.Note}}<div class="commentary-body">{{.NoteHTML}}</div>{{end}}
         </div>
         <div class="commentary-block detail-annotations">
           <div class="commentary-head">
@@ -598,29 +601,24 @@
             <div id="tag-suggest-dropdown" class="suggest-dropdown tag-suggest-dropdown"></div>
           </div>
           <button type="submit">Add</button>
-          {{if .EnabledTaggers}}
-          <button type="button" class="btn-autotag" title="Auto-tag this image (t)"
-                  onclick="document.getElementById('autotag-dialog').showModal()">Auto-tag</button>
+          {{if .TaggersPresent}}
+          <button type="button" class="btn-autotag"
+                  {{if .EnabledTaggers}}title="Auto-tag this image (t)"
+                  {{else}}disabled title="{{.TaggerReason}}"
+                  {{end}}onclick="document.getElementById('autotag-dialog').showModal()">Auto-tag</button>
           {{end}}
-          {{if .MonloaderUsable}}
+          {{if .MonloaderPaired}}
           <button type="button" class="btn-hash-lookup monloader-accent"
-                  title="Find tags and sources for this file on online boorus via monloader"
-                  hx-post="/images/{{.Image.ID}}/lookup" hx-vals='{"backend":"booru"}'
+                  {{if .MonloaderUsable}}title="Find tags and sources for this file on online boorus via monloader"
+                  {{else}}disabled title="{{monloaderOffReason .MonloaderConn}}"
+                  {{end}}hx-post="/images/{{.Image.ID}}/lookup" hx-vals='{"backend":"booru"}'
                   hx-target="#fetch-pending" hx-swap="innerHTML"
                   hx-headers='{"X-CSRF-Token":"{{.CSRFToken}}"}'
                   hx-confirm="Find tags for this file on online boorus?"
                   data-confirm-ok="Lookup online boorus">Lookup online boorus</button>
           {{end}}
         </form>
-        {{if and .MonloaderUsable .Lookup.Tried}}
-        {{/* The pill above covers the first few minutes of an attempt and
-             then abandons it at its poll cap; this reads from the recorded
-             row, so an image never looks like nothing ever happened. */}}
-        <div class="field-hint lookup-history">
-          {{if not .Lookup.QueuedAt.IsZero}}Lookup queued {{localTime .Lookup.QueuedAt}}, waiting on monloader.
-          {{else}}Last looked up {{localDate .Lookup.LastAt}}, {{lookupResultLabel .Lookup.LastResult}}.{{end}}
-        </div>
-        {{end}}
+        {{if .MonloaderPaired}}{{template "partials/lookup_history.html" (dict "Lookup" .Lookup "CSRFToken" .CSRFToken)}}{{end}}
         {{if .MonloaderPaired}}<div id="fetch-pending" class="fetch-status"></div>{{end}}
       </div>
 
@@ -787,6 +785,26 @@
         var ed = e.target.closest('.btn-edit-annotation');
         if (ed) openAnnotationDialog(ed.dataset.id, ed.dataset.x, ed.dataset.y, ed.dataset.w, ed.dataset.h, ed.dataset.body);
       });
+      // The format bar wraps the selection, leaving the caret where the next
+      // thing to type goes: inside the link's value, or between the brackets.
+      document.addEventListener('click', function(e) {
+        var btn = e.target.closest && e.target.closest('.markup-bar [data-wrap]');
+        if (!btn) return;
+        var ta = document.getElementById(btn.closest('.markup-bar').dataset.target);
+        if (!ta) return;
+        var kind = btn.dataset.wrap, start = ta.selectionStart, end = ta.selectionEnd;
+        var sel = ta.value.slice(start, end), open, close, caret;
+        if (kind === 'image') {
+          open = '[image:'; close = ']'; sel = ''; caret = start + open.length;
+        } else if (kind === 'tag' || kind === 'url') {
+          open = '[' + kind + '=]'; close = '[/' + kind + ']'; caret = start + open.length - 1;
+        } else {
+          open = '[' + kind + ']'; close = '[/' + kind + ']'; caret = start + open.length + sel.length;
+        }
+        ta.value = ta.value.slice(0, start) + open + sel + close + ta.value.slice(end);
+        ta.focus();
+        ta.setSelectionRange(caret, caret);
+      });
       // Hovering an annotation entry (source panel or operator list) highlights
       // its box on the image.
       function setAnnHighlight(id, on) {
@@ -846,8 +864,20 @@
             <tr><th>File size</th><td>{{humanBytes .Image.FileSize}}</td></tr>
             <tr><th>SHA-256</th><td>
               <button type="button" class="mono-small sha-truncated sha-copyable"
-                      data-copy="{{.Image.SHA256}}" title="Click to copy">{{.Image.SHA256}}</button>
+                      data-copy="{{.Image.SHA256}}" title="{{.Image.SHA256}} (click to copy)">{{elideHash .Image.SHA256}}</button>
               <span class="copy-flash" hidden>copied</span>
+            </td></tr>
+            <tr><th>MD5</th><td>
+              {{if .Image.MD5}}
+                {{template "partials/md5_cell.html" (dict "MD5" .Image.MD5)}}
+              {{else}}
+                {{/* Filled on first view rather than behind a button: the
+                     digest is what the row is for, and the read only
+                     happens for an image someone opened. */}}
+                <span hx-get="/internal/images/{{.Image.ID}}/md5" hx-trigger="load" hx-swap="outerHTML">
+                  <span class="field-hint">computing...</span>
+                </span>
+              {{end}}
             </td></tr>
             {{if .NoPreview}}
             <tr><th>Preview</th><td class="meta-prose"><span class="field-hint">none{{with .PreviewNote}} - {{.}}{{end}}</span></td></tr>
@@ -896,52 +926,70 @@
                        verbs sit indented on their own line so no origin ever
                        has to ellipsize actions away. */}}
                   <span class="source-line">
-                    {{if .Site}}<a href="/?q={{urlQ (printf "source:\"%s\"" (qval .Site))}}" class="meta-source-value" title="Search this source">{{.Site}}</a>{{else}}<a href="{{.URL}}" target="_blank" rel="noopener noreferrer" class="meta-url-value">{{.URL}}</a>{{end}}{{if gt .Similarity 0.0}} <span class="field-hint" title="Found by image similarity at {{printf "%.0f" .Similarity}}%">~{{printf "%.0f" .Similarity}}%</span>{{end}}{{if eq .MD5Match "differ"}} <span class="field-hint" title="The source serves a different file (md5 {{.MD5}})">file differs</span>{{end}}<span class="source-line-sp"></span>{{if and .Site .URL}}<a href="{{.URL}}" target="_blank" rel="noopener noreferrer" class="btn-link-accent" title="{{.URL}}">[open]</a>{{end}}
+                    {{if .Site}}<a href="/?q={{urlQ (printf "source:\"%s\"" (qval .Site))}}" class="meta-source-value" title="Search this source">{{.Site}}</a>{{else}}<a href="{{.URL}}" target="_blank" rel="noopener noreferrer" class="meta-url-value">{{.URL}}</a>{{end}}{{if gt .Similarity 0.0}} <span class="field-hint" title="Found by image similarity at {{printf "%.0f" .Similarity}}%">~{{printf "%.0f" .Similarity}}%</span>{{end}}{{if eq .MD5Match "differ"}} <span class="field-hint" title="The source serves a different file (md5 {{.MD5}})">file differs</span>{{end}}{{if .UpgradeKept}} <span class="field-hint" title="You kept the local file; the upgrade is offered again if the post serves something new">keeping local</span>{{end}}<span class="source-line-sp"></span>{{if and .Site .URL}}<a href="{{.URL}}" target="_blank" rel="noopener noreferrer" class="btn-link-accent" title="{{.URL}}">[open]</a>{{end}}
                   </span>
                   <span class="source-actions">
-                  {{if gt $i 0}}<form method="POST" action="/images/{{$.Image.ID}}/sources/primary"
-                        hx-post="/images/{{$.Image.ID}}/sources/primary" hx-swap="none"
-                        hx-headers='{"X-CSRF-Token":"{{$.CSRFToken}}"}'
-                        style="display:inline">
-                    <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
-                    <input type="hidden" name="site" value="{{.Site}}">
-                    <input type="hidden" name="post_id" value="{{.PostID}}">
-                    <button type="submit" class="btn-link-accent" title="Make this the primary source">[set primary]</button>
-                  </form>{{end}}
-                  {{if not (isPTRSite .Site)}}<button type="button" class="btn-link-accent btn-edit-source" data-site="{{.Site}}" data-post="{{.PostID}}" data-url="{{.URL}}" title="Edit">[edit]</button>{{end}}
-                  {{if and .URL $.MonloaderUsable}}<form hx-post="/images/{{$.Image.ID}}/sources/fetch"
-                        hx-target="#fetch-status" hx-swap="innerHTML"
-                        hx-headers='{"X-CSRF-Token":"{{$.CSRFToken}}"}' style="display:inline">
-                    <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
-                    <input type="hidden" name="url" value="{{.URL}}">
-                    <button type="submit" class="btn-link-accent monloader-accent" title="Refresh tags from this source via monloader">[refresh]</button>
-                  </form>{{else if and $.MonloaderUsable (isPTRSite .Site)}}<form hx-post="/images/{{$.Image.ID}}/lookup"
-                        hx-target="#fetch-status" hx-swap="innerHTML"
-                        hx-headers='{"X-CSRF-Token":"{{$.CSRFToken}}"}' style="display:inline">
-                    <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
-                    <input type="hidden" name="backend" value="ptr">
-                    <button type="submit" class="btn-link-accent monloader-accent" title="Refresh tags from the Public Tag Repository via monloader">[refresh]</button>
-                  </form>{{end}}
-                  {{if and $.MonloaderUsable .UpgradeEligible}}<form hx-post="/images/{{$.Image.ID}}/replace"
-                        hx-target="#fetch-status" hx-swap="innerHTML"
-                        hx-headers='{"X-CSRF-Token":"{{$.CSRFToken}}"}'
-                        hx-confirm="Replace the file with the {{if gt .Similarity 0.0}}original from {{if .Site}}{{.Site}}{{else}}this source{{end}} (~{{printf "%.0f" .Similarity}}% match){{else}}one {{if .Site}}{{.Site}}{{else}}this source{{end}} serves now{{end}}? The current file is overwritten."
-                        data-confirm-ok="Upgrade" style="display:inline">
-                    <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
-                    <input type="hidden" name="site" value="{{.Site}}">
-                    <input type="hidden" name="post_id" value="{{.PostID}}">
-                    <button type="submit" class="btn-link-accent monloader-accent" title="Replace the local file with the one this source serves via monloader">[upgrade]</button>
-                  </form>{{end}}
-                  <form method="POST" action="/images/{{$.Image.ID}}/sources/remove"
-                        hx-post="/images/{{$.Image.ID}}/sources/remove" hx-swap="none"
-                        hx-headers='{"X-CSRF-Token":"{{$.CSRFToken}}"}'
-                        hx-confirm="Remove this source?" data-confirm-ok="Remove"
-                        style="display:inline">
-                    <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
-                    <input type="hidden" name="site" value="{{.Site}}">
-                    <input type="hidden" name="post_id" value="{{.PostID}}">
-                    <button type="submit" class="btn-link-accent" title="Remove this source">[×]</button>
-                  </form>
+                    {{/* Two groups, so the wrap the row needs falls between
+                         what edits it here and what reaches monloader. */}}
+                    <span class="source-verbs">
+                      {{if gt $i 0}}<form method="POST" action="/images/{{$.Image.ID}}/sources/primary"
+                          hx-post="/images/{{$.Image.ID}}/sources/primary" hx-swap="none"
+                          hx-headers='{"X-CSRF-Token":"{{$.CSRFToken}}"}'
+                          style="display:inline">
+                      <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+                      <input type="hidden" name="site" value="{{.Site}}">
+                      <input type="hidden" name="post_id" value="{{.PostID}}">
+                      <button type="submit" class="btn-link-accent" title="Make this the primary source">[set primary]</button>
+                    </form>{{end}}
+                      {{if not (isPTRSite .Site)}}<button type="button" class="btn-link-accent btn-edit-source" data-site="{{.Site}}" data-post="{{.PostID}}" data-url="{{.URL}}" title="Edit">[edit]</button>{{end}}
+                      <form method="POST" action="/images/{{$.Image.ID}}/sources/remove"
+                          hx-post="/images/{{$.Image.ID}}/sources/remove" hx-swap="none"
+                          hx-headers='{"X-CSRF-Token":"{{$.CSRFToken}}"}'
+                          hx-confirm="Remove this source?" data-confirm-ok="Remove"
+                          style="display:inline">
+                      <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+                      <input type="hidden" name="site" value="{{.Site}}">
+                      <input type="hidden" name="post_id" value="{{.PostID}}">
+                      <button type="submit" class="btn-link-accent" title="Remove this source">[×]</button>
+                    </form>
+                    </span>
+                    <span class="source-verbs">
+                      {{if and .URL $.MonloaderPaired}}<form hx-post="/images/{{$.Image.ID}}/sources/fetch"
+                          hx-target="#fetch-status" hx-swap="innerHTML"
+                          hx-headers='{"X-CSRF-Token":"{{$.CSRFToken}}"}' style="display:inline">
+                      <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+                      <input type="hidden" name="url" value="{{.URL}}">
+                      <button type="submit" class="btn-link-accent monloader-accent"{{if not $.MonloaderUsable}} disabled{{end}} title="{{if $.MonloaderUsable}}Refresh tags from this source via monloader{{else}}{{monloaderOffReason $.MonloaderConn}}{{end}}">[refresh]</button>
+                    </form>{{else if and $.MonloaderPaired (isPTRSite .Site)}}<form hx-post="/images/{{$.Image.ID}}/lookup"
+                          hx-target="#fetch-status" hx-swap="innerHTML"
+                          hx-headers='{"X-CSRF-Token":"{{$.CSRFToken}}"}' style="display:inline">
+                      <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+                      <input type="hidden" name="backend" value="ptr">
+                      <button type="submit" class="btn-link-accent monloader-accent"{{if not $.MonloaderUsable}} disabled{{end}} title="{{if $.MonloaderUsable}}Refresh tags from the Public Tag Repository via monloader{{else}}{{monloaderOffReason $.MonloaderConn}}{{end}}">[refresh]</button>
+                    </form>{{end}}
+                      {{if and $.MonloaderPaired (upgradable .)}}<form hx-post="/images/{{$.Image.ID}}/replace"
+                          hx-target="#fetch-status" hx-swap="innerHTML"
+                          hx-headers='{"X-CSRF-Token":"{{$.CSRFToken}}"}'
+                          hx-confirm="Replace the file with the {{if gt .Similarity 0.0}}original from {{if .Site}}{{.Site}}{{else}}this source{{end}} (~{{printf "%.0f" .Similarity}}% match){{else}}one {{if .Site}}{{.Site}}{{else}}this source{{end}} serves now{{end}}?{{upgradeCompare . $.Image}}The current file is overwritten."
+                          data-confirm-ok="Upgrade" data-confirm-alt="Keep local"
+                          data-confirm-alt-url="/images/{{$.Image.ID}}/sources/keep" data-confirm-alt-value="keep=1"
+                          style="display:inline">
+                      <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+                      <input type="hidden" name="site" value="{{.Site}}">
+                      <input type="hidden" name="post_id" value="{{.PostID}}">
+                      <button type="submit" class="btn-link-accent monloader-accent"{{if not $.MonloaderUsable}} disabled{{end}} title="{{if $.MonloaderUsable}}Replace the local file with the one this source serves via monloader{{else}}{{monloaderOffReason $.MonloaderConn}}{{end}}">[upgrade]</button>
+                    </form>{{end}}
+                      {{if and $.MonloaderPaired .UpgradeKept}}<form method="POST" action="/images/{{$.Image.ID}}/sources/keep"
+                          hx-post="/images/{{$.Image.ID}}/sources/keep" hx-swap="none"
+                          hx-headers='{"X-CSRF-Token":"{{$.CSRFToken}}"}'
+                          style="display:inline">
+                      <input type="hidden" name="_csrf" value="{{$.CSRFToken}}">
+                      <input type="hidden" name="site" value="{{.Site}}">
+                      <input type="hidden" name="post_id" value="{{.PostID}}">
+                      <input type="hidden" name="keep" value="0">
+                      <button type="submit" class="btn-link-accent" title="Offer this upgrade again">[allow upgrade]</button>
+                    </form>{{end}}
+                    </span>
                   </span>
                 </li>
                 {{end}}
@@ -950,9 +998,13 @@
               <div class="source-add-row">
                 {{if not .Sources}}<span class="field-hint">(none)</span>{{end}}
                 <button type="button" class="btn-link-accent btn-add-source" title="Add a source">[+ add]</button>
-                {{if and .MonloaderUsable .Lookup.ScheduleOn}}{{template "partials/scheduled_lookup.html" (dict "Lookup" .Lookup "CSRFToken" .CSRFToken)}}{{end}}
               </div>
             </td></tr>
+            {{if and .MonloaderPaired .Lookup.Candidate}}
+            <tr><th>Scheduled</th><td>
+              {{template "partials/scheduled_lookup.html" (dict "Lookup" .Lookup "CSRFToken" .CSRFToken)}}
+            </td></tr>
+            {{end}}
             <tr><th>Collections</th><td>
               {{if .Collections}}
               <ul class="collection-list">
@@ -1167,7 +1219,7 @@
               </form>{{end}}
             </td></tr>
             <tr><th>Commentary</th><td>
-              {{if .Commentary}}<div class="commentary-body">{{.Commentary}}</div>{{end}}
+              {{if .Commentary}}<div class="commentary-body">{{.CommentaryHTML}}</div>{{end}}
               <button type="button" class="btn-link-accent btn-edit-commentary" data-site="{{.Site}}" data-post="{{.PostID}}" data-commentary="{{.Commentary}}" title="{{if .Commentary}}Edit commentary{{else}}Add commentary{{end}}">{{if .Commentary}}[edit]{{else}}[+ add]{{end}}</button>
               {{if .Commentary}}<form method="POST" action="/images/{{$.Image.ID}}/commentary/remove"
                     hx-post="/images/{{$.Image.ID}}/commentary/remove" hx-swap="none"
@@ -1208,7 +1260,7 @@
 
 {{define "annotation_entry"}}
 <li class="collection-item annotation-entry" data-ann-id="{{.Ann.ID}}">
-  <span class="meta-annotation-body" title="{{.Ann.Body}}">{{if .Ann.Body}}{{.Ann.Body}}{{else}}(no text){{end}}</span>
+  <span class="meta-annotation-body" title="{{.Ann.Text}}">{{if .Ann.Text}}{{.Ann.Text}}{{else}}(no text){{end}}</span>
   <button type="button" class="btn-link-accent btn-edit-annotation" data-id="{{.Ann.ID}}" data-x="{{.Ann.X}}" data-y="{{.Ann.Y}}" data-w="{{.Ann.W}}" data-h="{{.Ann.H}}" data-body="{{.Ann.Body}}" title="Edit">[edit]</button>
   <form method="POST" action="/images/{{.ImageID}}/annotations/remove"
         hx-post="/images/{{.ImageID}}/annotations/remove" hx-swap="none"

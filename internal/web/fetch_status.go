@@ -286,27 +286,18 @@ func similarityLookupRan(trail string) bool {
 // queue's stable error codes; map the actionable ones to a plain sentence and
 // fall back to the recorded message otherwise (the enrich path already supplies
 // a readable one for a hash mismatch or an apply error).
+var fetchFailureMessages = map[string]string{
+	"unsupported_url":      "monloader can't fetch this source URL.",
+	"network_unreachable":  "monloader couldn't reach the source.",
+	"auth_required":        "The source needs a login monloader doesn't have.",
+	"blocked":              "The source blocked monloader's fetch.",
+	"rate_limited":         "The source is rate-limiting; try again later.",
+	"download_failed":      "The source fetch failed on monloader.",
+	"monbooru_unreachable": "monloader fetched the source but couldn't apply the tags.",
+	"monbooru_rejected":    "monloader fetched the source but couldn't apply the tags.",
+	"mapping_failed":       "monloader couldn't read the source's metadata.",
+}
+
 func fetchFailureMessage(state, msg string) string {
-	switch state {
-	case "unsupported_url":
-		return "monloader can't fetch this source URL."
-	case "network_unreachable":
-		return "monloader couldn't reach the source."
-	case "auth_required":
-		return "The source needs a login monloader doesn't have."
-	case "blocked":
-		return "The source blocked monloader's fetch."
-	case "rate_limited":
-		return "The source is rate-limiting; try again later."
-	case "download_failed":
-		return "The source fetch failed on monloader."
-	case "monbooru_unreachable", "monbooru_rejected":
-		return "monloader fetched the source but couldn't apply the tags."
-	case "mapping_failed":
-		return "monloader couldn't read the source's metadata."
-	}
-	if msg != "" {
-		return msg
-	}
-	return "The source fetch failed."
+	return cmp.Or(fetchFailureMessages[state], msg, "The source fetch failed.")
 }

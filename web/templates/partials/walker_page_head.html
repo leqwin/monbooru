@@ -1,0 +1,29 @@
+{{/* The chrome both duplicate walkers wear: the Relations back-link, the
+     page title, the delete-all toolbar and the flash slot. Kind picks
+     which walker's copy and action it is - the two pages differ in their
+     table and nothing else. */}}
+{{define "walker_page_head"}}
+{{template "layout_head" .}}
+<div id="sidebar-inner"></div>
+{{template "layout_mid" .}}
+
+<div id="relations-walker-page" data-esc-back="/relations#duplicates">
+  <div class="detail-topbar">
+    <div class="detail-nav-group">
+      <a href="/relations#duplicates" class="back-link">‹ Relations</a>
+      <span class="detail-nav-sep">/</span>
+      <strong class="walker-page-title">{{if eq .Kind "sha256"}}Duplicate files{{else}}Duplicate images{{end}}</strong>
+    </div>
+    {{if .HasRows}}
+    <div class="detail-topbar-right">
+      {{if eq .Kind "sha256"}}
+      {{template "partials/bulk_delete_form.html" (dict "CSRFToken" .CSRFToken "Action" "/relations/file-duplicates/remove" "Confirm" "Remove every non-canonical duplicate file and its bytes from disk? The canonical path stays." "ConfirmOK" "Remove all" "Label" "Delete all duplicate files" "All" true)}}
+      {{else}}
+      {{template "partials/bulk_delete_form.html" (dict "CSRFToken" .CSRFToken "Action" "/relations/duplicates/marked/delete-all" "Target" "#flash-walker-marked" "Confirm" "Delete every non-original member of every duplicate-image group? Files are removed from disk." "ConfirmOK" "Delete all" "Label" "Delete all duplicate images")}}
+      {{end}}
+    </div>
+    {{end}}
+  </div>
+
+  <div id="flash-walker-{{.Kind}}"></div>
+{{end}}

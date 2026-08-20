@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"strings"
 
@@ -28,17 +29,50 @@ func (s *Server) ptrLookupSearchPost(w http.ResponseWriter, r *http.Request) {
 	s.startTagScopeRun(w, r, s.runPTRTagLookup)
 }
 
-// ptrLookupTagPost runs the same sweep for one tag row.
+// ptrLookupTagPost runs the same sweep for one tag row. An `as` field
+// names another spelling to ask the PTR under - the one the look-up dialog
+// previewed - instead of the tag's own name.
 func (s *Server) ptrLookupTagPost(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathInt64(w, r, "id")
 	if !ok {
 		return
 	}
+	if !parseFormOK(w, r) {
+		return
+	}
+	as := strings.TrimSpace(r.FormValue("as"))
+	if as != "" {
+		form, ok := s.ptrSpellingForm(as)
+		if !ok {
+			http.Error(w, "not a tag name", http.StatusBadRequest)
+			return
+		}
+		as = form
+	}
 	if !s.startJob(w, models.JobTypeTag) {
 		return
 	}
-	go s.runPTRTagLookup([]int64{id})
+	go s.runPTRTagSweep([]int64{id}, as)
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// ptrSpellingForm validates an operator-typed spelling and returns it in
+// monbooru form: the normalized bare name for general, category:name
+// otherwise.
+func (s *Server) ptrSpellingForm(input string) (string, bool) {
+	input = strings.TrimSpace(input)
+	catID, bare, ok := s.splitCategoryTag(input)
+	if !ok {
+		return "", false
+	}
+	norm, err := tags.ValidateTagName(bare)
+	if err != nil {
+		return "", false
+	}
+	if catID == s.Active().GeneralCategoryID {
+		return norm, true
+	}
+	return input[:len(input)-len(bare)] + norm, true
 }
 
 // ptrLookupCand is one tag headed for monloader's PTR graph, with its name
@@ -55,31 +89,155 @@ func (s *Server) ptrLookupCands(ids []int64) ([]ptrLookupCand, error) {
 	var cands []ptrLookupCand
 	for start := 0; start < len(ids); start += ptrLookupBatch {
 		placeholders, args := db.InPlaceholders(ids[start:min(start+ptrLookupBatch, len(ids))])
-		rows, err := s.db().Read.Query(
+		batch, err := db.QueryAll(s.db().Read, func(rows *sql.Rows) (ptrLookupCand, error) {
+			var c ptrLookupCand
+			var cat string
+			err := rows.Scan(&c.id, &c.name, &cat)
+			if cat != "general" {
+				c.name = cat + ":" + c.name
+			}
+			return c, err
+		},
 			`SELECT t.id, t.name, c.name FROM tags t JOIN tag_categories c ON c.id = t.category_id
 			 WHERE t.id IN (`+placeholders+`) AND t.is_alias = 0 AND c.name != 'rating'`, args...)
 		if err != nil {
 			return nil, err
 		}
-		for rows.Next() {
-			var id int64
-			var name, cat string
-			if err := rows.Scan(&id, &name, &cat); err != nil {
-				_ = rows.Close()
-				return nil, err
-			}
-			if cat != "general" {
-				name = cat + ":" + name
-			}
-			cands = append(cands, ptrLookupCand{id: id, name: name})
-		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
-			return nil, err
-		}
-		_ = rows.Close()
+		cands = append(cands, batch...)
 	}
 	return cands, nil
+}
+
+// resolvePTRSpelling picks the spelling the PTR answers for a tag out of one
+// graph answer: the tag's own form when known, else the first known alias
+// pointing at it - an alias the PTR holds as an ideal first, then in the
+// order given (name order). The operator's spelling need not be the
+// repository's; the aliases say what else the tag is called.
+//
+// A spelling the index holds as an orphan answers known with nothing behind
+// it, so a candidate carrying relations wins over one that does not wherever
+// it turns up - the same preference monloader applies across its own
+// candidate spellings. Without it the tag's own orphan name shadows an alias
+// holding the whole cluster.
+func resolvePTRSpelling(graph map[string]ptrTagInfo, own string, aliases []string) (string, ptrTagInfo, bool) {
+	bareName, bareInfo, haveBare := "", ptrTagInfo{}, false
+	connected := func(name string, info ptrTagInfo) bool {
+		if len(info.Aliases)+len(info.Implications)+len(info.ImpliedBy) > 0 || (info.Ideal != "" && info.Ideal != name) {
+			return true
+		}
+		if !haveBare {
+			bareName, bareInfo, haveBare = name, info, true
+		}
+		return false
+	}
+	if info, ok := graph[own]; ok && info.Known && connected(own, info) {
+		return own, info, true
+	}
+	var first string
+	for _, a := range aliases {
+		info, ok := graph[a]
+		if !ok || !info.Known || !connected(a, info) {
+			continue
+		}
+		if info.Ideal == a {
+			return a, info, true
+		}
+		if first == "" {
+			first = a
+		}
+	}
+	if first != "" {
+		return first, graph[first], true
+	}
+	if haveBare {
+		return bareName, bareInfo, true
+	}
+	return "", ptrTagInfo{}, false
+}
+
+// ptrAliasForms lists the monbooru-form names of the aliases pointing at each
+// tag, in name order.
+func (s *Server) ptrAliasForms(ids []int64) (map[int64][]string, error) {
+	aliases, err := s.tagSvc().AliasesForTagIDs(ids)
+	if err != nil {
+		return nil, err
+	}
+	forms := make(map[int64][]string, len(aliases))
+	for id, rows := range aliases {
+		for _, a := range rows {
+			forms[id] = append(forms[id], tagFormName(a.CategoryName, a.Name))
+		}
+	}
+	return forms, nil
+}
+
+// ptrResolveChunk answers the graph for a chunk of candidates, retrying the
+// ones the PTR does not know under the aliases pointing at them. A tag
+// answered through another spelling gets it appended to its alias list, so
+// the pull adopts it and the staleness sync never retires it. Candidates the
+// PTR knows under no spelling are absent from the result. A non-empty `as`
+// (the look-up dialog's spelling, one candidate only) is asked instead of
+// the candidate's own name, with no alias fallback: the operator named it.
+func (s *Server) ptrResolveChunk(ctx context.Context, chunk []ptrLookupCand, as string) (map[int64]ptrTagInfo, error) {
+	if as != "" && len(chunk) == 1 {
+		graph, err := s.ptrTagLookup(ctx, []string{as})
+		if err != nil {
+			return nil, err
+		}
+		info := graph[as]
+		if !info.Known {
+			return map[int64]ptrTagInfo{}, nil
+		}
+		if as != chunk[0].name {
+			info.Aliases = append(info.Aliases, as)
+		}
+		return map[int64]ptrTagInfo{chunk[0].id: info}, nil
+	}
+	names := make([]string, len(chunk))
+	for i, c := range chunk {
+		names[i] = c.name
+	}
+	graph, err := s.ptrTagLookup(ctx, names)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[int64]ptrTagInfo, len(chunk))
+	var unknown []int64
+	for _, c := range chunk {
+		if info := graph[c.name]; info.Known {
+			out[c.id] = info
+		} else {
+			unknown = append(unknown, c.id)
+		}
+	}
+	if len(unknown) == 0 {
+		return out, nil
+	}
+	forms, err := s.ptrAliasForms(unknown)
+	if err != nil {
+		return nil, err
+	}
+	var all []string
+	for _, id := range unknown {
+		all = append(all, forms[id]...)
+	}
+	for start := 0; start < len(all); start += ptrLookupBatch {
+		part, err := s.ptrTagLookup(ctx, all[start:min(start+ptrLookupBatch, len(all))])
+		if err != nil {
+			return nil, err
+		}
+		maps.Copy(graph, part)
+	}
+	for _, c := range chunk {
+		if _, done := out[c.id]; done {
+			continue
+		}
+		if spelling, info, ok := resolvePTRSpelling(graph, c.name, forms[c.id]); ok {
+			info.Aliases = append(info.Aliases, spelling)
+			out[c.id] = info
+		}
+	}
+	return out, nil
 }
 
 // runPTRTagLookup queries monloader's PTR graph for each candidate tag in
@@ -87,7 +245,15 @@ func (s *Server) ptrLookupCands(ids []int64) ([]ptrLookupCand, error) {
 // swept in follow-up rounds so their aliases and implications land in the
 // same run; each id is swept at most once, so the rounds terminate.
 func (s *Server) runPTRTagLookup(ids []int64) {
+	s.runPTRTagSweep(ids, "")
+}
+
+// runPTRTagSweep is the sweep body; `as` is the look-up dialog's spelling
+// for a single-tag pull, asked in place of that tag's own name on the seed
+// round only.
+func (s *Server) runPTRTagSweep(ids []int64, as string) {
 	ctx := s.jobs.Context()
+	lookedUpAs := as
 
 	cands, err := s.ptrLookupCands(ids)
 	if err != nil {
@@ -119,11 +285,7 @@ func (s *Server) runPTRTagLookup(ids []int64) {
 				break
 			}
 			chunk := cands[start:min(start+ptrLookupBatch, len(cands))]
-			names := make([]string, len(chunk))
-			for i, c := range chunk {
-				names[i] = c.name
-			}
-			results, err := s.ptrTagLookup(ctx, names)
+			results, err := s.ptrResolveChunk(ctx, chunk, as)
 			if errors.Is(err, errPTRUnavailable) {
 				// The PTR going away mid-sweep is a degraded stop, not a
 				// failure: keep what already applied and report how far it got,
@@ -137,7 +299,7 @@ func (s *Server) runPTRTagLookup(ids []int64) {
 			}
 			for _, c := range chunk {
 				swept[c.id] = struct{}{}
-				info := results[c.name]
+				info := results[c.id]
 				if !info.Known {
 					// A tag the PTR no longer knows has no fresh state left, so
 					// every relation it pulled earlier is flagged.
@@ -158,6 +320,7 @@ func (s *Server) runPTRTagLookup(ids []int64) {
 		if cancelled || unavailable {
 			break
 		}
+		as = ""
 		var next []int64
 		for id := range createdTags {
 			if _, ok := swept[id]; !ok {
@@ -196,6 +359,9 @@ func (s *Server) runPTRTagLookup(ids []int64) {
 	s.Active().InvalidateCaches()
 
 	msg := fmt.Sprintf("PTR: added %d alias(es) and %d implication(s) across %d tag(s)", aliases, implications, processed)
+	if lookedUpAs != "" {
+		msg += ", looked up as " + lookedUpAs
+	}
 	if unknown > 0 {
 		msg += fmt.Sprintf("; %d unknown to the PTR", unknown)
 	}
@@ -217,8 +383,10 @@ func (s *Server) runPTRTagLookup(ids []int64) {
 }
 
 // applyPTRTagInfo adds the PTR's aliases and implications for one canonical
-// tag. An alias is created only when its name is unused in its category, so
-// the operator's catalog always wins over the PTR's preferred spelling.
+// tag. The PTR ideal counts as an alias too: locally this tag stays the
+// canonical, so the repository's preferred spelling lands here inverted. An
+// alias is created only when its name is unused in its category, so the
+// operator's catalog always wins over the PTR's preferred spelling.
 // Implication edges rely on AddImplication's cycle and alias guards and are
 // logged and skipped on failure so one bad edge can't abort the sweep; any
 // tag GetOrCreateTag had to create lands in createdTags for the caller to
@@ -231,7 +399,11 @@ func (s *Server) runPTRTagLookup(ids []int64) {
 func (s *Server) applyPTRTagInfo(tagID int64, info ptrTagInfo, impliedTouched, fanOutParents, createdTags map[int64]struct{}, pullImpliedBy bool) (aliases, implications, dropped, aliased, retired int) {
 	freshAliases := map[tags.AliasKey]bool{}
 	freshImplied := map[int64]bool{}
-	for _, name := range info.Aliases {
+	aliasNames := info.Aliases
+	if info.Ideal != "" {
+		aliasNames = append([]string{info.Ideal}, aliasNames...)
+	}
+	for _, name := range aliasNames {
 		catID, bare, ok := s.splitCategoryTag(name)
 		if !ok {
 			dropped++
@@ -269,6 +441,7 @@ func (s *Server) applyPTRTagInfo(tagID int64, info ptrTagInfo, impliedTouched, f
 		}
 		exists, err := s.tagNameExists(catID, normalized)
 		if err != nil {
+			logx.Warnf("ptr implication %q: %v", name, err)
 			continue
 		}
 		implied, err := s.tagSvc().GetOrCreateTagFrom(normalized, catID, "ptr")

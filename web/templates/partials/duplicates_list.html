@@ -2,6 +2,7 @@
 {{if not .Aliases}}
 <p class="field-hint">No SHA-256 duplicates found.</p>
 {{else}}
+<div class="table-scroll">
 <table class="help-table">
   <thead><tr><th>Image</th><th>Canonical</th><th>Duplicate path</th><th>Action</th></tr></thead>
   <tbody>
@@ -26,5 +27,9 @@
     {{end}}
   </tbody>
 </table>
+</div>
+{{if .Withheld}}
+<p class="field-hint">{{.Withheld}} more not shown - <a href="/relations/duplicates/sha256">review duplicate files</a> for the full list.</p>
+{{end}}
 {{end}}
 {{end}}

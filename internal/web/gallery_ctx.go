@@ -79,8 +79,8 @@ type galleryCtx struct {
 // caller (manual sync handler, scheduler, future scheduled phase) gets
 // the cache hygiene by construction instead of relying on the caller's
 // goroutine to remember the InvalidateCaches at the right point.
-func (cx *galleryCtx) Sync(ctx context.Context, maxFileSizeMB int, progress func(processed, total int, message string)) (gallery.SyncResult, error) {
-	result, err := gallery.Sync(ctx, cx.DB, cx.GalleryPath, cx.ThumbnailsPath, maxFileSizeMB, progress)
+func (cx *galleryCtx) Sync(ctx context.Context, maxFileSizeMB int, naming gallery.Naming, progress func(processed, total int, message string)) (gallery.SyncResult, error) {
+	result, err := gallery.Sync(ctx, cx.DB, cx.GalleryPath, cx.ThumbnailsPath, maxFileSizeMB, naming, progress)
 	cx.InvalidateCaches()
 	return result, err
 }
@@ -395,7 +395,7 @@ func (cx *galleryCtx) close() {
 
 // startWatcher no-ops when watching is disabled, the gallery is degraded,
 // or a watcher is already running.
-func (cx *galleryCtx) startWatcher(watchEnabled bool, maxFileSizeMB int, jm *jobs.Manager) {
+func (cx *galleryCtx) startWatcher(watchEnabled bool, maxFileSizeMB int, naming gallery.Naming, jm *jobs.Manager) {
 	if !watchEnabled || cx.Degraded || cx.watcherCancel != nil {
 		return
 	}
@@ -404,6 +404,7 @@ func (cx *galleryCtx) startWatcher(watchEnabled bool, maxFileSizeMB int, jm *job
 		logx.Warnf("gallery %q: watcher start: %v", cx.Name, err)
 		return
 	}
+	w.Naming = naming
 	w.OnEvent = jm.SetWatcherMessage
 	w.OnChange = cx.InvalidateCaches
 	ctx, cancel := context.WithCancel(context.Background())

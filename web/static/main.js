@@ -309,7 +309,18 @@ function submitSearch() {
 function focusFirstSelector(selectors) {
   for (var i = 0; i < selectors.length; i++) {
     var el = document.querySelector(selectors[i]);
-    if (el) { el.focus(); if (el.select) el.select(); return true; }
+    if (el) { revealSidebarFor(el); el.focus(); if (el.select) el.select(); return true; }
+  }
+  return false;
+}
+
+// clickFirstSelector is focusFirstSelector for the shortcuts whose target is
+// a button: a key means nothing on a page that doesn't render one, so the
+// caller only swallows the event when something was clicked.
+function clickFirstSelector(selectors) {
+  for (var i = 0; i < selectors.length; i++) {
+    var el = document.querySelector(selectors[i]);
+    if (el) { el.click(); return true; }
   }
   return false;
 }
@@ -758,6 +769,12 @@ document.addEventListener('keydown', function(e) {
     }
   }
 
+  // b → the topbar sidebar toggle, so the key means whichever of the two
+  // jobs that button has at the current width.
+  if (e.key === 'b') {
+    if (clickFirstSelector(['#sidebar-toggle'])) { e.preventDefault(); return; }
+  }
+
   // Y → click the topbar Sync button.
   if (e.key === 'Y') {
     var syncForm = document.querySelector('form[hx-post="/internal/sync"]');
@@ -802,12 +819,10 @@ document.addEventListener('keydown', function(e) {
   // Tags page
   if (isTagsPage()) {
     if (e.key === 'n') {
-      var btnNew = document.getElementById('btn-create-tag');
-      if (btnNew) { e.preventDefault(); btnNew.click(); return; }
+      if (clickFirstSelector(['#btn-create-tag'])) { e.preventDefault(); return; }
     }
     if (e.key === 'N') {
-      var btnAlias = document.getElementById('btn-create-alias');
-      if (btnAlias) { e.preventDefault(); btnAlias.click(); return; }
+      if (clickFirstSelector(['#btn-create-alias'])) { e.preventDefault(); return; }
     }
     if (handlePaginationKey(e)) { e.preventDefault(); return; }
   }
@@ -833,8 +848,7 @@ document.addEventListener('keydown', function(e) {
         e.preventDefault(); openBatchFavoriteDialog('selection'); return;
       }
     }
-    var favBtn = document.querySelector('.btn-fav');
-    if (favBtn) { e.preventDefault(); favBtn.click(); return; }
+    if (clickFirstSelector(['.btn-fav'])) { e.preventDefault(); return; }
   }
 
   // 'a' → context-dependent add-tag entry point. Detail tag-input focus
@@ -844,8 +858,7 @@ document.addEventListener('keydown', function(e) {
     if (batchBarVisible()) { e.preventDefault(); openTagSelectedDialog(); return; }
     var tagInput = document.getElementById('tag-input');
     if (tagInput) { e.preventDefault(); tagInput.focus(); return; }
-    var actionsBtn = document.getElementById('actions-btn');
-    if (actionsBtn) { e.preventDefault(); actionsBtn.click(); return; }
+    if (clickFirstSelector(['#actions-btn'])) { e.preventDefault(); return; }
   }
 
   // 'r' → remove tags on selection / enter detail tag-focus mode.
@@ -892,8 +905,7 @@ document.addEventListener('keydown', function(e) {
       e.preventDefault(); openBatchAutotagDialog('selection'); return;
     }
     if (isDetailPage()) {
-      var btn = document.querySelector('.btn-autotag');
-      if (btn) { e.preventDefault(); btn.click(); return; }
+      if (clickFirstSelector(['.btn-autotag'])) { e.preventDefault(); return; }
     }
   }
 
@@ -916,8 +928,7 @@ document.addEventListener('keydown', function(e) {
       }
     }
     if (isDetailPage()) {
-      var inboxBtn = document.querySelector('.btn-inbox');
-      if (inboxBtn) { e.preventDefault(); inboxBtn.click(); return; }
+      if (clickFirstSelector(['.btn-inbox'])) { e.preventDefault(); return; }
     }
   }
 
@@ -930,19 +941,16 @@ document.addEventListener('keydown', function(e) {
         e.preventDefault(); openBatchLookupDialog('selection'); return;
       }
     }
-    var lookupBtn = document.querySelector('.add-tag-form .btn-hash-lookup');
-    if (lookupBtn) { e.preventDefault(); lookupBtn.click(); return; }
+    if (clickFirstSelector(['.add-tag-form .btn-hash-lookup'])) { e.preventDefault(); return; }
   }
 
   // Gallery view-level toggles (Shift modifiers).
   if (isGalleryPage()) {
     if (e.key === 'F') {
-      var fbtn = document.getElementById('fav-filter-btn');
-      if (fbtn) { e.preventDefault(); fbtn.click(); return; }
+      if (clickFirstSelector(['#fav-filter-btn'])) { e.preventDefault(); return; }
     }
     if (e.key === 'R') {
-      var rbtn = document.getElementById('random-sort-btn');
-      if (rbtn) { e.preventDefault(); rbtn.click(); return; }
+      if (clickFirstSelector(['#random-sort-btn'])) { e.preventDefault(); return; }
     }
     if (e.key === 'O') { if (cycleSort()) { e.preventDefault(); return; } }
     if (e.key === 'D') { if (flipSortDirection()) { e.preventDefault(); return; } }
@@ -961,8 +969,7 @@ document.addEventListener('keydown', function(e) {
       if (typeof batchDeleteSelected === 'function') batchDeleteSelected();
       return;
     }
-    var delBtn = document.getElementById('delete-image-btn');
-    if (delBtn) { e.preventDefault(); delBtn.click(); return; }
+    if (clickFirstSelector(['#delete-image-btn'])) { e.preventDefault(); return; }
   }
 
   // Spacebar → play/pause the detail-page video, or toggle the focused
@@ -1659,6 +1666,7 @@ function enterTagFocusMode() {
   var items = tagFocusRows();
   if (!items.length) return;
   if (focusedTagRow()) return;
+  revealSidebarFor(items[0]);
   items[0].classList.add('focused');
   items[0].scrollIntoView({block: 'nearest'});
   // Mode flag survives an htmx swap that strips the .focused class on the
@@ -1762,16 +1770,23 @@ document.addEventListener('cancel', function(e) {
 // Shared confirmation dialog: replaces native confirm() and intercepts
 // hx-confirm via the htmx:confirm event listener below. The triggering
 // element may set data-confirm-danger for a red-tinted second warning line.
-function showConfirm(message, onOk, danger, okLabel) {
+// alt is an optional {label, run} third choice for prompts where the
+// decision is not yes/no: the upgrade prompt offers keeping the local file
+// beside taking the source's, since both answer the comparison it shows.
+function showConfirm(message, onOk, danger, okLabel, alt) {
   var dlg = document.getElementById('confirm-dialog');
   if (!dlg) { if (window.confirm(message)) onOk(); return; }
   document.getElementById('confirm-dialog-msg').textContent = message || '';
   document.getElementById('confirm-dialog-danger').textContent = danger || '';
   var okBtn = document.getElementById('confirm-dialog-ok');
   var cancelBtn = document.getElementById('confirm-dialog-cancel');
+  var altBtn = document.getElementById('confirm-dialog-alt');
   okBtn.textContent = okLabel || 'OK';
-  var close = function() { dlg.close(); okBtn.onclick = null; cancelBtn.onclick = null; };
+  altBtn.hidden = !alt;
+  altBtn.textContent = alt ? alt.label : '';
+  var close = function() { dlg.close(); okBtn.onclick = null; cancelBtn.onclick = null; altBtn.onclick = null; };
   okBtn.onclick = function() { close(); onOk(); };
+  altBtn.onclick = alt ? function() { close(); alt.run(); } : null;
   cancelBtn.onclick = close;
   dlg.showModal();
   // Land focus on the safer button so a keyboard-only operator can
@@ -1783,8 +1798,27 @@ function showConfirm(message, onOk, danger, okLabel) {
 document.body.addEventListener('htmx:confirm', function(e) {
   if (!e.detail || !e.detail.question) return;
   e.preventDefault();
-  var ds = e.detail.elt && e.detail.elt.dataset ? e.detail.elt.dataset : {};
-  showConfirm(e.detail.question, function() { e.detail.issueRequest(true); }, ds.confirmDanger, ds.confirmOk);
+  var elt = e.detail.elt;
+  var ds = elt && elt.dataset ? elt.dataset : {};
+  var alt = null;
+  if (ds.confirmAlt && ds.confirmAltUrl) {
+    // The alternative posts the triggering form's own hidden fields (which
+    // carry the CSRF token and the origin's identity) to a different route.
+    alt = {label: ds.confirmAlt, run: function() {
+      var values = {};
+      var form = elt.closest('form');
+      if (form) {
+        form.querySelectorAll('input[type="hidden"]').forEach(function(i) { values[i.name] = i.value; });
+      }
+      if (ds.confirmAltValue) {
+        values[ds.confirmAltValue.split('=')[0]] = ds.confirmAltValue.split('=')[1];
+      }
+      // No source element: htmx would inherit the hx-confirm that opened
+      // this dialog and ask the same question again instead of posting.
+      htmx.ajax('POST', ds.confirmAltUrl, {values: values});
+    }};
+  }
+  showConfirm(e.detail.question, function() { e.detail.issueRequest(true); }, ds.confirmDanger, ds.confirmOk, alt);
 });
 
 // Page jump: dialog that sets ?page= on the current URL. Works for both
@@ -2030,12 +2064,38 @@ function submitPageJump() {
   window.location.href = u.toString();
 }
 
-// Sidebar toggle (narrow viewports)
+// Sidebar toggle: a drawer over the grid at narrow viewports, a persisted
+// collapse of the layout column above them.
 document.addEventListener('click', function(e) {
   if (!e.target.id || e.target.id !== 'sidebar-toggle') return;
-  const sidebar = document.getElementById('sidebar');
-  if (sidebar) sidebar.classList.toggle('open');
+  if (window.matchMedia('(max-width: 768px)').matches) {
+    const sidebar = document.getElementById('sidebar');
+    if (sidebar) sidebar.classList.toggle('open');
+    return;
+  }
+  const layout = document.getElementById('main-layout');
+  if (layout) setSidebarCollapsed(!layout.classList.contains('sidebar-collapsed'));
 });
+
+// The cookie is what the server reads to render the next page already
+// collapsed; the class is what the current page needs right now.
+function setSidebarCollapsed(collapsed) {
+  var layout = document.getElementById('main-layout');
+  if (!layout) return;
+  layout.classList.toggle('sidebar-collapsed', collapsed);
+  document.cookie = 'monbooru_sidebar=' + (collapsed ? 'collapsed' : '') +
+    '; path=/; max-age=' + (collapsed ? 31536000 : 0);
+  // A collapsed layout renders its lazy panels without their load trigger, so
+  // showing the column is what fetches them, against the query on screen now
+  // rather than the one the page opened on.
+  if (!collapsed) htmx.trigger(document.body, 'sidebar-shown');
+}
+
+// A collapsed sidebar still holds its fields and its tag rows; landing the
+// keyboard on one the operator can't see reads as the key doing nothing.
+function revealSidebarFor(el) {
+  if (el && el.closest && el.closest('#sidebar')) setSidebarCollapsed(false);
+}
 
 // Folder tree: expand/collapse with cookie persistence
 function getFolderCookie() {
@@ -2231,6 +2291,46 @@ function applyLabelSuggest(btn, key) {
   dd.innerHTML = '';
   input.value = label;
   input.focus();
+}
+
+// insertToken drops a chip's token into the field it names, at the caret,
+// and fires the input event the preview slot listens for. A rail serving
+// two fields inserts into whichever holds the caret; the chip suppresses
+// its own focus grab so the click never takes it away first.
+function insertToken(btn) {
+  var ids = (btn.dataset.targets || '').split(/\s+/).filter(Boolean);
+  var input = ids.indexOf((document.activeElement || {}).id) >= 0
+    ? document.activeElement
+    : document.getElementById(ids[0]);
+  if (!input) return;
+  var token = btn.dataset.token;
+  var at = input.selectionStart == null ? input.value.length : input.selectionStart;
+  var to = input.selectionEnd == null ? at : input.selectionEnd;
+  input.value = input.value.slice(0, at) + token + input.value.slice(to);
+  input.focus();
+  input.setSelectionRange(at + token.length, at + token.length);
+  input.dispatchEvent(new Event('input', {bubbles: true}));
+}
+
+// namePreviewVals is the hx-vals shape a batch dialog's preview slot
+// posts: what is typed, the surface it belongs to, and the head of the
+// scope it would apply to. A search scope has no checked ids, so the
+// first rendered thumbnails stand in - they are the head of the same
+// order the job walks.
+function namePreviewVals(inputId, scope, scopeId) {
+  var input = document.getElementById(inputId);
+  var scopeEl = document.getElementById(scopeId);
+  var kind = scopeEl && scopeEl.value ? scopeEl.value : 'selection';
+  var ids = kind === 'search'
+    ? Array.prototype.map.call(document.querySelectorAll('.thumb-card'),
+        function(c) { return c.dataset.id; })
+    : selectedImageIds();
+  return {
+    tmpl: input ? input.value : '',
+    scope: scope,
+    ids: ids.slice(0, 3).join(','),
+    total: scopeCount(kind, null, null)
+  };
 }
 
 // Search suggest: apply selected suggestion to search input
@@ -2557,13 +2657,6 @@ function scopeCount(scope, countEl, nounEl) {
   return n;
 }
 
-// csrfValue reads the page's CSRF token off the first hidden input every
-// form on the page carries.
-function csrfValue() {
-  var el = document.querySelector('input[name="_csrf"]');
-  return el ? el.value : '';
-}
-
 // searchScopeParts returns the query/sort/order body fragment used by
 // every search-scoped batch endpoint.
 function searchScopeParts() {
@@ -2666,19 +2759,12 @@ function closePluginPage() {
 function runBatchOp(opts) {
   var flash = document.getElementById(opts.flashId);
   if (flash) flash.innerHTML = '';
-  var csrfEl = document.querySelector('input[name="_csrf"]');
-  var csrf = csrfEl ? csrfEl.value : '';
-  var parts = ['_csrf=' + encodeURIComponent(csrf),
-               'scope=' + encodeURIComponent(opts.scope)];
-  if (opts.params) parts = parts.concat(opts.params);
-  fetch(opts.endpoint, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRF-Token': csrf},
-    body: parts.join('&')
-  }).then(function(res) {
-    if (res.ok) {
-      var dlg = document.getElementById(opts.dialogId);
-      if (dlg) dlg.close();
+  var parts = ['scope=' + encodeURIComponent(opts.scope)].concat(opts.params || []);
+  postForm(opts.endpoint, new URLSearchParams(parts.join('&')), {
+    dialogId: opts.dialogId,
+    flashId: opts.flashId,
+    failMsg: opts.failMsg || 'Action failed.',
+    onOK: function() {
       // The job's completion reloads the page, so the selection is carried
       // across it rather than dropped: a scope the operator built is usually
       // worth more than one action. Deleted or moved-away rows simply have
@@ -2686,13 +2772,7 @@ function runBatchOp(opts) {
       if (opts.scope === 'selection') stashSelection(selectedImageIds());
       _pendingGalleryReload = true;
       refreshJobStatus();
-    } else {
-      res.text().then(function(t) {
-        if (flash) flash.innerHTML = t || '<div class="flash flash-err">' + (opts.failMsg || 'Action failed.') + '</div>';
-      });
     }
-  }).catch(function() {
-    if (flash) flash.innerHTML = '<div class="flash flash-err">Request failed.</div>';
   });
 }
 
@@ -2745,6 +2825,33 @@ function clearSlots() {
   }
 }
 
+// A suggest request still inside its debounce when the form submits lands
+// after the answer and paints its dropdown over it. The dismissal handlers
+// only drop a response that arrives while the input has lost focus, and these
+// inputs keep it; disarming marks the input so the pending response is
+// dropped too, and the next keystroke re-arms it.
+function disarmSuggest(inputId) {
+  var input = document.getElementById(inputId);
+  if (input) input.dataset.suggestStale = '1';
+}
+
+function suggestDisarmed(input) {
+  if (!input.dataset.suggestStale) return false;
+  delete input.dataset.suggestStale;
+  return true;
+}
+
+// A PTR spelling picked from the look-up dialog's candidate list: fill the
+// input and run the preview, so one click goes from "which name?" to "what
+// would a pull under it do?".
+function applyPTRSpelling(btn) {
+  var input = document.getElementById('ptr-lookup-as');
+  var form = document.getElementById('ptr-lookup-form');
+  if (!input || !form) return;
+  input.value = btn.dataset.spelling;
+  form.requestSubmit();
+}
+
 // openHxRewriteDialog repoints a form's htmx attribute (attr is 'hx-post'
 // or 'hx-patch') at url, re-processes the form so htmx picks up the new
 // target, and opens the dialog. Callers prefill before, focus after.
@@ -2769,8 +2876,8 @@ function confirmBatchSimple(prefix, endpoint, extraParams, failMsg) {
 }
 
 // postForm sends a form-encoded request with the page CSRF token in both
-// the body and the X-CSRF-Token header, then applies runBatchOp's
-// ok-close / err-flash shape. params is a URLSearchParams or plain object
+// the body and the X-CSRF-Token header, then closes the dialog on success
+// or flashes the error body. params is a URLSearchParams or plain object
 // (or null); _csrf is appended here. opts:
 //   method   - HTTP verb, default 'POST'
 //   hx       - also send the HX-Request header (relations bulk endpoints)
@@ -2859,93 +2966,126 @@ function handleSuggestKey(e, dropdownId, inputId) {
   }
 }
 
-// Close suggest dropdown when clicking outside, or when the user submits
-// the enclosing form (Enter or the Search button). Without the submit
-// hook the dropdown stays visible on top of the result page until the
-// next outside click.
+// A suggest dropdown is closed by a click outside it, or by a submit of the
+// enclosing form (Enter or the Search button). Without the submit hook the
+// dropdown stays visible on top of the result page until the next outside
+// click. suggestPairs is every dropdown and the input that fills it, plus
+// the two per-surface quirks:
 //
-// opts.blurOnSubmit: also blur the input on submit. Used for the search
-// form so page-level arrow-key gallery navigation kicks in after Enter
-// without an extra Escape press; the tag/folder dropdowns are designed
-// for repeated entry and keep focus.
+// blurOnSubmit: the search form navigates away, so page-level arrow-key
+// gallery navigation should kick in after Enter without an extra Escape;
+// the tag and folder dropdowns are built for repeated entry and keep focus.
 //
-// opts.clearOnEmpty: drop a suggest swap that lands while the input is
-// empty. The tag input keeps focus while a successful add clears it, so
-// the focus check alone can't catch its late responses. Not for the
-// label inputs, whose empty-prefix listing is served on purpose.
-function initSuggestDismiss(dropdownId, inputId, opts) {
-  document.addEventListener('click', function(e) {
-    var dd = document.getElementById(dropdownId);
-    if (dd && !dd.contains(e.target) && e.target.id !== inputId) {
+// clearOnEmpty: drop a suggest swap that lands while the input is empty.
+// The tag input keeps focus while a successful add clears it, so the focus
+// check alone can't catch its late responses. Not for the label inputs,
+// whose empty-prefix listing is served on purpose.
+var suggestPairs = {
+  'search-suggest': {input: 'search-input', blurOnSubmit: true, clearOnEmpty: true},
+  'tag-suggest-dropdown': {input: 'tag-input', clearOnEmpty: true},
+  'batch-move-suggest': {input: 'batch-move-folder'},
+  'move-image-suggest': {input: 'move-image-folder'},
+  'batch-tag-suggest': {input: 'batch-tag-input', clearOnEmpty: true},
+  'batch-strip-suggest': {input: 'batch-strip-input', clearOnEmpty: true},
+  'source-suggest': {input: 'source-site-input'},
+  'batch-series-search-suggest': {input: 'batch-series-search-input'},
+  'batch-series-selected-suggest': {input: 'batch-series-selected-input'},
+  'batch-collection-suggest': {input: 'batch-collection-input'},
+  'collection-suggest': {input: 'collection-name-input'},
+  'collection-rename-suggest': {input: 'collection-rename-input'},
+  'alias-create-suggest': {input: 'alias-create-canon', clearOnEmpty: true},
+  'batch-alias-suggest': {input: 'batch-alias-canon', clearOnEmpty: true},
+  'batch-imply-suggest': {input: 'batch-imply-target', clearOnEmpty: true},
+  'detail-alias-suggest': {input: 'detail-alias-canon', clearOnEmpty: true},
+  'implication-add-suggest': {input: 'implication-add-input', clearOnEmpty: true},
+  'implied-by-add-suggest': {input: 'implied-by-add-input', clearOnEmpty: true},
+  'ptr-lookup-suggest': {input: 'ptr-lookup-as', clearOnEmpty: true},
+};
+
+var suggestDropdownByInput = {};
+for (var _suggestID in suggestPairs) suggestDropdownByInput[suggestPairs[_suggestID].input] = _suggestID;
+
+// One registration of each handler over the whole table, not one per pair.
+// They resolve their elements per event: some surfaces live in re-rendered
+// fragments (the implications editor, the danger zone's move dialog), where
+// listeners bound to the initial nodes would be orphaned by the first
+// rebuild. htmx events bubble, so document-level delegation keeps seeing
+// swaps on the fresh nodes.
+document.addEventListener('click', function(e) {
+  for (var ddId in suggestPairs) {
+    var dd = document.getElementById(ddId);
+    if (dd && !dd.contains(e.target) && e.target.id !== suggestPairs[ddId].input) {
       dd.innerHTML = '';
     }
-  });
-  // Like the click handler above, the listeners below resolve their
-  // elements per event rather than at init: some surfaces live in
-  // re-rendered fragments (the implications editor, the danger zone's
-  // move dialog), where listeners bound to the initial nodes would be
-  // orphaned by the first rebuild. htmx events bubble, so document-level
-  // delegation keeps seeing swaps on the fresh nodes.
-  document.addEventListener('submit', function(e) {
-    var input = document.getElementById(inputId);
-    if (!input || e.target !== input.form) return;
-    var dd = document.getElementById(dropdownId);
+  }
+});
+
+document.addEventListener('submit', function(e) {
+  for (var ddId in suggestPairs) {
+    var input = document.getElementById(suggestPairs[ddId].input);
+    if (!input || e.target !== input.form) continue;
+    var dd = document.getElementById(ddId);
     if (dd) dd.innerHTML = '';
-    if (opts && opts.blurOnSubmit) input.blur();
-  });
-  // A pending suggest request (debounced 200ms by hx-trigger) can land
-  // after the user submits or moves focus elsewhere; drop the swap if
-  // the input no longer holds focus (or, with clearOnEmpty, sits empty)
-  // so the dropdown doesn't get refilled behind the user's back.
-  //
-  // Also tag the dropdown as `suggest-fresh` after every swap so the CSS
-  // can suppress the :hover highlight until the user actually moves the
-  // mouse over it - otherwise an item happening to land under the cursor's
-  // previous position appears "selected" without the user picking it.
-  document.addEventListener('htmx:afterSwap', function(e) {
-    if (e.target.id !== dropdownId) return;
-    var input = document.getElementById(inputId);
-    if (document.activeElement !== input || (opts && opts.clearOnEmpty && input.value === '')) { e.target.innerHTML = ''; return; }
-    e.target.classList.add('suggest-fresh');
-    e.target.addEventListener('mousemove', clearSuggestFresh, {once: true});
-  });
-  // The label and search suggest endpoints answer 204 when nothing
-  // matches, and htmx swaps nothing on 204 - the previous matches would
-  // stay showing under text they no longer match.
-  document.addEventListener('htmx:afterRequest', function(e) {
-    var input = document.getElementById(inputId);
-    if (!input || !e.detail || e.detail.elt !== input) return;
-    if (e.detail.xhr && e.detail.xhr.status === 204) {
-      var dd = document.getElementById(dropdownId);
-      if (dd) dd.innerHTML = '';
-    }
-  });
+    if (suggestPairs[ddId].blurOnSubmit) input.blur();
+  }
+});
+
+// A pending suggest request (debounced 200ms by hx-trigger) can land after
+// the user submits or moves focus elsewhere; drop the swap if the input no
+// longer holds focus (or, with clearOnEmpty, sits empty) so the dropdown
+// doesn't get refilled behind the user's back.
+//
+// Also tag the dropdown as `suggest-fresh` after every swap so the CSS can
+// suppress the :hover highlight until the user actually moves the mouse over
+// it - otherwise an item happening to land under the cursor's previous
+// position appears "selected" without the user picking it.
+document.addEventListener('htmx:afterSwap', function(e) {
+  var pair = suggestPairs[e.target.id];
+  if (!pair) return;
+  var input = document.getElementById(pair.input);
+  if (document.activeElement !== input || (pair.clearOnEmpty && input.value === '')) { e.target.innerHTML = ''; return; }
+  e.target.classList.add('suggest-fresh');
+  e.target.addEventListener('mousemove', clearSuggestFresh, {once: true});
+});
+
+// The label and search suggest endpoints answer 204 when nothing matches,
+// and htmx swaps nothing on 204 - the previous matches would stay showing
+// under text they no longer match.
+document.addEventListener('htmx:afterRequest', function(e) {
+  if (!e.detail || !e.detail.elt) return;
+  var ddId = suggestDropdownByInput[e.detail.elt.id];
+  if (!ddId) return;
+  if (e.detail.xhr && e.detail.xhr.status === 204) {
+    var dd = document.getElementById(ddId);
+    if (dd) dd.innerHTML = '';
+  }
+});
+
+// mergeChoiceItem builds one row of a merge dialog's choice list: the radio
+// naming which of the selected rows wins, plus whatever that page hangs
+// beside it (a thumbnail and a group label, or a coloured name and its
+// category).
+function mergeChoiceItem(name, value, checked, decorate) {
+  var li = document.createElement('li');
+  li.className = 'merge-dup-choice';
+  var label = document.createElement('label');
+  var radio = document.createElement('input');
+  radio.type = 'radio';
+  radio.name = name;
+  radio.value = value;
+  radio.checked = checked;
+  label.appendChild(radio);
+  decorate(label);
+  li.appendChild(label);
+  return li;
 }
 
 // clearSuggestFresh re-enables the dropdown's :hover highlight on the first
-// real mouse move; re-armed on every swap by initSuggestDismiss.
+// real mouse move; re-armed by the afterSwap handler above.
 function clearSuggestFresh(e) {
   e.currentTarget.classList.remove('suggest-fresh');
 }
 
-initSuggestDismiss('search-suggest', 'search-input', {blurOnSubmit: true, clearOnEmpty: true});
-initSuggestDismiss('tag-suggest-dropdown', 'tag-input', {clearOnEmpty: true});
-initSuggestDismiss('batch-move-suggest', 'batch-move-folder');
-initSuggestDismiss('move-image-suggest', 'move-image-folder');
-initSuggestDismiss('batch-tag-suggest', 'batch-tag-input', {clearOnEmpty: true});
-initSuggestDismiss('batch-strip-suggest', 'batch-strip-input', {clearOnEmpty: true});
-initSuggestDismiss('source-suggest', 'source-site-input');
-initSuggestDismiss('batch-series-search-suggest', 'batch-series-search-input');
-initSuggestDismiss('batch-series-selected-suggest', 'batch-series-selected-input');
-initSuggestDismiss('batch-collection-suggest', 'batch-collection-input');
-initSuggestDismiss('collection-suggest', 'collection-name-input');
-initSuggestDismiss('collection-rename-suggest', 'collection-rename-input');
-initSuggestDismiss('alias-create-suggest', 'alias-create-canon', {clearOnEmpty: true});
-initSuggestDismiss('batch-alias-suggest', 'batch-alias-canon', {clearOnEmpty: true});
-initSuggestDismiss('batch-imply-suggest', 'batch-imply-target', {clearOnEmpty: true});
-initSuggestDismiss('detail-alias-suggest', 'detail-alias-canon', {clearOnEmpty: true});
-initSuggestDismiss('implication-add-suggest', 'implication-add-input', {clearOnEmpty: true});
-initSuggestDismiss('implied-by-add-suggest', 'implied-by-add-input', {clearOnEmpty: true});
 
 // Detail page: tags added in the current session are echoed in a
 // "just-added" list, reset on full page reload.

@@ -29,11 +29,19 @@ type Watcher struct {
 	jobs           *jobs.Manager
 	OnEvent        func(msg string) // callback for status notifications (may be nil)
 	OnChange       func()           // callback fired after any image add/remove (may be nil)
+	// Naming renames what the watcher picks up, when the operator opted
+	// in. Zero value leaves a dropped file under the name it arrived with.
+	Naming Naming
 
-	mu      sync.Mutex
-	closing bool
-	timers  map[string]*debounceTimer
-	wg      sync.WaitGroup // in-flight ingests from fired timers
+	mu sync.Mutex
+	// selfMoved holds the paths of a rename the watcher performed itself,
+	// until the events that rename emits have had time to arrive. Without
+	// it every dropped file is hashed a second time by the ingest its own
+	// rename triggers.
+	selfMoved map[string]time.Time
+	closing   bool
+	timers    map[string]*debounceTimer
+	wg        sync.WaitGroup // in-flight ingests from fired timers
 }
 
 const debounceDelay = 500 * time.Millisecond
@@ -72,6 +80,7 @@ func NewWatcher(galleryName, galleryPath, thumbnailsPath string, maxFileSizeMB i
 		db:             database,
 		jobs:           jobManager,
 		timers:         map[string]*debounceTimer{},
+		selfMoved:      map[string]time.Time{},
 	}
 
 	if addErr := fsw.Add(galleryPath); addErr != nil {
@@ -264,6 +273,31 @@ func (w *Watcher) debounce(path string) {
 	w.schedule(path, debounceDelay, w.ingestFile)
 }
 
+// selfMovedGrace outlasts both timers a self-inflicted rename can arm, so
+// the CREATE for the destination and the deferred vanish-check on the
+// source are both ignored.
+const selfMovedGrace = movedOutGrace + debounceDelay
+
+// claimSelfMove marks paths as the watcher's own work and cancels
+// anything already armed for them. Cancelling matters as much as the
+// mark: the events land before the rename returns, so the timer they arm
+// is usually already ticking by the time this runs.
+func (w *Watcher) claimSelfMove(paths ...string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	deadline := time.Now().Add(selfMovedGrace)
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		if e, ok := w.timers[p]; ok {
+			e.t.Stop()
+			delete(w.timers, p)
+		}
+		w.selfMoved[p] = deadline
+	}
+}
+
 // schedule arms run(path) for delay from now, replacing anything already
 // pending on the same path.
 func (w *Watcher) schedule(path string, delay time.Duration, run func(string)) {
@@ -271,6 +305,15 @@ func (w *Watcher) schedule(path string, delay time.Duration, run func(string)) {
 	defer w.mu.Unlock()
 
 	if w.closing {
+		return
+	}
+	now := time.Now()
+	for p, deadline := range w.selfMoved {
+		if now.After(deadline) {
+			delete(w.selfMoved, p)
+		}
+	}
+	if _, mine := w.selfMoved[path]; mine {
 		return
 	}
 	if e, ok := w.timers[path]; ok {
@@ -342,12 +385,15 @@ func (w *Watcher) ingestFile(path string) {
 		}
 	}
 
-	_, isDup, err := Ingest(w.db, w.galleryPath, w.thumbnailsPath, path, "")
+	img, isDup, err := Ingest(w.db, w.galleryPath, w.thumbnailsPath, path, "")
 	if err != nil {
 		logx.Warnf("watcher ingest %q: %v", path, err)
 	} else if isDup {
 		logx.Infof("watcher: duplicate %q", path)
 	} else {
+		if !w.Naming.Empty() && img != nil {
+			path = w.renameIngested(img.ID, path)
+		}
 		logx.Infof("watcher: ingested %q", path)
 		if w.OnEvent != nil {
 			w.OnEvent(w.eventPrefix() + "added " + filepath.Base(path))
@@ -356,6 +402,25 @@ func (w *Watcher) ingestFile(path string) {
 			w.OnChange()
 		}
 	}
+}
+
+// renameIngested applies the operator's naming to a file the watcher just
+// picked up and returns where it ended up. Both paths are claimed before
+// the rename so the CREATE and REMOVE it emits do not re-enter ingest; a
+// failed rename leaves the file where it was, which is still a complete
+// row.
+func (w *Watcher) renameIngested(id int64, path string) string {
+	w.claimSelfMove(path)
+	newPath, err := w.Naming.Apply(w.db, w.galleryPath, id, "", "")
+	if err != nil {
+		logx.Warnf("watcher: name %q: %v", path, err)
+		return path
+	}
+	if newPath == "" {
+		return path
+	}
+	w.claimSelfMove(newPath)
+	return newPath
 }
 
 // markFileMissing flips is_missing=1 and rebalances the usage_count of
@@ -407,27 +472,11 @@ func (w *Watcher) markFileMissing(path string) {
 		return
 	}
 
-	rows, err := tx.Query(`SELECT tag_id FROM image_tags WHERE image_id = ?`, imgID)
+	tagIDs, err := db.QueryIDs(tx, `SELECT tag_id FROM image_tags WHERE image_id = ?`, imgID)
 	if err != nil {
 		logx.Warnf("watcher mark missing %q: list tags: %v", path, err)
 		return
 	}
-	var tagIDs []int64
-	for rows.Next() {
-		var tid int64
-		if scanErr := rows.Scan(&tid); scanErr != nil {
-			_ = rows.Close()
-			logx.Warnf("watcher mark missing %q: scan tag: %v", path, scanErr)
-			return
-		}
-		tagIDs = append(tagIDs, tid)
-	}
-	if iterErr := rows.Err(); iterErr != nil {
-		_ = rows.Close()
-		logx.Warnf("watcher mark missing %q: iterate tags: %v", path, iterErr)
-		return
-	}
-	_ = rows.Close()
 
 	for _, tid := range tagIDs {
 		if _, err := tx.Exec(

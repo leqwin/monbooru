@@ -1,3 +1,8 @@
 {{define "partials/tag_sidebar.html"}}
-<div id="sidebar-inner" hx-get="{{.SidebarURL}}" hx-trigger="load" hx-swap="innerHTML"></div>
+{{/* Collapsed, the load trigger is dropped: the fetch is a round trip of
+     aggregates and nothing is on screen to spend it on. Showing the column
+     fires it instead. */}}
+<div id="sidebar-inner" hx-get="{{.SidebarURL}}"
+     hx-trigger="{{if .SidebarCollapsed}}sidebar-shown from:body{{else}}load{{end}}"
+     hx-swap="innerHTML"></div>
 {{end}}

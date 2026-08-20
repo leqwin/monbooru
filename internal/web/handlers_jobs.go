@@ -1,7 +1,6 @@
 package web
 
 import (
-	"fmt"
 	"net/http"
 
 	"github.com/monbooru/monbooru/internal/models"
@@ -48,7 +47,7 @@ func (s *Server) syncTrigger(w http.ResponseWriter, r *http.Request) {
 		// cx.Sync wraps gallery.Sync + InvalidateCaches so this caller
 		// can't drift from the contract (a future code path that
 		// returned early between the two would leave caches stale).
-		result, err := cx.Sync(ctx, maxFileSizeMB, s.jobs.Update)
+		result, err := cx.Sync(ctx, maxFileSizeMB, s.ingestNaming(cx.Name), s.jobs.Update)
 		if ctx.Err() != nil {
 			s.jobs.Complete("sync cancelled")
 			return
@@ -57,8 +56,7 @@ func (s *Server) syncTrigger(w http.ResponseWriter, r *http.Request) {
 			s.jobs.Fail(err.Error())
 			return
 		}
-		s.jobs.Complete(fmt.Sprintf("%d added, %d missing, %d moved",
-			result.Added, result.Removed, result.Moved))
+		s.jobs.Complete(result.Summary())
 	}()
 
 	redirectTo := sameOriginReferer(r)

@@ -26,7 +26,20 @@ const ptrLookupChunk = 100
 type lookupCandidate struct {
 	id            int64
 	sha256        string
+	md5           string // "" until the row is backfilled; the phase hashes and stores one then
 	canonicalPath string
+}
+
+// lookupMD5 answers the digest a booru lookup is keyed on. Boorus index
+// posts by md5, so every lookup needs one; reading the stored column
+// keeps a scheduled run from re-reading the whole candidate set off disk
+// the way it did before the column existed. A row that predates it is
+// hashed once here and keeps the result.
+func lookupMD5(ctx context.Context, cx *galleryCtx, imageID int64, stored string) (string, error) {
+	if stored != "" {
+		return stored, nil
+	}
+	return gallery.ComputeAndStoreMD5(ctx, cx.DB, imageID)
 }
 
 // onlineLookupChunk is how many due images one selection page carries. Rows
@@ -156,9 +169,9 @@ func (s *Server) dueLookupCandidates(cx *galleryCtx, backend string, limit int) 
 	due, args := lookup.DueClause(backend, time.Now())
 	return db.QueryAll(cx.DB.Read, func(rows *sql.Rows) (lookupCandidate, error) {
 		var c lookupCandidate
-		err := rows.Scan(&c.id, &c.sha256, &c.canonicalPath)
+		err := rows.Scan(&c.id, &c.sha256, &c.md5, &c.canonicalPath)
 		return c, err
-	}, `SELECT i.id, i.sha256, i.canonical_path
+	}, `SELECT i.id, i.sha256, i.md5, i.canonical_path
 		 FROM images i
 		 LEFT JOIN image_lookups l ON l.image_id = i.id AND l.backend = ?
 		 WHERE `+lookup.CandidateClause(backend)+` AND `+due+`
@@ -214,7 +227,7 @@ func (s *Server) runOnlineLookupPhase(ctx context.Context, cx *galleryCtx) (onli
 			if ctx.Err() != nil {
 				break
 			}
-			md5, herr := gallery.Md5File(c.canonicalPath)
+			md5, herr := lookupMD5(ctx, cx, c.id, c.md5)
 			if herr != nil {
 				// An unreadable file is skipped and counted, never recorded
 				// as a miss: nothing was looked up.

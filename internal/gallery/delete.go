@@ -37,6 +37,10 @@ func DeleteImage(database *db.DB, galleryPath, thumbnailsPath string, id int64, 
 	).Scan(&canonPath, &folderPath, &isMissing, &fileType); err != nil {
 		return nil, fmt.Errorf("image not found: %w", err)
 	}
+	aliases, err := AliasPathsFor(database.Read, []int64{id})
+	if err != nil {
+		return nil, fmt.Errorf("alias paths for image %d: %w", id, err)
+	}
 
 	// One transaction for all three writes: a failure between them would
 	// otherwise leave the row with its tags stripped and usage_count
@@ -75,8 +79,44 @@ func DeleteImage(database *db.DB, galleryPath, thumbnailsPath string, id int64, 
 	if !result.IsMissing {
 		UnlinkImageFile(galleryPath, canonPath, id)
 	}
+	UnlinkAliasFiles(galleryPath, id, aliases[id])
 
 	return result, nil
+}
+
+// AliasPathsFor reads each id's non-canonical copies on disk. Callers read
+// them before the rows go: image_paths cascades with images.
+func AliasPathsFor(q db.Querier, ids []int64) (map[int64][]string, error) {
+	placeholders, args := db.InPlaceholders(ids)
+	if placeholders == "" {
+		return nil, nil
+	}
+	rows, err := q.Query(
+		`SELECT image_id, path FROM image_paths WHERE is_canonical = 0 AND image_id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[int64][]string{}
+	for rows.Next() {
+		var id int64
+		var path string
+		if err := rows.Scan(&id, &path); err != nil {
+			return nil, err
+		}
+		out[id] = append(out[id], path)
+	}
+	return out, rows.Err()
+}
+
+// UnlinkAliasFiles removes the copies sha-dedup folded onto one row. They
+// go with the image: once the row is gone nothing in the database names
+// them, the duplicates walker cannot surface them, and the next sync
+// ingests one as a new image with none of the tagging that was on it.
+func UnlinkAliasFiles(galleryPath string, id int64, paths []string) {
+	for _, p := range paths {
+		UnlinkImageFile(galleryPath, p, id)
+	}
 }
 
 // RemoveImageArtifacts deletes the derived files monbooru generated for

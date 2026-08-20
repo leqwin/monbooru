@@ -130,6 +130,14 @@ func EnabledTaggersForGallery(cfg *config.Config, gallery string) []TaggerStatus
 	return enabledTaggers(cfg, func(t TaggerStatus) bool { return t.AppliesToGallery(gallery) })
 }
 
+// Present reports whether this install has an auto-tagger at all, which is
+// what separates "the operator has none set up" from "one is set up and
+// currently unusable" - the first hides the auto-tag controls, the second
+// only disables them.
+func Present(cfg *config.Config) bool {
+	return buildSupportsInference() && len(DiscoverTaggers(cfg)) > 0
+}
+
 // enabledTaggers backs both listings. A gallery-scoped tagger answers false
 // to AppliesToGallery(""), so the unscoped listing passes no extra predicate
 // rather than an empty gallery name.

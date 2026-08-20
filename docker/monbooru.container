@@ -1,9 +1,13 @@
 [Container]
 ContainerName=monbooru
-# you can use monbooru:latest-cuda if you have a CUDA compatible GPU for faster auto-tagging
+# you can use monbooru:latest-cuda if you have a CUDA compatible GPU, or
+# monbooru:latest-openvino for an Intel GPU, for faster auto-tagging
 Image=ghcr.io/monbooru/monbooru:latest
 # if using CUDA, pass the GPU to the container (needs the NVIDIA container toolkit).
 #AddDevice=nvidia.com/gpu=all
+# if using OpenVINO:
+#AddDevice=/dev/dri
+#GroupAdd=993
 
 PublishPort=127.0.0.1:8080:8080
 

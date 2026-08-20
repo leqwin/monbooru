@@ -340,19 +340,29 @@ function confirmDetailAlias() {
   });
 }
 
+function postTagPTRPull(params) {
+  clearSlots('tag-flash');
+  postForm('/tags/' + TAG_ID + '/ptr-lookup', params, {
+    flashId: 'tag-flash',
+    failMsg: 'PTR lookup failed.',
+    catchMsg: 'PTR lookup request failed.',
+    onOK: function() {
+      _pendingGalleryReload = true;
+      if (typeof refreshJobStatus === 'function') refreshJobStatus();
+    }
+  });
+}
+
 function pullTagPTR(okLabel, question) {
-  showConfirm(question, function() {
-    clearSlots('tag-flash');
-    postForm('/tags/' + TAG_ID + '/ptr-lookup', null, {
-      flashId: 'tag-flash',
-      failMsg: 'PTR lookup failed.',
-      catchMsg: 'PTR lookup request failed.',
-      onOK: function() {
-        _pendingGalleryReload = true;
-        if (typeof refreshJobStatus === 'function') refreshJobStatus();
-      }
-    });
-  }, null, okLabel);
+  showConfirm(question, function() { postTagPTRPull(null); }, null, okLabel);
+}
+
+// The look-up dialog's pull: the preview was the confirmation, so the
+// dialog closes and the pull runs under the spelling it showed.
+function pullTagPTRAs(spelling) {
+  var d = document.getElementById('ptr-lookup-dialog');
+  if (d) d.close();
+  postTagPTRPull({as: spelling});
 }
 
 (function() {

@@ -25,7 +25,7 @@
             {{else}}
             <button class="tag-add-btn btn-tag-add" data-tag="{{$q}}" title="Add to current search">+</button>
             {{end}}
-            <span class="tag-count" title="images in the library with this tag">{{.UsageCount}}</span>
+            <span class="tag-count" title="{{.UsageCount}} images in the library with this tag">{{abbrevCount .UsageCount}}</span>
           </li>
           {{end}}
         </ul>

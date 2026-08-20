@@ -93,7 +93,16 @@ func (s *Server) pluginUsable(p config.PluginConfig) bool {
 	return s.pluginProbeSeed(p.Name).conn != "down"
 }
 
-// markPluginDown records a failed call so the peer's buttons stop rendering
+// pluginOffState names why a paired peer cannot be reached, for the title on
+// its inert buttons.
+func pluginOffState(p config.PluginConfig) string {
+	if p.Paused {
+		return "paused"
+	}
+	return "not responding"
+}
+
+// markPluginDown records a failed call so the peer's buttons go inert
 // without waiting for the next scheduled probe.
 func (s *Server) markPluginDown(name string) {
 	s.setPluginProbe(name, pluginProbe{conn: "down", checkedAt: time.Now()})

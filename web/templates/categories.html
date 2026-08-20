@@ -10,6 +10,7 @@
   <p class="field-hint">Categories group tags (artist, character, ...) and set their color.</p>
 
   <div id="cat-flash"></div>
+  <div class="table-scroll">
   <table class="cat-table">
     <thead><tr><th>Name</th><th>Color</th><th>Actions</th></tr></thead>
     {{/* The token rides the tbody so a row swapped in by a recolour
@@ -20,6 +21,7 @@
       {{end}}
     </tbody>
   </table>
+  </div>
   <form hx-post="/tags/categories"
         hx-target="#cat-flash" hx-swap="innerHTML"
         class="add-cat-form">

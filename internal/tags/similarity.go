@@ -1,6 +1,7 @@
 package tags
 
 import (
+	"database/sql"
 	"errors"
 	"math"
 	"sort"
@@ -314,27 +315,16 @@ func LoadOverlapSeed(database *db.DB, imageID int64) (OverlapSeed, error) {
 	if seed.MaxUsage < 1 {
 		return seed, nil
 	}
-	rows, err := database.Read.Query(
+	ids, err := db.QueryIDs(database.Read,
 		`SELECT it.tag_id
 		   FROM image_tags it
 		   JOIN tags t ON t.id = it.tag_id
 		   JOIN tag_categories tc ON tc.id = t.category_id
 		  WHERE it.image_id = ? AND tc.name != 'meta' AND t.usage_count <= ?
 		  ORDER BY it.tag_id`,
-		imageID, seed.MaxUsage,
-	)
-	if err != nil {
-		return seed, err
-	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var tagID int64
-		if err := rows.Scan(&tagID); err != nil {
-			return seed, err
-		}
-		seed.TagIDs = append(seed.TagIDs, tagID)
-	}
-	return seed, rows.Err()
+		imageID, seed.MaxUsage)
+	seed.TagIDs = ids
+	return seed, err
 }
 
 // OverlapScore is the Dice coefficient over the two tag counts: twice
@@ -449,33 +439,26 @@ func SharedTags(database *db.DB, a, b int64, limit int) ([]SharedTag, int, error
 		weights[int64(t.TagID)] = t.Weight
 	}
 	placeholders, args := db.InPlaceholders(seed.TagIDs())
-	rows, err := database.Read.Query(
+	shared, err := db.QueryAll(database.Read, func(rows *sql.Rows) (SharedTag, error) {
+		var tagID int64
+		var name, category, color string
+		if err := rows.Scan(&tagID, &name, &category, &color); err != nil {
+			return SharedTag{}, err
+		}
+		return SharedTag{
+			Name:     name,
+			Category: category,
+			Color:    SafeCategoryColor(color),
+			Weight:   weights[tagID],
+		}, nil
+	},
 		`SELECT it.tag_id, t.name, COALESCE(tc.name, ''), COALESCE(tc.color, '')
 		   FROM image_tags it
 		   JOIN tags t ON t.id = it.tag_id
 		   LEFT JOIN tag_categories tc ON tc.id = t.category_id
 		  WHERE it.image_id = ? AND it.tag_id IN (`+placeholders+`)`,
-		append([]any{b}, args...)...,
-	)
+		append([]any{b}, args...)...)
 	if err != nil {
-		return nil, 0, err
-	}
-	defer func() { _ = rows.Close() }()
-	var shared []SharedTag
-	for rows.Next() {
-		var tagID int64
-		var name, category, color string
-		if err := rows.Scan(&tagID, &name, &category, &color); err != nil {
-			return nil, 0, err
-		}
-		shared = append(shared, SharedTag{
-			Name:     name,
-			Category: category,
-			Color:    SafeCategoryColor(color),
-			Weight:   weights[tagID],
-		})
-	}
-	if err := rows.Err(); err != nil {
 		return nil, 0, err
 	}
 	sort.Slice(shared, func(i, j int) bool {

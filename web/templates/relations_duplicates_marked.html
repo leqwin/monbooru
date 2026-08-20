@@ -1,23 +1,5 @@
 {{define "relations_duplicates_marked.html"}}
-{{template "layout_head" .}}
-<div id="sidebar-inner"></div>
-{{template "layout_mid" .}}
-
-<div id="relations-walker-page" data-esc-back="/relations#duplicates">
-  <div class="detail-topbar">
-    <div class="detail-nav-group">
-      <a href="/relations#duplicates" class="back-link">‹ Relations</a>
-      <span class="detail-nav-sep">/</span>
-      <strong class="walker-page-title">Duplicate images</strong>
-    </div>
-    {{if .MarkedRows}}
-    <div class="detail-topbar-right">
-      {{template "partials/bulk_delete_form.html" (dict "CSRFToken" .CSRFToken "Action" "/relations/duplicates/marked/delete-all" "Target" "#flash-walker-marked" "Confirm" "Delete every non-original member of every duplicate-image group? Files are removed from disk." "ConfirmOK" "Delete all" "Label" "Delete all duplicate images")}}
-    </div>
-    {{end}}
-  </div>
-
-  <div id="flash-walker-marked"></div>
+{{template "walker_page_head" .}}
 
   {{if not .MarkedRows}}
   <section class="session-empty">
@@ -25,6 +7,7 @@
     <p class="field-hint">Start a Relations session or use the detail-page Relations panel to declare a duplicate.</p>
   </section>
   {{else}}
+  <div class="table-scroll">
   <table class="browse-table">
     <thead>
       <tr>
@@ -70,6 +53,8 @@
       {{end}}
     </tbody>
   </table>
+  </div>
+  {{template "partials/pagination.html" (dict "Base" "/relations/duplicates/marked?page=" "Page" .Page "Total" .TotalPages)}}
   {{end}}
 </div>
 

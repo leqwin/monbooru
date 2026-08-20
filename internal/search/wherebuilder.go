@@ -16,6 +16,7 @@ import (
 	"github.com/monbooru/monbooru/internal/lookup"
 	"github.com/monbooru/monbooru/internal/searchkw"
 	"github.com/monbooru/monbooru/internal/tags"
+	"github.com/monbooru/monbooru/internal/upgrade"
 )
 
 // isPureTagExpr reports whether expr's data SELECT should pin
@@ -1038,6 +1039,7 @@ var filterBuilders = map[string]func(*whereBuilder, FilterExpr) string{
 	"tagcount":   (*whereBuilder).buildTagcountFilter,
 	"duration":   (*whereBuilder).buildDurationFilter,
 	"hash":       (*whereBuilder).buildHashFilter,
+	"md5":        (*whereBuilder).buildMD5Filter,
 	"id":         (*whereBuilder).buildIDFilter,
 	"phash":      (*whereBuilder).buildPhashFilter,
 	"relation":   (*whereBuilder).buildRelationFilter,
@@ -1055,6 +1057,7 @@ var filterBuilders = map[string]func(*whereBuilder, FilterExpr) string{
 	"generated":  (*whereBuilder).buildGeneratedFilter,
 	"rating":     (*whereBuilder).buildRatingFilter,
 	"lookup":     (*whereBuilder).buildLookupFilter,
+	"upgrade":    (*whereBuilder).buildUpgradeFilter,
 }
 
 func (b *whereBuilder) buildFilterExpr(e FilterExpr) string {
@@ -1319,12 +1322,50 @@ func (b *whereBuilder) buildDurationFilter(e FilterExpr) string {
 	return b.buildCompFilter("(i.duration_seconds IS NOT NULL AND i.duration_seconds %s ?)", e.Val, parseFloatValue, parseFloatComp)
 }
 
+// buildHashFilter dispatches on digest length so pasting either stored
+// hash into the bar finds the row. A 32-hex value matched nothing before
+// md5 was stored, so widening it changes no existing query.
 func (b *whereBuilder) buildHashFilter(e FilterExpr) string {
-	if e.Val == "" {
+	val := strings.ToLower(strings.TrimSpace(e.Val))
+	if !isHexDigest(val, md5HexLen) && !isHexDigest(val, sha256HexLen) {
 		return "1=0"
 	}
-	b.args = append(b.args, strings.ToLower(e.Val))
+	b.args = append(b.args, val)
+	if len(val) == md5HexLen {
+		return "i.md5 = ?"
+	}
 	return "i.sha256 = ?"
+}
+
+// buildMD5Filter takes the exact digest, or the bare form as a
+// has-one / doesn't-have-one test the way `phash:` reads.
+func (b *whereBuilder) buildMD5Filter(e FilterExpr) string {
+	val := strings.ToLower(strings.TrimSpace(e.Val))
+	if val == "" {
+		return "i.md5 != ''"
+	}
+	if !isHexDigest(val, md5HexLen) {
+		return "1=0"
+	}
+	b.args = append(b.args, val)
+	return "i.md5 = ?"
+}
+
+const (
+	md5HexLen    = 32
+	sha256HexLen = 64
+)
+
+func isHexDigest(s string, want int) bool {
+	if len(s) != want {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func (b *whereBuilder) buildIDFilter(e FilterExpr) string {
@@ -1427,6 +1468,70 @@ func (b *whereBuilder) buildLookupFilter(e FilterExpr) string {
 		return "(i.scheduled_lookup = 0 OR i.scheduled_lookup_ptr = 0)"
 	}
 	return "1=0"
+}
+
+// buildUpgradeFilter matches on the per-origin upgrade gate, shared with the
+// [upgrade] button through internal/upgrade. `unknown` is the origins nothing
+// can compare because the post claimed no md5 - what a source refresh
+// resolves. Any other value reads as a site label, so `any` / `none` shadow a
+// site labelled that, as source:/relation: do. Uncorrelated like
+// buildSourceFilter so the planner seeks idx_image_sources_upgradable once
+// instead of probing per visible row.
+func (b *whereBuilder) buildUpgradeFilter(e FilterExpr) string {
+	candidates := "SELECT s.image_id FROM image_sources s WHERE " + upgrade.CandidateWhere("s")
+	switch strings.ToLower(e.Val) {
+	case "", "any":
+		return "i.id IN (" + candidates + ")"
+	case "none":
+		return "i.id NOT IN (" + candidates + ")"
+	case "unknown":
+		// Candidates drop out: a similarity match with no claim has nothing
+		// to compare either, but it is already an offer rather than a
+		// question a refresh would answer.
+		return `(i.id IN (SELECT s.image_id FROM image_sources s WHERE s.url <> '' AND s.md5 = '')
+		         AND i.id NOT IN (SELECT s.image_id FROM image_sources s WHERE s.url <> '' AND s.md5 <> '')
+		         AND i.id NOT IN (` + candidates + `))`
+	case "kept":
+		return "i.id IN (SELECT s.image_id FROM image_sources s WHERE s.upgrade_kept = 1)"
+	case "sample":
+		return b.sampleSuspects(candidates)
+	case "bigger":
+		// The gain test needs the local row beside the origin, so this one
+		// leg joins images rather than riding the candidate subquery alone.
+		// Bytes answer only where the post published no dimensions.
+		return `i.id IN (SELECT s.image_id FROM image_sources s JOIN images im ON im.id = s.image_id
+		                 WHERE ` + upgrade.CandidateWhere("s") + `
+		                   AND ((s.post_width > 0 AND s.post_height > 0 AND im.width > 0 AND im.height > 0
+		                         AND s.post_width * s.post_height > im.width * im.height)
+		                     OR ((s.post_width = 0 OR s.post_height = 0) AND s.post_size > im.file_size)))`
+	}
+	b.args = append(b.args, e.Val)
+	return "i.id IN (" + candidates + " AND s.site = ? COLLATE NOCASE)"
+}
+
+// samplePatterns are the filenames a saved preview tends to keep: the
+// booru sample prefix, pixiv's resized master, and the suffixes a scaled
+// or small variant is served under.
+var samplePatterns = []string{`sample\_%`, `%\_master1200%`, `%-scaled%`, `%:small%`, `%:medium%`, `%preview%`}
+
+// sampleSuspects is `upgrade:sample`: an image that carries a post URL and
+// looks like the preview of it rather than the post's own file, by name or
+// by a geometry the sample sizes are cut to. A suspicion, never a verdict -
+// it is its own filter value, never feeds `upgrade:any`, and what resolves
+// it is refreshing the source until a digest can be compared. Images whose
+// file a source already verified, and the ones already offering an upgrade,
+// drop out: neither is a question this can answer.
+func (b *whereBuilder) sampleSuspects(candidates string) string {
+	names := make([]string, 0, len(samplePatterns))
+	for _, p := range samplePatterns {
+		b.args = append(b.args, p)
+		names = append(names, `i.basename_lower LIKE ? ESCAPE '\'`)
+	}
+	return `(i.id IN (SELECT s.image_id FROM image_sources s WHERE s.url <> '')
+	         AND i.id NOT IN (SELECT s.image_id FROM image_sources s WHERE s.md5_match = 'match')
+	         AND i.id NOT IN (` + candidates + `)
+	         AND ((` + strings.Join(names, " OR ") + `)
+	              OR i.width = 850 OR i.width = 1200 OR i.height = 1200))`
 }
 
 // buildStaleFilter matches images carrying a source-dropped (stale) tag.

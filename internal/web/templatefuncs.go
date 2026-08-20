@@ -1,16 +1,19 @@
 package web
 
 import (
+	"cmp"
 	"fmt"
 	"html/template"
 	"math"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/monbooru/monbooru/internal/models"
 	"github.com/monbooru/monbooru/internal/search"
 	"github.com/monbooru/monbooru/internal/tags"
+	"github.com/monbooru/monbooru/internal/upgrade"
 )
 
 // originTagGroup / originImplicationGroup bundle a relation list by the
@@ -50,12 +53,7 @@ func templateFuncs() template.FuncMap {
 		// Typed template.CSS to survive the style-attribute sanitizer,
 		// which is why the input is validated first: only the #rgb /
 		// #rrggbb shape the Categories form enforces gets through.
-		"catColor": func(color string) template.CSS {
-			if !tags.IsValidCategoryColor(color) {
-				return template.CSS(tags.SafeCategoryColor(color))
-			}
-			return template.CSS("var(--cat-" + strings.ToLower(strings.TrimPrefix(color, "#")) + "," + color + ")")
-		},
+		"catColor": func(color string) template.CSS { return template.CSS(categoryColor(color)) },
 		// catDefault is the colour the Categories page's Reset writes back,
 		// empty for a category the operator created.
 		"catDefault": tags.DefaultCategoryColor,
@@ -97,23 +95,17 @@ func templateFuncs() template.FuncMap {
 				func(t models.Tag) *tagGroup { return &tagGroup{Name: t.CategoryName, Color: t.CategoryColor} },
 				func(g *tagGroup, t models.Tag) { g.Tags = append(g.Tags, t) })
 		},
-		"deref": func(p *int) int {
-			if p == nil {
-				return 0
+		"deref":    derefOr[int],
+		"deref64":  derefOr[int64],
+		"deref64f": derefOr[float64],
+		// elideHash keeps both ends of a content hash, which is what anyone
+		// comparing two of them reads; the full value stays one click away
+		// on the copy button.
+		"elideHash": func(h string) string {
+			if len(h) <= 19 {
+				return h
 			}
-			return *p
-		},
-		"deref64": func(p *int64) int64 {
-			if p == nil {
-				return 0
-			}
-			return *p
-		},
-		"deref64f": func(p *float64) float64 {
-			if p == nil {
-				return 0
-			}
-			return *p
+			return h[:8] + "..." + h[len(h)-8:]
 		},
 		"phashHex": func(p *int64) string {
 			if p == nil {
@@ -121,6 +113,8 @@ func templateFuncs() template.FuncMap {
 			}
 			return fmt.Sprintf("%016x", uint64(*p))
 		},
+		"upgradable":     upgrade.Eligible,
+		"upgradeCompare": upgradeCompare,
 		// The "ptr" source has no post page: its fetch action is a hash
 		// lookup instead of a url refetch, so templates branch on the label.
 		"isPTRSite": func(site string) bool {
@@ -154,36 +148,8 @@ func templateFuncs() template.FuncMap {
 				return origin
 			}
 		},
-		"cancelTitle": func(jobType string) string {
-			// Tooltip for the job-status × button. Only the job types that
-			// observe ctx.Done() in their worker loop appear here.
-			switch jobType {
-			case "autotag":
-				return "Stop auto-tagging"
-			case "sync":
-				return "Stop syncing"
-			case "delete":
-				return "Stop deleting"
-			case "re-extract":
-				return "Stop re-extraction"
-			case "rebuild-thumbs":
-				return "Stop thumbnail rebuild"
-			case "prune-thumbs":
-				return "Stop thumbnail prune"
-			case "phash":
-				return "Stop phash backfill"
-			case "relations":
-				return "Stop find-pairs"
-			case "lookup":
-				return "Stop the lookup"
-			case "move":
-				return "Stop moving"
-			case "tag":
-				return "Stop tagging"
-			}
-			return "Stop"
-		},
-		"humanBytes": humanBytesFmt,
+		"cancelTitle": cancelTitle,
+		"humanBytes":  humanBytesFmt,
 		// localTime renders a stored-UTC timestamp in the process timezone
 		// (time.Local, driven by TZ) so displayed times match the operator's
 		// wall clock. Storage stays UTC; only the display converts.
@@ -198,9 +164,8 @@ func templateFuncs() template.FuncMap {
 		},
 		// localDate is localTime without the clock, for lines where the day
 		// is the whole answer (a lookup's next due date is weeks out).
-		"localDate": func(t time.Time) string {
-			return t.In(time.Local).Format("2006-01-02")
-		},
+		"localDate":          localDay,
+		"monloaderOffReason": monloaderOffReason,
 		// lookupResultLabel renders a recorded outcome as the tail of the
 		// "Last looked up" line. An error leaves last_result untouched by
 		// design, so only a concluded hit or miss reaches this.
@@ -210,21 +175,7 @@ func templateFuncs() template.FuncMap {
 			}
 			return "no match"
 		},
-		"browseSortLabel": func(s string) string {
-			switch s {
-			case "recent":
-				return "Recent"
-			case "size":
-				return "Size"
-			case "original_added":
-				return "Original added"
-			case "length":
-				return "Length"
-			case "newest_member":
-				return "Newest member"
-			}
-			return s
-		},
+		"browseSortLabel": browseSortLabel,
 		"isLongValue": func(s string) bool {
 			return len(s) > 200 || strings.ContainsAny(s, "\n\r")
 		},
@@ -249,15 +200,14 @@ func templateFuncs() template.FuncMap {
 			}
 			return many
 		},
+		"abbrevCount": abbrevCount,
 		"comfyRefTarget": func(s string) string {
 			// Displayed ComfyUI references start with "→ " followed by the
 			// referenced node's key. Strip the arrow+space so the template
 			// can build `href="#comfy-node-<key>"` for in-page navigation.
 			return strings.TrimPrefix(s, "→ ")
 		},
-		"hasPrefix": func(s, prefix string) bool {
-			return strings.HasPrefix(s, prefix)
-		},
+		"hasPrefix":     strings.HasPrefix,
 		"providerLabel": providerDisplayLabel,
 		// urlDomain returns the host of a URL (without a leading "www.") for
 		// display; the full URL still drives the link's href. Falls back to
@@ -289,6 +239,77 @@ func templateFuncs() template.FuncMap {
 			return time.Since(t).Milliseconds()
 		},
 	}
+}
+
+// localDay renders a date in the server's zone, the shape every date-only
+// line uses. Shared with the code paths that build such a line in Go.
+func localDay(t time.Time) string { return t.In(time.Local).Format("2006-01-02") }
+
+// cancelTitles is the tooltip on the job-status × button. Only the job
+// types that observe ctx.Done() in their worker loop appear here; anything
+// else falls back to the bare verb.
+var cancelTitles = map[string]string{
+	"autotag":        "Stop auto-tagging",
+	"sync":           "Stop syncing",
+	"delete":         "Stop deleting",
+	"re-extract":     "Stop re-extraction",
+	"rebuild-thumbs": "Stop thumbnail rebuild",
+	"prune-thumbs":   "Stop thumbnail prune",
+	"hashes":         "Stop hash backfill",
+	"relations":      "Stop find-pairs",
+	"lookup":         "Stop the lookup",
+	"move":           "Stop moving",
+	"tag":            "Stop tagging",
+}
+
+func cancelTitle(jobType string) string {
+	return cmp.Or(cancelTitles[jobType], "Stop")
+}
+
+// browseSortLabels names each /relations/browse sort for its button; an
+// unmapped value renders as itself.
+var browseSortLabels = map[string]string{
+	"recent":         "Recent",
+	"size":           "Size",
+	"original_added": "Original added",
+	"length":         "Length",
+	"newest_member":  "Newest member",
+}
+
+func browseSortLabel(s string) string { return cmp.Or(browseSortLabels[s], s) }
+
+// monloaderOffReasons titles a monloader-backed control that renders but
+// cannot act, so a paused link reads as paused rather than as breakage.
+var monloaderOffReasons = map[string]string{
+	"paused":   "monloader is paused",
+	"rejected": "monloader rejected the token",
+}
+
+func monloaderOffReason(conn string) string {
+	return cmp.Or(monloaderOffReasons[conn], "monloader is not responding")
+}
+
+// abbrevCount shortens a usage count to at most four glyphs so the sidebar's
+// count column keeps a fixed gutter at any library size; the exact figure
+// rides the cell's title. The decimal is kept above 1000 rather than
+// trimmed, so the column reads as one width, and the unit promotes at
+// 999500 because rounding any higher would spill a fifth glyph.
+func abbrevCount(n int) string {
+	switch {
+	case n < 1000:
+		return strconv.Itoa(n)
+	case n < 999500:
+		return abbrevUnit(n, 1000, "k")
+	default:
+		return abbrevUnit(n, 1000000, "M")
+	}
+}
+
+func abbrevUnit(n, div int, suffix string) string {
+	if tenths := (n*10 + div/2) / div; tenths < 100 {
+		return fmt.Sprintf("%d.%d%s", tenths/10, tenths%10, suffix)
+	}
+	return fmt.Sprintf("%d%s", (n+div/2)/div, suffix)
 }
 
 // groupByOriginStale buckets items by (origin, stale) in first-appearance
@@ -324,4 +345,65 @@ func groupByOriginStale[T, G any](items []T, key func(T) (string, bool), newGrou
 		}
 	}
 	return out
+}
+
+// upgradeCompare is the file comparison the [upgrade] prompt carries:
+// what the post serves against what is on disk, a line each. It lives in
+// the prompt rather than on the source row, which has no width for it.
+// The return value carries its own separator - a bare space when the post
+// published nothing, so the prompt still reads as one sentence.
+func upgradeCompare(s models.ImageSource, img models.Image) string {
+	post := fileFacts(s.PostWidth, s.PostHeight, s.PostExt, s.PostSize)
+	if post == "" {
+		return " "
+	}
+	label := s.Site
+	if label == "" {
+		label = "the post"
+	}
+	pad := max(len("yours"), len(label)) + 2
+	return fmt.Sprintf("\n\n%-*s%s\n%-*s%s\n\n",
+		pad, "yours", fileFacts(derefOr(img.Width), derefOr(img.Height), strings.ToLower(img.FileType), img.FileSize),
+		pad, label, post)
+}
+
+// fileFacts joins whatever of "WxH ext - size" is known, empty when none
+// of it is.
+func fileFacts(w, h int, ext string, size int64) string {
+	var parts []string
+	if w > 0 && h > 0 {
+		parts = append(parts, fmt.Sprintf("%dx%d", w, h))
+	}
+	if ext != "" {
+		parts = append(parts, ext)
+	}
+	line := strings.Join(parts, " ")
+	if size > 0 {
+		if line != "" {
+			line += " - "
+		}
+		line += humanBytesFmt(size)
+	}
+	return line
+}
+
+// derefOr is the nil-safe read the pointer-valued row fields need: a column
+// the decode never filled renders as its zero value rather than panicking.
+func derefOr[T any](p *T) T {
+	if p == nil {
+		var zero T
+		return zero
+	}
+	return *p
+}
+
+// categoryColor resolves a stored category colour to the value templates and
+// the markup renderer both emit. Only the #rgb / #rrggbb shape the Categories
+// form enforces reaches the variable form; anything else falls back, so an
+// unvalidated string can never reach a style attribute.
+func categoryColor(color string) string {
+	if !tags.IsValidCategoryColor(color) {
+		return tags.SafeCategoryColor(color)
+	}
+	return "var(--cat-" + strings.ToLower(strings.TrimPrefix(color, "#")) + "," + color + ")"
 }

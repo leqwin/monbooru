@@ -2,6 +2,7 @@
 {{$kinds := .OriginKinds}}
 <h3>Applied by</h3>
 {{if .AppliedBy}}
+<div class="table-scroll">
 <table class="tag-table tag-applied-table">
   <thead><tr><th>Source</th><th>Kind</th><th>Images</th></tr></thead>
   <tbody>
@@ -19,6 +20,7 @@
     {{end}}
   </tbody>
 </table>
+</div>
 {{else}}
 <p class="field-hint">Not applied to any image.</p>
 {{end}}

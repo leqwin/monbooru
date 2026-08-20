@@ -86,6 +86,15 @@ func New(cfg *config.Config, cfgMu *sync.RWMutex, jobManager *jobs.Manager, reso
 	return &Handler{cfg: cfg, cfgMu: cfgMu, jobs: jobManager, resolver: resolver, version: version}
 }
 
+// uploadDestination reads the two settings a received file is filed by.
+// They are strings the settings page rewrites at runtime, so the read
+// takes the web layer's lock.
+func (h *Handler) uploadDestination() (folder, name string) {
+	h.cfgMu.RLock()
+	defer h.cfgMu.RUnlock()
+	return h.cfg.Gallery.DefaultUploadFolder, h.cfg.Gallery.DefaultUploadName
+}
+
 // resolveGallery picks the target gallery from ?gallery=... (preferred)
 // or the X-Monbooru-Gallery header; empty falls back to the active one.
 func (h *Handler) resolveGallery(w http.ResponseWriter, r *http.Request) (Gallery, bool) {

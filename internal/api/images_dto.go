@@ -3,11 +3,13 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/monbooru/monbooru/internal/gallery"
+	"github.com/monbooru/monbooru/internal/markup"
 	"github.com/monbooru/monbooru/internal/models"
 )
 
@@ -47,6 +49,7 @@ const (
 	maxAnnotations        = 500
 	maxSourceMD5Len       = 64
 	maxSourcePostIDLen    = 64
+	maxSourcePostExtLen   = 16
 )
 
 // validateImageSource / validateImageURL / validateImageCollection carry
@@ -85,7 +88,7 @@ func validateImageCollection(s string) error {
 // meaningful next to a non-empty collection label (the detail page
 // renders "(none) #5" otherwise and collection: search never surfaces
 // the row), so it is refused without one. Values arrive trimmed.
-func validateCreateProvenance(source, postID, url, md5, parentURL, collection, commentary, original string, order *int) error {
+func validateCreateProvenance(source, postID, url, md5, parentURL, collection, commentary, original, postExt string, order *int) error {
 	if err := validateImageSource(source); err != nil {
 		return err
 	}
@@ -110,6 +113,9 @@ func validateCreateProvenance(source, postID, url, md5, parentURL, collection, c
 	if err := validateMaxLen("original", original, maxImageOriginalLen); err != nil {
 		return err
 	}
+	if err := validateMaxLen("post_ext", postExt, maxSourcePostExtLen); err != nil {
+		return err
+	}
 	if order != nil {
 		if *order < 1 {
 			return fmt.Errorf("collection_order must be 1 or higher")
@@ -125,6 +131,7 @@ func validateCreateProvenance(source, postID, url, md5, parentURL, collection, c
 type imageResponse struct {
 	ID             int64            `json:"id"`
 	SHA256         string           `json:"sha256"`
+	MD5            string           `json:"md5"`
 	CanonicalPath  string           `json:"canonical_path"`
 	Aliases        []string         `json:"aliases"`
 	FileType       string           `json:"file_type"`
@@ -202,17 +209,31 @@ type annotationJSON struct {
 	W      int    `json:"w"`
 	H      int    `json:"h"`
 	Body   string `json:"body"`
+	// BodyHTML is a source's own HTML for the box, converted to markup on the
+	// way in and never echoed back. BodyText is the flattening of a body that
+	// carries markup, for a reader that would rather not parse it.
+	BodyHTML string `json:"body_html,omitempty"`
+	BodyText string `json:"body_text,omitempty"`
 }
 
 // annotationsFromInput clamps coordinates non-negative and bounds the count and
-// body length so a hostile payload can't blow up the overlay or a row.
-func annotationsFromInput(in []annotationJSON) []models.Annotation {
+// body length so a hostile payload can't blow up the overlay or a row. A box
+// carrying the source's HTML is converted first, with postURL resolving the
+// site-relative links a booru's own notes use.
+func annotationsFromInput(in []annotationJSON, postURL string) []models.Annotation {
 	if len(in) > maxAnnotations {
 		in = in[:maxAnnotations]
+	}
+	var base *url.URL
+	if postURL != "" {
+		base, _ = url.Parse(postURL)
 	}
 	out := make([]models.Annotation, 0, len(in))
 	for _, n := range in {
 		body := n.Body
+		if n.BodyHTML != "" {
+			body = markup.FromHTML(n.BodyHTML, base)
+		}
 		if r := []rune(body); len(r) > maxAnnotationBodyLen {
 			body = string(r[:maxAnnotationBodyLen])
 		}
@@ -224,7 +245,7 @@ func annotationsFromInput(in []annotationJSON) []models.Annotation {
 }
 
 // parseNotesField decodes the multipart `notes` field (a JSON array of boxes).
-func parseNotesField(raw string) []models.Annotation {
+func parseNotesField(raw, postURL string) []models.Annotation {
 	if strings.TrimSpace(raw) == "" {
 		return nil
 	}
@@ -232,7 +253,7 @@ func parseNotesField(raw string) []models.Annotation {
 	if err := json.Unmarshal([]byte(raw), &in); err != nil {
 		return nil
 	}
-	return annotationsFromInput(in)
+	return annotationsFromInput(in, postURL)
 }
 
 type imageTagJSON struct {
@@ -256,6 +277,7 @@ func makeImageResponse(g Gallery, img models.Image, tags []imageTagJSON, aliases
 	return imageResponse{
 		ID:             img.ID,
 		SHA256:         img.SHA256,
+		MD5:            img.MD5,
 		CanonicalPath:  img.CanonicalPath,
 		Aliases:        aliases,
 		FileType:       img.FileType,

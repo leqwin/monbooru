@@ -34,26 +34,20 @@ func executionProviderRows() []executionProviderRow {
 	return rows
 }
 
-// providerDisplayLabel returns the human-readable label for a provider name.
+// providerDisplayLabels spells each ONNX Runtime provider the way its
+// vendor does; a name with no entry renders as stored.
+var providerDisplayLabels = map[string]string{
+	"cpu":      "CPU",
+	"cuda":     "CUDA",
+	"directml": "DirectML",
+	"tensorrt": "TensorRT",
+	"openvino": "OpenVINO",
+	"coreml":   "CoreML",
+	"coremlv2": "CoreML V2",
+}
+
 func providerDisplayLabel(name string) string {
-	switch name {
-	case "cpu":
-		return "CPU"
-	case "cuda":
-		return "CUDA"
-	case "directml":
-		return "DirectML"
-	case "tensorrt":
-		return "TensorRT"
-	case "openvino":
-		return "OpenVINO"
-	case "coreml":
-		return "CoreML"
-	case "coremlv2":
-		return "CoreML V2"
-	default:
-		return name
-	}
+	return cmp.Or(providerDisplayLabels[name], name)
 }
 
 // settingsData is the /settings page. Galleries shadows the layout's list
@@ -187,7 +181,21 @@ func (s *Server) settingsGeneralPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	uploadFolder := strings.TrimSpace(r.FormValue("default_upload_folder"))
-	if _, err := gallery.ResolveSubdir(s.galleryPath(), uploadFolder); err != nil {
+	folderTmpl, err := gallery.ParseNameTemplate(uploadFolder, gallery.ScopeUploadFolder)
+	if err != nil {
+		writeInlineFlash(w, "err", err.Error())
+		return
+	}
+	// A folder built from tokens only resolves per image, so only a literal
+	// one can be containment-checked here.
+	if !folderTmpl.HasTokens() {
+		if _, err := gallery.ResolveSubdir(s.galleryPath(), uploadFolder); err != nil {
+			writeInlineFlash(w, "err", err.Error())
+			return
+		}
+	}
+	uploadName := strings.TrimSpace(r.FormValue("default_upload_name"))
+	if _, err := gallery.ParseNameTemplate(uploadName, gallery.ScopeUploadName); err != nil {
 		writeInlineFlash(w, "err", err.Error())
 		return
 	}
@@ -197,6 +205,8 @@ func (s *Server) settingsGeneralPost(w http.ResponseWriter, r *http.Request) {
 		s.cfg.Gallery.MaxFileSizeMB = n
 	}
 	s.cfg.Gallery.DefaultUploadFolder = uploadFolder
+	s.cfg.Gallery.DefaultUploadName = uploadName
+	s.cfg.Gallery.RenameOnIngest = r.FormValue("rename_on_ingest") == "on"
 	if n, err := strconv.Atoi(r.FormValue("page_size")); err == nil && n > 0 {
 		s.cfg.UI.PageSize = min(n, config.MaxPageSize)
 	}

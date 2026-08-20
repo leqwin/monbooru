@@ -13,25 +13,13 @@ import (
 // move-or-delete teardown.
 
 func (s *Service) ListCategories() ([]models.TagCategory, error) {
-	rows, err := s.db.Read.Query(
-		`SELECT id, name, color, is_builtin FROM tag_categories ORDER BY id`,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	var cats []models.TagCategory
-	for rows.Next() {
+	return db.QueryAll(s.db.Read, func(rows *sql.Rows) (models.TagCategory, error) {
 		var c models.TagCategory
 		var isBuiltin int
-		if err := rows.Scan(&c.ID, &c.Name, &c.Color, &isBuiltin); err != nil {
-			return nil, err
-		}
+		err := rows.Scan(&c.ID, &c.Name, &c.Color, &isBuiltin)
 		c.IsBuiltin = isBuiltin == 1
-		cats = append(cats, c)
-	}
-	return cats, rows.Err()
+		return c, err
+	}, `SELECT id, name, color, is_builtin FROM tag_categories ORDER BY id`)
 }
 
 func (s *Service) GetCategory(id int64) (models.TagCategory, error) {
@@ -159,24 +147,11 @@ func (e *ErrCategoryMoveCollision) Error() string {
 // collidingNames lists the tag names the category holds that the target
 // already has, capped for the message.
 func collidingNames(tx *sql.Tx, id, targetID int64) ([]string, error) {
-	rows, err := tx.Query(
+	return db.QueryStrings(tx,
 		`SELECT t.name FROM tags t
 		 WHERE t.category_id = ?
 		   AND EXISTS (SELECT 1 FROM tags o WHERE o.category_id = ? AND o.name = t.name)
 		 ORDER BY t.name`, id, targetID)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	var names []string
-	for rows.Next() {
-		var n string
-		if err := rows.Scan(&n); err != nil {
-			return nil, err
-		}
-		names = append(names, n)
-	}
-	return names, rows.Err()
 }
 
 // isUniqueConstraintErr reports whether err is the SQLite UNIQUE

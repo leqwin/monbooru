@@ -143,19 +143,21 @@ func RunWithTaggers(ctx context.Context, database *db.DB, cfg *config.Config, id
 	// Loaded ahead of the backend so a fresh session set picks up the
 	// current tag_categories rows when LoadDispatch resolves rule
 	// targets. Reused below for the rating / wd14 / inferred chains.
+	type catRow struct {
+		id   int64
+		name string
+	}
 	catIDs := map[string]int64{}
-	catRows, err := database.Read.QueryContext(ctx, `SELECT id, name FROM tag_categories`)
-	if err == nil {
-		for catRows.Next() {
-			var id int64
-			var name string
-			if scanErr := catRows.Scan(&id, &name); scanErr != nil {
-				logx.Warnf("tagger: scan tag_categories: %v", scanErr)
-				continue
-			}
-			catIDs[name] = id
-		}
-		_ = catRows.Close()
+	cats, err := db.QueryAllContext(ctx, database.Read, func(rows *sql.Rows) (catRow, error) {
+		var c catRow
+		err := rows.Scan(&c.id, &c.name)
+		return c, err
+	}, `SELECT id, name FROM tag_categories`)
+	if err != nil {
+		logx.Warnf("tagger: read tag_categories: %v", err)
+	}
+	for _, c := range cats {
+		catIDs[c.name] = c.id
 	}
 	generalCatID := catIDs["general"]
 
@@ -178,7 +180,11 @@ func RunWithTaggers(ctx context.Context, database *db.DB, cfg *config.Config, id
 	if hasSingleGeneral && generalCatID != 0 {
 		// Skip names whose general counterpart already carries a manual
 		// image_tag - that's an explicit user choice.
-		infRows, err := database.Read.QueryContext(ctx, `
+		inferred, err := db.QueryAllContext(ctx, database.Read, func(rows *sql.Rows) (catRow, error) {
+			var c catRow
+			err := rows.Scan(&c.name, &c.id)
+			return c, err
+		}, `
 			SELECT t.name, t.category_id
 			FROM tags t
 			JOIN tag_categories tc ON tc.id = t.category_id
@@ -194,23 +200,17 @@ func RunWithTaggers(ctx context.Context, database *db.DB, cfg *config.Config, id
 			  )`, generalCatID)
 		if err == nil {
 			ambiguous := map[string]bool{}
-			for infRows.Next() {
-				var n string
-				var cid int64
-				if err := infRows.Scan(&n, &cid); err != nil {
+			for _, r := range inferred {
+				if ambiguous[r.name] {
 					continue
 				}
-				if ambiguous[n] {
+				if existing, ok := inferredCats[r.name]; ok && existing != r.id {
+					ambiguous[r.name] = true
+					delete(inferredCats, r.name)
 					continue
 				}
-				if existing, ok := inferredCats[n]; ok && existing != cid {
-					ambiguous[n] = true
-					delete(inferredCats, n)
-					continue
-				}
-				inferredCats[n] = cid
+				inferredCats[r.name] = r.id
 			}
-			_ = infRows.Close()
 		}
 	}
 
@@ -454,22 +454,24 @@ func storeResults(
 		taggerName string
 	}
 	current := map[int64]rowInfo{}
-	rows, err := tx.QueryContext(ctx,
-		`SELECT tag_id, is_auto, tagger_name FROM image_tags WHERE image_id = ?`, imageID)
+	type tagRow struct {
+		id int64
+		rowInfo
+	}
+	existing, err := db.QueryAllContext(ctx, tx, func(rows *sql.Rows) (tagRow, error) {
+		var r tagRow
+		var isAuto int
+		var tname sql.NullString
+		err := rows.Scan(&r.id, &isAuto, &tname)
+		r.isAuto, r.taggerName = isAuto == 1, tname.String
+		return r, err
+	}, `SELECT tag_id, is_auto, tagger_name FROM image_tags WHERE image_id = ?`, imageID)
 	if err != nil {
 		return err
 	}
-	for rows.Next() {
-		var tid int64
-		var isAuto int
-		var tname sql.NullString
-		if err := rows.Scan(&tid, &isAuto, &tname); err != nil {
-			_ = rows.Close()
-			return err
-		}
-		current[tid] = rowInfo{isAuto: isAuto == 1, taggerName: tname.String}
+	for _, r := range existing {
+		current[r.id] = r.rowInfo
 	}
-	_ = rows.Close()
 
 	toRemove := map[int64]struct{}{}
 	if len(taggerNames) > 0 {

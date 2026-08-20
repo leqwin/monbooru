@@ -14,10 +14,13 @@
          row client-side per picked tag and the detail page - which knows
          its one tag up front - drops it outright. */}}
     {{if .KeepAlias}}
-    <label style="display:block;font-size:12px" id="rename-keep-alias-row">
-      <input type="checkbox" name="keep_alias" value="1" id="rename-keep-alias">
-      Keep the old name as an alias
-    </label>
+    <div id="rename-keep-alias-row">
+      <label style="display:block;font-size:12px">
+        <input type="checkbox" name="keep_alias" value="1" id="rename-keep-alias">
+        Keep the old name as an alias
+      </label>
+      <span class="field-hint">Without it, saved searches naming the old spelling match nothing.</span>
+    </div>
     {{end}}
     <div id="rename-error"></div>
     <div class="dialog-actions">

@@ -36,7 +36,7 @@
         </div>
         {{range .Actionable}}
         <label class="ptr-row ptr-row-add">
-          <input type="checkbox" name="{{$.PickName}}" value="{{if $.Pairs}}{{.Value}}{{else}}{{.Tag}}{{end}}"><span class="ptr-gut"></span><span class="ptr-mark"></span>{{template "ptr_contrib_name" (dict "Pairs" $.Pairs "Row" .)}}<span class="ptr-note{{if not $.Pairs}}{{if .PTRDiffers}} ptr-note-under{{end}}{{end}}">{{if $.Pairs}}{{.Rel}}{{else if .PTRDiffers}}PTR spelling: {{.PTR}}{{end}}</span>
+          <input type="checkbox" name="{{$.PickName}}" value="{{if $.Pairs}}{{.Value}}{{else}}{{.Tag}}{{end}}"><span class="ptr-gut"></span><span class="ptr-mark"></span>{{template "ptr_contrib_name" (dict "Pairs" $.Pairs "Row" .)}}<span class="ptr-note{{if not $.Pairs}}{{if .UnknownTag}} ptr-note-warn{{else if .PTRDiffers}} ptr-note-under{{end}}{{end}}">{{if $.Pairs}}{{.Rel}}{{else if .UnknownTag}}not a PTR tag{{else if .PTRDiffers}}PTR spelling: {{.PTR}}{{end}}</span>
         </label>
         {{end}}
         {{if not .Actionable}}<p class="field-hint">nothing new to {{.Verb}}.</p>{{end}}
@@ -94,8 +94,8 @@
     </div>
 
     <div id="ptr-contrib-flash"></div>
+    <p id="ptr-contrib-summary" class="ptr-contrib-summary">nothing selected yet.</p>
     <div class="dialog-actions">
-      <p id="ptr-contrib-summary" class="ptr-contrib-summary">nothing selected yet.</p>
       <button type="button" onclick="document.getElementById('ptr-contrib-dialog').close()">cancel</button>
       <button type="submit" id="ptr-contrib-send" disabled>send to PTR</button>
     </div>

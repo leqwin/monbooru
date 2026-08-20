@@ -11,7 +11,8 @@
       <li class="folder-node-wrap">
         <div class="folder-node-row">
           <span class="folder-spacer"></span>
-          <a href="/?q={{urlQ $active}}" class="folder-link{{if eq $.Query $active}} active{{end}}" title="{{.Source}}">{{.Source}} ({{.Count}})</a>
+          <a href="/?q={{urlQ $active}}" class="folder-link{{if eq $.Query $active}} active{{end}}" title="{{.Source}}">{{.Source}}</a>
+          <span class="folder-count" title="{{.Count}} images">{{abbrevCount .Count}}</span>
         </div>
       </li>
       {{end}}
@@ -29,7 +30,8 @@
       <li class="folder-node-wrap">
         <div class="folder-node-row">
           <span class="folder-spacer"></span>
-          <a href="/?q=folder:" class="folder-link{{if eq $.Query "folder:"}} active{{end}}">/ ({{$root.Count}})</a>
+          <a href="/?q=folder:" class="folder-link{{if eq $.Query "folder:"}} active{{end}}">/</a>
+          <span class="folder-count" title="{{$root.Count}} images">{{abbrevCount $root.Count}}</span>
           <a href="/?q=folderonly:" class="folder-only-btn{{if eq $.Query "folderonly:"}} active{{end}}" title="Only this folder (no subfolders)">[·]</a>
         </div>
       </li>
@@ -77,9 +79,9 @@
     {{else}}
     <span class="folder-spacer"></span>
     {{end}}
-    <a href="/?q={{urlQ $quotedActive}}" class="folder-link{{if or (eq $query $active) (eq $query $quotedActive)}} active{{end}}">
-      {{$node.Name}}/ ({{$node.Count}})
-    </a>
+    <a href="/?q={{urlQ $quotedActive}}" class="folder-link{{if or (eq $query $active) (eq $query $quotedActive)}} active{{end}}"
+       title="{{$node.Name}}/">{{$node.Name}}/</a>
+    <span class="folder-count" title="{{$node.Count}} images">{{abbrevCount $node.Count}}</span>
     <a href="/?q={{urlQ $quotedOnlyActive}}" class="folder-only-btn{{if or (eq $query $onlyActive) (eq $query $quotedOnlyActive)}} active{{end}}" title="Only this folder (no subfolders)">[·]</a>
   </div>
   {{if $node.Children}}

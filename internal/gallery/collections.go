@@ -27,27 +27,17 @@ func orderValue(order *int) any {
 // detail page renders them: positioned rows first (ascending), then the
 // unordered ones by name.
 func CollectionsForImage(database *db.DB, imageID int64) ([]models.Collection, error) {
-	rows, err := database.Read.Query(
-		`SELECT name, position FROM image_collections WHERE image_id = ?
-		 ORDER BY position IS NULL, position, name`, imageID)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	var out []models.Collection
-	for rows.Next() {
+	return db.QueryAll(database.Read, func(rows *sql.Rows) (models.Collection, error) {
 		var c models.Collection
 		var pos sql.NullInt64
-		if err := rows.Scan(&c.Name, &pos); err != nil {
-			return nil, err
-		}
+		err := rows.Scan(&c.Name, &pos)
 		if pos.Valid {
 			v := int(pos.Int64)
 			c.Order = &v
 		}
-		out = append(out, c)
-	}
-	return out, rows.Err()
+		return c, err
+	}, `SELECT name, position FROM image_collections WHERE image_id = ?
+		 ORDER BY position IS NULL, position, name`, imageID)
 }
 
 // AddCollectionMembership upserts a membership (adding it or just updating
@@ -288,20 +278,11 @@ func ListCollections(database *db.DB, nameFilter, sort string, limit, offset int
 		 GROUP BY c.name ORDER BY ` + orderBy + ` LIMIT ? OFFSET ?`
 		args = append(append(excludeArgs, filterArgs...), limit, offset)
 	}
-	rows, err := database.Read.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	var out []CollectionSummary
-	for rows.Next() {
+	return db.QueryAll(database.Read, func(rows *sql.Rows) (CollectionSummary, error) {
 		var c CollectionSummary
-		if err := rows.Scan(&c.Name, &c.Count, &c.FindRelations); err != nil {
-			return out, err
-		}
-		out = append(out, c)
-	}
-	return out, rows.Err()
+		err := rows.Scan(&c.Name, &c.Count, &c.FindRelations)
+		return c, err
+	}, query, args...)
 }
 
 // SetCollectionFindRelations flips a collection's find-relations opt-in.
@@ -375,29 +356,20 @@ func collectionWalk(database *db.DB, name string, excludeIDs []int64, limit, off
 	exclude, args := excludeNotExists("i.id", excludeIDs)
 	args = append([]any{name}, args...)
 	args = append(args, limit, offset)
-	rows, err := database.Read.Query(
+	return db.QueryAll(database.Read, func(rows *sql.Rows) (CollectionSample, error) {
+		var sample CollectionSample
+		var pos sql.NullInt64
+		err := rows.Scan(&sample.ID, &pos, &sample.Filename)
+		if pos.Valid {
+			v := int(pos.Int64)
+			sample.Order = &v
+		}
+		return sample, err
+	},
 		`SELECT c.image_id, c.position, basename(i.canonical_path)
 		 FROM image_collections c JOIN images i ON i.id = c.image_id
 		 WHERE c.name = ? AND i.is_missing = 0`+exclude+`
 		 ORDER BY c.position IS NULL, c.position, c.image_id LIMIT ? OFFSET ?`, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	var out []CollectionSample
-	for rows.Next() {
-		var s CollectionSample
-		var pos sql.NullInt64
-		if err := rows.Scan(&s.ID, &pos, &s.Filename); err != nil {
-			return out, err
-		}
-		if pos.Valid {
-			v := int(pos.Int64)
-			s.Order = &v
-		}
-		out = append(out, s)
-	}
-	return out, rows.Err()
 }
 
 // CollectionMembers returns one window of name's visible members

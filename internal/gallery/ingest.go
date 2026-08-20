@@ -40,12 +40,12 @@ func FolderPath(galleryPath, filePath string) string {
 // origin records how the file got in ("ingest" / "upload" / caller-supplied
 // string); empty defaults to "ingest".
 func Ingest(database *db.DB, galleryPath, thumbnailsPath, path, origin string) (*models.Image, bool, error) {
-	hash, err := HashFile(path)
+	hash, sum, err := HashFileDigests(path)
 	if err != nil {
 		return nil, false, fmt.Errorf("hashing file: %w", err)
 	}
 	ClaimOwnership(path)
-	return ingestWithHash(database, galleryPath, thumbnailsPath, path, hash, origin)
+	return ingestWithHash(database, galleryPath, thumbnailsPath, path, hash, sum, origin)
 }
 
 // decodeImageDimensions reads just the header of the image at path and
@@ -64,10 +64,10 @@ func decodeImageDimensions(path string) (w, h *int) {
 	return &cfg.Width, &cfg.Height
 }
 
-// ingestWithHash is the body of Ingest minus the HashFile +
+// ingestWithHash is the body of Ingest minus the HashFileDigests +
 // ClaimOwnership preamble. Sync uses it directly to avoid double-hashing
 // the same file on large libraries.
-func ingestWithHash(database *db.DB, galleryPath, thumbnailsPath, path, hash, origin string) (*models.Image, bool, error) {
+func ingestWithHash(database *db.DB, galleryPath, thumbnailsPath, path, hash, sum, origin string) (*models.Image, bool, error) {
 	origin = cmp.Or(origin, models.OriginIngest)
 	var existingID int64
 	err := database.Read.QueryRow(
@@ -97,24 +97,11 @@ func ingestWithHash(database *db.DB, galleryPath, thumbnailsPath, path, hash, or
 				return nil, false, fmt.Errorf("begin reactivation tx: %w", txErr)
 			}
 			defer func() { _ = tx.Rollback() }()
-			if _, err := tx.Exec(
-				`UPDATE images SET is_missing = 0, canonical_path = ?, folder_path = ? WHERE id = ?`,
-				path, newFolder, existingID,
-			); err != nil {
+			if err := repointCanonical(tx, existingID, path, newFolder, ""); err != nil {
 				return nil, false, fmt.Errorf("reactivate image: %w", err)
 			}
-			if _, err := tx.Exec(
-				`UPDATE image_paths SET is_canonical = 0 WHERE image_id = ? AND is_canonical = 1`,
-				existingID,
-			); err != nil {
-				return nil, false, fmt.Errorf("demote previous canonical: %w", err)
-			}
-			if _, err := tx.Exec(
-				`INSERT INTO image_paths (image_id, path, is_canonical) VALUES (?, ?, 1)
-				 ON CONFLICT(path) DO UPDATE SET is_canonical = 1`,
-				existingID, path,
-			); err != nil {
-				return nil, false, fmt.Errorf("install new canonical: %w", err)
+			if _, err := tx.Exec(`UPDATE images SET md5 = ? WHERE id = ?`, sum, existingID); err != nil {
+				return nil, false, fmt.Errorf("reactivate image md5: %w", err)
 			}
 			// Restore the usage_count slots markFileMissing decremented
 			// when the file vanished. usage_count tracks visible images,
@@ -149,24 +136,8 @@ func ingestWithHash(database *db.DB, galleryPath, thumbnailsPath, path, hash, or
 				return nil, false, fmt.Errorf("begin promote tx: %w", txErr)
 			}
 			defer func() { _ = tx.Rollback() }()
-			if _, err := tx.Exec(
-				`UPDATE images SET canonical_path = ?, folder_path = ? WHERE id = ?`,
-				path, newFolder, existingID,
-			); err != nil {
+			if err := repointCanonical(tx, existingID, path, newFolder, img.CanonicalPath); err != nil {
 				return nil, false, fmt.Errorf("promote canonical path: %w", err)
-			}
-			if _, err := tx.Exec(
-				`DELETE FROM image_paths WHERE image_id = ? AND path = ?`,
-				existingID, img.CanonicalPath,
-			); err != nil {
-				return nil, false, fmt.Errorf("drop old canonical: %w", err)
-			}
-			if _, err := tx.Exec(
-				`INSERT INTO image_paths (image_id, path, is_canonical) VALUES (?, ?, 1)
-				 ON CONFLICT(path) DO UPDATE SET is_canonical = 1`,
-				existingID, path,
-			); err != nil {
-				return nil, false, fmt.Errorf("install new canonical: %w", err)
 			}
 			if err := tx.Commit(); err != nil {
 				return nil, false, fmt.Errorf("commit promote: %w", err)
@@ -221,12 +192,12 @@ func ingestWithHash(database *db.DB, galleryPath, thumbnailsPath, path, hash, or
 		`SELECT image_id, is_canonical FROM image_paths WHERE path = ?`, path,
 	).Scan(&prevID, &prevCanonical); {
 	case pathErr == nil && prevCanonical == 1:
-		if editErr := applyInPlaceEdit(database, thumbnailsPath, path, hash,
+		if editErr := applyInPlaceEdit(database, thumbnailsPath, path, hash, sum,
 			fi.ModTime().Unix(), fi.ModTime().UnixNano(), fi.Size()); editErr != nil {
 			return nil, false, editErr
 		}
 		return &models.Image{
-			ID: prevID, SHA256: hash, CanonicalPath: path, FolderPath: folderPath,
+			ID: prevID, SHA256: hash, MD5: sum, CanonicalPath: path, FolderPath: folderPath,
 			FileType: fileType, FileSize: fi.Size(),
 		}, false, nil
 	case pathErr == nil:
@@ -296,11 +267,11 @@ func ingestWithHash(database *db.DB, galleryPath, thumbnailsPath, path, hash, or
 
 	var imgID int64
 	insertErr := tx.QueryRow(
-		`INSERT INTO images (sha256, canonical_path, folder_path, file_type, width, height, file_size, source_type, origin, page_count, series, duration_seconds)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO images (sha256, md5, canonical_path, folder_path, file_type, width, height, file_size, source_type, origin, page_count, series, duration_seconds)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(sha256) DO NOTHING
 		 RETURNING id`,
-		hash, path, folderPath, fileType, toNullInt(imgWidth), toNullInt(imgHeight), fi.Size(), sourceType, origin, toNullInt(pageCount), prefilledSeries, toNullFloat(durationSec),
+		hash, sum, path, folderPath, fileType, toNullInt(imgWidth), toNullInt(imgHeight), fi.Size(), sourceType, origin, toNullInt(pageCount), prefilledSeries, toNullFloat(durationSec),
 	).Scan(&imgID)
 
 	if insertErr == sql.ErrNoRows {

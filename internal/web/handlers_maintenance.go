@@ -178,6 +178,10 @@ func (s *Server) findFoldedDuplicatesPost(w http.ResponseWriter, r *http.Request
 	writeInlineFlash(w, "ok", "Folded-duplicate scan started.")
 }
 
+// duplicatesFragmentCap bounds the one-shot fragment; the paginated
+// walker page is where a long list is meant to be worked through.
+const duplicatesFragmentCap = 100
+
 func (s *Server) duplicatesListHandler(w http.ResponseWriter, r *http.Request) {
 	// The endpoint is an htmx target on the Relations page; non-htmx
 	// callers (refresh, paste, bookmark) get redirected to the page so
@@ -187,36 +191,39 @@ func (s *Server) duplicatesListHandler(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/relations#file-duplicates", http.StatusSeeOther)
 		return
 	}
-	rows, err := s.db().Read.Query(`
-		SELECT i.id, i.canonical_path, ip.id as path_id, ip.path
-		FROM images i
+	var total int
+	if err := s.db().Read.QueryRow(`
+		SELECT COUNT(*) FROM images i
 		JOIN image_paths ip ON ip.image_id = i.id AND ip.is_canonical = 0
-		ORDER BY i.id, ip.id
-	`)
-	if err != nil {
+	`).Scan(&total); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer func() { _ = rows.Close() }()
-
 	type aliasRow struct {
 		ImageID       int64
 		CanonicalPath string
 		PathID        int64
 		AliasPath     string
 	}
-	var aliases []aliasRow
-	for rows.Next() {
+	aliases, err := db.QueryAll(s.db().Read, func(rows *sql.Rows) (aliasRow, error) {
 		var a aliasRow
-		if err := rows.Scan(&a.ImageID, &a.CanonicalPath, &a.PathID, &a.AliasPath); err != nil {
-			logx.Warnf("duplicates list scan: %v", err)
-			continue
-		}
-		aliases = append(aliases, a)
+		err := rows.Scan(&a.ImageID, &a.CanonicalPath, &a.PathID, &a.AliasPath)
+		return a, err
+	}, `
+		SELECT i.id, i.canonical_path, ip.id as path_id, ip.path
+		FROM images i
+		JOIN image_paths ip ON ip.image_id = i.id AND ip.is_canonical = 0
+		ORDER BY i.id, ip.id
+		LIMIT ?
+	`, duplicatesFragmentCap)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 
 	s.renderTemplate(w, "partials/duplicates_list.html", map[string]any{
 		"Aliases":   aliases,
+		"Withheld":  max(total-len(aliases), 0),
 		"CSRFToken": s.csrfToken(sessionFromContext(r.Context())),
 	})
 }
@@ -238,26 +245,22 @@ func (s *Server) removeDuplicatesPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var (
-		rows *sql.Rows
-		err  error
-	)
+	var query string
+	var args []any
 	if allFlag {
 		// The sha256 walker filters non-canonical aliases by ceiling
 		// so explicit-rated images don't surface in the table. Mirror
 		// that filter here so "Delete all duplicate files" can't wipe
 		// aliases the operator can't see.
-		q := `
+		query = `
 			SELECT ip.id, ip.path
 			FROM image_paths ip
 			JOIN images i ON i.id = ip.image_id
 			WHERE ip.is_canonical = 0`
-		args := []any{}
 		if where, wargs := resolveCeiling(r, s.Active()).WhereOne("i.id"); where != "" {
-			q += ` AND ` + where
+			query += ` AND ` + where
 			args = append(args, wargs...)
 		}
-		rows, err = s.db().Read.Query(q, args...)
 	} else {
 		// Build an IN (?,?,...) query restricted to the supplied path_ids
 		// that still aren't canonical - callers can't use this endpoint to
@@ -272,34 +275,23 @@ func (s *Server) removeDuplicatesPost(w http.ResponseWriter, r *http.Request) {
 			writeInlineFlash(w, "err", "No valid path_ids in request.")
 			return
 		}
-		placeholders, args := db.InPlaceholders(ids)
-		rows, err = s.db().Read.Query(
-			`SELECT ip.id, ip.path FROM image_paths ip
-			 WHERE ip.is_canonical = 0 AND ip.id IN (`+placeholders+`)`,
-			args...,
-		)
-	}
-	if err != nil {
-		writeInlineFlash(w, "err", err.Error())
-		return
+		var placeholders string
+		placeholders, args = db.InPlaceholders(ids)
+		query = `SELECT ip.id, ip.path FROM image_paths ip
+			 WHERE ip.is_canonical = 0 AND ip.id IN (` + placeholders + `)`
 	}
 
 	type pathRow struct {
 		ID   int64
 		Path string
 	}
-	var paths []pathRow
-	for rows.Next() {
+	paths, err := db.QueryAll(s.db().Read, func(rows *sql.Rows) (pathRow, error) {
 		var p pathRow
-		if err := rows.Scan(&p.ID, &p.Path); err != nil {
-			logx.Warnf("remove duplicates scan: %v", err)
-			continue
-		}
-		paths = append(paths, p)
-	}
-	_ = rows.Close()
-	if iterErr := rows.Err(); iterErr != nil {
-		writeInlineFlash(w, "err", iterErr.Error())
+		err := rows.Scan(&p.ID, &p.Path)
+		return p, err
+	}, query, args...)
+	if err != nil {
+		writeInlineFlash(w, "err", err.Error())
 		return
 	}
 
@@ -419,22 +411,12 @@ func (s *Server) startRebuildThumbsJob(cx *galleryCtx) error {
 		Path     string
 		FileType string
 	}
-	rows, err := cx.DB.Read.Query(
-		`SELECT id, canonical_path, file_type FROM images WHERE is_missing = 0`)
-	if err != nil {
-		return err
-	}
-	var imgs []imgRow
-	for rows.Next() {
+	imgs, err := db.QueryAll(cx.DB.Read, func(rows *sql.Rows) (imgRow, error) {
 		var img imgRow
-		if err := rows.Scan(&img.ID, &img.Path, &img.FileType); err != nil {
-			_ = rows.Close()
-			return err
-		}
-		imgs = append(imgs, img)
-	}
-	_ = rows.Close()
-	if err := rows.Err(); err != nil {
+		err := rows.Scan(&img.ID, &img.Path, &img.FileType)
+		return img, err
+	}, `SELECT id, canonical_path, file_type FROM images WHERE is_missing = 0`)
+	if err != nil {
 		return err
 	}
 
@@ -489,11 +471,13 @@ func (s *Server) startRebuildThumbsJob(cx *galleryCtx) error {
 	return nil
 }
 
-// computePhashesPost backfills images.phash for every visible row whose
-// hash is currently NULL. Wires the canonical compute path to the
-// Maintenance section button.
-func (s *Server) computePhashesPost(w http.ResponseWriter, r *http.Request) {
-	if !s.startJob(w, models.JobTypePhash) {
+// computeHashesPost backfills the two derived digests for every visible
+// row missing one: images.phash, then images.md5. The phash pass runs
+// first because it reads small cached thumbnails while the md5 pass
+// reads every original byte in the gallery - a cancel a few seconds in
+// leaves the cheap half done rather than nothing.
+func (s *Server) computeHashesPost(w http.ResponseWriter, r *http.Request) {
+	if !s.startJob(w, models.JobTypeHashes) {
 		return
 	}
 	database := s.db()
@@ -502,29 +486,44 @@ func (s *Server) computePhashesPost(w http.ResponseWriter, r *http.Request) {
 	tree := active.bkTree
 	go func() {
 		ctx := s.jobs.Context()
-		processed, updated, err := relations.BackfillPhashes(ctx, database, thumbnailsPath, func(p, total int, _ string) {
-			s.jobs.Update(p, total, "Computing…")
+		phashed, phashUpdated, err := relations.BackfillPhashes(ctx, database, thumbnailsPath, func(p, total int, _ string) {
+			s.jobs.Update(p, total, "Perceptual hashes…")
 		})
 		// Drop the in-memory tree so the next find-pairs / phash: query
 		// rebuilds against the now-fully-phashed DB instead of replaying
 		// thousands of incremental Inserts the hook would have fired
 		// during a built-tree run. Reset is cheap and the rebuild is the
-		// uncached path the same query would pay on a cold server.
+		// uncached path the same query would pay on a cold server. Runs
+		// before the md5 pass so cancelling that one still leaves the
+		// tree consistent with what was just written.
 		if tree != nil {
 			tree.Reset()
 		}
 		active.InvalidatePhashMissing()
-		if err == context.Canceled || ctx.Err() != nil {
-			s.jobs.Complete(fmt.Sprintf("phash cancelled (%d processed, %d computed)", processed, updated))
+		cancelled := func(err error) bool { return err == context.Canceled || ctx.Err() != nil }
+		if cancelled(err) {
+			s.jobs.Complete(fmt.Sprintf("hashes cancelled (%d phash, 0 md5)", phashUpdated))
 			return
 		}
 		if err != nil {
 			s.jobs.Fail(err.Error())
 			return
 		}
-		s.jobs.Complete(fmt.Sprintf("Computed perceptual hashes for %d image(s) (%d updated).", processed, updated))
+		summed, sumUpdated, err := gallery.BackfillMD5s(ctx, database, func(p, total int, _ string) {
+			s.jobs.Update(p, total, "MD5…")
+		})
+		if cancelled(err) {
+			s.jobs.Complete(fmt.Sprintf("hashes cancelled (%d phash, %d md5)", phashUpdated, sumUpdated))
+			return
+		}
+		if err != nil {
+			s.jobs.Fail(err.Error())
+			return
+		}
+		s.jobs.Complete(fmt.Sprintf("Computed %d perceptual hash(es) of %d and %d md5 digest(s) of %d.",
+			phashUpdated, phashed, sumUpdated, summed))
 	}()
-	writeInlineFlash(w, "ok", "Perceptual-hash backfill started.")
+	writeInlineFlash(w, "ok", "Hash backfill started.")
 }
 
 func (s *Server) vacuumDBPost(w http.ResponseWriter, r *http.Request) {
@@ -641,7 +640,11 @@ func (s *Server) reExtractMetadataPost(w http.ResponseWriter, r *http.Request) {
 		source    string
 	}
 
-	rows, err := s.db().Read.Query(`
+	imgs, err := db.QueryAll(s.db().Read, func(rows *sql.Rows) (imgRow, error) {
+		var img imgRow
+		err := rows.Scan(&img.ID, &img.Path, &img.FileType, &img.source, &img.sdHash, &img.comfyHash)
+		return img, err
+	}, `
 		SELECT i.id, i.canonical_path, i.file_type, i.source_type,
 		       COALESCE(sm.generation_hash, ''),
 		       COALESCE(cm.generation_hash, '')
@@ -651,20 +654,6 @@ func (s *Server) reExtractMetadataPost(w http.ResponseWriter, r *http.Request) {
 		WHERE i.is_missing = 0
 	`)
 	if err != nil {
-		writeInlineFlash(w, "err", err.Error())
-		return
-	}
-	var imgs []imgRow
-	for rows.Next() {
-		var img imgRow
-		if err := rows.Scan(&img.ID, &img.Path, &img.FileType, &img.source, &img.sdHash, &img.comfyHash); err != nil {
-			logx.Warnf("re-extract scan: %v", err)
-			continue
-		}
-		imgs = append(imgs, img)
-	}
-	_ = rows.Close()
-	if err := rows.Err(); err != nil {
 		writeInlineFlash(w, "err", err.Error())
 		return
 	}

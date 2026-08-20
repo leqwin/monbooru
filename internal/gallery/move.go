@@ -23,27 +23,64 @@ type MoveImageResult struct {
 // watcher should gate this under a job type the watcher suppresses,
 // otherwise the resulting CREATE/REMOVE events race with the DB update.
 func MoveImage(database *db.DB, galleryPath string, id int64, targetFolder string) (*MoveImageResult, error) {
+	return placeImage(database, galleryPath, id, &targetFolder, nil, "move", UniqueDestPath)
+}
+
+// PlaceImage moves image id into targetFolder and renames its file in one
+// step, so a file being filed on arrival never passes through a third
+// path that neither setting describes. A nil folder or name leaves that
+// half of the path alone.
+func PlaceImage(database *db.DB, galleryPath string, id int64, targetFolder, newName *string) (*MoveImageResult, error) {
+	unique := UniqueDestPath
+	if newName != nil {
+		unique = uniqueRenamePath
+	}
+	return placeImage(database, galleryPath, id, targetFolder, newName, "place", unique)
+}
+
+// placeImage is the body the move, rename and place entry points share.
+// unique is the collision-suffix style the caller's verb is known by.
+func placeImage(database *db.DB, galleryPath string, id int64, folder, name *string, verb string, unique func(destDir, filename string) string) (*MoveImageResult, error) {
+	var base string
+	if name != nil {
+		base = strings.TrimSpace(*name)
+		if base == "" || base != filepath.Base(base) || base == "." || base == ".." {
+			return nil, fmt.Errorf("invalid file name %q", base)
+		}
+	}
+
+	oldCanonical, oldFolder, err := loadMoveSource(database, galleryPath, id, verb)
+	if err != nil {
+		return nil, err
+	}
+
 	// The destination is already root-bounded by ResolveSubdir.
-	oldCanonical, oldFolder, err := loadMoveSource(database, galleryPath, id, "move")
-	if err != nil {
-		return nil, err
+	destDir, newFolder := filepath.Dir(oldCanonical), oldFolder
+	if folder != nil {
+		dir, resolveErr := ResolveSubdir(galleryPath, *folder)
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		rel, relErr := filepath.Rel(galleryPath, dir)
+		if relErr != nil {
+			return nil, fmt.Errorf("resolve folder: %w", relErr)
+		}
+		if rel == "." {
+			rel = ""
+		}
+		// folder_path is stored "/"-separated on every platform.
+		destDir, newFolder = dir, filepath.ToSlash(rel)
 	}
 
-	destDir, err := ResolveSubdir(galleryPath, targetFolder)
-	if err != nil {
-		return nil, err
+	if name != nil {
+		if ext := filepath.Ext(oldCanonical); !strings.EqualFold(filepath.Ext(base), ext) {
+			base += ext
+		}
+	} else {
+		base = filepath.Base(oldCanonical)
 	}
-	newFolder, err := filepath.Rel(galleryPath, destDir)
-	if err != nil {
-		return nil, fmt.Errorf("resolve folder: %w", err)
-	}
-	if newFolder == "." {
-		newFolder = ""
-	}
-	// folder_path is stored "/"-separated on every platform.
-	newFolder = filepath.ToSlash(newFolder)
 
-	if newFolder == oldFolder {
+	if newFolder == oldFolder && base == filepath.Base(oldCanonical) {
 		return &MoveImageResult{
 			NewCanonicalPath: oldCanonical,
 			NewFolderPath:    oldFolder,
@@ -54,10 +91,10 @@ func MoveImage(database *db.DB, galleryPath string, id int64, targetFolder strin
 		return nil, fmt.Errorf("create destination folder: %w", err)
 	}
 
-	newPath := UniqueDestPath(destDir, filepath.Base(oldCanonical))
+	newPath := unique(destDir, base)
 
-	// UniqueDestPath only checks the filesystem, not image_paths. A stale
-	// alias row for a different image (file long gone but row never
+	// The unique helpers only check the filesystem, not image_paths. A
+	// stale alias row for a different image (file long gone but row never
 	// pruned) would otherwise trip the UNIQUE constraint on path mid-tx
 	// with no useful diagnostic. Surface the collision up front so the
 	// caller can suggest "prune duplicate paths" from the Settings
@@ -65,7 +102,11 @@ func MoveImage(database *db.DB, galleryPath string, id int64, targetFolder strin
 	if err := refuseAliasCollision(database, id, newPath); err != nil {
 		return nil, err
 	}
-	if err := commitRename(database, "move", id, oldCanonical, newPath, &newFolder); err != nil {
+	folderArg := &newFolder
+	if folder == nil {
+		folderArg = nil
+	}
+	if err := commitRename(database, verb, id, oldCanonical, newPath, folderArg); err != nil {
 		return nil, err
 	}
 
@@ -75,43 +116,48 @@ func MoveImage(database *db.DB, galleryPath string, id int64, targetFolder strin
 	}, nil
 }
 
+// repointCanonical moves image id's canonical path to newPath: the row is
+// pointed at it, the retired path leaves image_paths, and newPath becomes
+// the canonical row (upserting, so an alias already holding it is promoted
+// in place). An empty dropOldPath demotes whatever is canonical now to an
+// alias instead of dropping it, which is what a reactivation wants - the
+// path the row used to live at keeps its place in the history.
+//
+// e is the pool or a transaction, so a caller that must not half-apply the
+// move can run it inside one.
+func repointCanonical(e db.Execer, id int64, newPath, newFolder, dropOldPath string) error {
+	if _, err := e.Exec(
+		`UPDATE images SET canonical_path = ?, folder_path = ?, is_missing = 0 WHERE id = ?`,
+		newPath, newFolder, id,
+	); err != nil {
+		return fmt.Errorf("point row at the new path: %w", err)
+	}
+	if dropOldPath == "" {
+		if _, err := e.Exec(
+			`UPDATE image_paths SET is_canonical = 0 WHERE image_id = ? AND is_canonical = 1`, id,
+		); err != nil {
+			return fmt.Errorf("demote previous canonical: %w", err)
+		}
+	} else if _, err := e.Exec(
+		`DELETE FROM image_paths WHERE image_id = ? AND path = ?`, id, dropOldPath,
+	); err != nil {
+		return fmt.Errorf("drop old canonical: %w", err)
+	}
+	if _, err := e.Exec(
+		`INSERT INTO image_paths (image_id, path, is_canonical) VALUES (?, ?, 1)
+		 ON CONFLICT(path) DO UPDATE SET is_canonical = 1`, id, newPath,
+	); err != nil {
+		return fmt.Errorf("install new canonical: %w", err)
+	}
+	return nil
+}
+
 // RenameImage renames the canonical file of image id in place: the
 // folder stays, the basename becomes newName with the original
 // extension preserved. Collisions auto-suffix via uniqueRenamePath and
 // the same watcher-suppression caveat as MoveImage applies.
 func RenameImage(database *db.DB, galleryPath string, id int64, newName string) (*MoveImageResult, error) {
-	newName = strings.TrimSpace(newName)
-	if newName == "" || newName != filepath.Base(newName) || newName == "." || newName == ".." {
-		return nil, fmt.Errorf("invalid file name %q", newName)
-	}
-	oldCanonical, oldFolder, err := loadMoveSource(database, galleryPath, id, "rename")
-	if err != nil {
-		return nil, err
-	}
-
-	if ext := filepath.Ext(oldCanonical); !strings.EqualFold(filepath.Ext(newName), ext) {
-		newName += ext
-	}
-	if newName == filepath.Base(oldCanonical) {
-		return &MoveImageResult{
-			NewCanonicalPath: oldCanonical,
-			NewFolderPath:    oldFolder,
-		}, nil
-	}
-
-	newPath := uniqueRenamePath(filepath.Dir(oldCanonical), newName)
-
-	if err := refuseAliasCollision(database, id, newPath); err != nil {
-		return nil, err
-	}
-	if err := commitRename(database, "rename", id, oldCanonical, newPath, nil); err != nil {
-		return nil, err
-	}
-
-	return &MoveImageResult{
-		NewCanonicalPath: newPath,
-		NewFolderPath:    oldFolder,
-	}, nil
+	return placeImage(database, galleryPath, id, nil, &newName, "rename", uniqueRenamePath)
 }
 
 // loadMoveSource reads the row a move or rename acts on and refuses what

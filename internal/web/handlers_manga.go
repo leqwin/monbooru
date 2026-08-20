@@ -224,7 +224,8 @@ func (s *Server) extractMangaPage(w http.ResponseWriter, r *http.Request) {
 		fail("gallery", fmt.Errorf("no active gallery"))
 		return
 	}
-	destDir, err := gallery.ResolveSubdir(cx.GalleryPath, s.defaultUploadFolder())
+	writeDir, naming := s.receivedNaming(cx.Name)
+	destDir, err := gallery.ResolveSubdir(cx.GalleryPath, writeDir)
 	if err != nil {
 		fail("resolve folder", err)
 		return
@@ -237,10 +238,15 @@ func (s *Server) extractMangaPage(w http.ResponseWriter, r *http.Request) {
 	// Copy rather than move: the cache file belongs to the manga reclaim
 	// goroutine, which is free to unlink it at any point. The helper
 	// extracts, ingests and links the page exactly as this button did.
-	pageID, err := s.extractMangaPageToGallery(cx, img, n, destDir, stem+"_p")
+	pageID, filed, err := s.extractMangaPageToGallery(cx, img, n, destDir, stem+"_p")
 	if err != nil {
 		fail("extract", err)
 		return
+	}
+	if filed {
+		if _, err := naming.Apply(cx.DB, cx.GalleryPath, pageID, "", ""); err != nil {
+			logx.Warnf("extract page %d of image %d: file: %v", n, img.ID, err)
+		}
 	}
 	cx.InvalidateCaches()
 	http.Redirect(w, r, fmt.Sprintf("/images/%d", pageID), http.StatusSeeOther)

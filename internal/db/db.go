@@ -119,7 +119,7 @@ const NormalizeWindowsFolderPathSQL = `UPDATE images SET folder_path = ltrim(rep
 // and refreshed sqlite_stat1. Bump it when a migration adds a column or
 // index the planner needs stats for; Bootstrap then runs ANALYZE on the
 // next boot after the upgrade and skips it on every boot afterwards.
-const bootstrapSchemaVersion = 12
+const bootstrapSchemaVersion = 13
 
 // DB holds read and write connection pools for the SQLite database.
 // WAL mode allows concurrent readers but serialises writers, so the read
@@ -254,10 +254,20 @@ func Bootstrap(db *DB) error {
 	b.ensureColumn("image_sources", "similarity", `ALTER TABLE image_sources ADD COLUMN similarity REAL NOT NULL DEFAULT 0`)
 	b.ensureColumn("image_sources", "parent_url", `ALTER TABLE image_sources ADD COLUMN parent_url TEXT NOT NULL DEFAULT ''`)
 	b.ensureColumn("image_sources", "md5_match", `ALTER TABLE image_sources ADD COLUMN md5_match TEXT NOT NULL DEFAULT ''`)
+	b.ensureColumn("image_sources", "upgrade_kept", `ALTER TABLE image_sources ADD COLUMN upgrade_kept INTEGER NOT NULL DEFAULT 0`)
+	b.ensureColumn("image_sources", "post_width", `ALTER TABLE image_sources ADD COLUMN post_width INTEGER NOT NULL DEFAULT 0`)
+	b.ensureColumn("image_sources", "post_height", `ALTER TABLE image_sources ADD COLUMN post_height INTEGER NOT NULL DEFAULT 0`)
+	b.ensureColumn("image_sources", "post_size", `ALTER TABLE image_sources ADD COLUMN post_size INTEGER NOT NULL DEFAULT 0`)
+	b.ensureColumn("image_sources", "post_ext", `ALTER TABLE image_sources ADD COLUMN post_ext TEXT NOT NULL DEFAULT ''`)
 	// Created here rather than in schema.sql so the ALTER above runs first on
 	// libraries that predate the column. Covers the child-side probe of the
 	// derivative-edge linking; partial since most origins declare no parent.
 	b.exec("create idx_image_sources_parent_url", `CREATE INDEX IF NOT EXISTS idx_image_sources_parent_url ON image_sources(parent_url) WHERE parent_url != ''`)
+	// The upgrade gate (internal/upgrade.CandidateWhere), as a partial index
+	// so it holds candidate origins only - a handful of rows next to one per
+	// origin. The sidebar count and the `upgrade:` filter both seek it.
+	b.exec("create idx_image_sources_upgradable", `CREATE INDEX IF NOT EXISTS idx_image_sources_upgradable ON image_sources(image_id)
+		WHERE url <> '' AND upgrade_kept = 0 AND (md5_match = 'differ' OR (similarity > 0 AND md5_match = ''))`)
 	b.ensureColumn("image_annotations", "manual", `ALTER TABLE image_annotations ADD COLUMN manual INTEGER NOT NULL DEFAULT 0`)
 	b.ensureColumn("images", "page_count", `ALTER TABLE images ADD COLUMN page_count INTEGER`)
 	b.ensureColumn("images", "last_read_page", `ALTER TABLE images ADD COLUMN last_read_page INTEGER`)
@@ -265,6 +275,51 @@ func Bootstrap(db *DB) error {
 	// Partial visible duration index for the duration: filter. Excludes
 	// NULL so non-video rows don't carry an entry.
 	b.exec("create idx_images_duration_visible", `CREATE INDEX IF NOT EXISTS idx_images_duration_visible ON images(duration_seconds) WHERE is_missing = 0 AND duration_seconds IS NOT NULL`)
+	b.ensureColumn("images", "md5", `ALTER TABLE images ADD COLUMN md5 TEXT NOT NULL DEFAULT ''`)
+	// Partial so the rows still waiting on a backfill carry no entry. Not
+	// UNIQUE: md5 collisions are cheap to construct, so the constraint
+	// would let a prepared pair of files abort an ingest.
+	b.exec("create idx_images_md5", `CREATE INDEX IF NOT EXISTS idx_images_md5 ON images(md5) WHERE md5 != ''`)
+	// md5_match is the claim compared against the local read. Triggers rather
+	// than the write sites: either digest lands from ingest, sync, replace,
+	// the lazy fill, the backfill job, every push and enrich and the bulk
+	// importer, and one writer forgetting leaves a candidate invisible. Both
+	// sides hold their peace while a digest is empty, so a row waiting on its
+	// local md5 keeps whatever verdict a fetch recorded. images.md5 is
+	// lowercase by construction; the claim is stored as the source sent it.
+	b.exec("create trg_image_sources_verdict_ai", `CREATE TRIGGER IF NOT EXISTS trg_image_sources_verdict_ai
+		AFTER INSERT ON image_sources
+		WHEN NEW.md5 != '' AND (SELECT md5 FROM images WHERE id = NEW.image_id) != ''
+		BEGIN
+			UPDATE image_sources SET md5_match = CASE
+				WHEN lower(NEW.md5) = (SELECT md5 FROM images WHERE id = NEW.image_id) THEN 'match' ELSE 'differ' END
+			 WHERE image_id = NEW.image_id AND site = NEW.site AND post_id = NEW.post_id;
+		END`)
+	// A claim the post never made before is a new question, so the keep
+	// ruling lapses with it even when no verdict can be written.
+	b.exec("create trg_image_sources_verdict_au", `CREATE TRIGGER IF NOT EXISTS trg_image_sources_verdict_au
+		AFTER UPDATE OF md5 ON image_sources
+		WHEN NEW.md5 != ''
+		BEGIN
+			UPDATE image_sources SET upgrade_kept = 0
+			 WHERE image_id = NEW.image_id AND site = NEW.site AND post_id = NEW.post_id
+			   AND lower(NEW.md5) != lower(OLD.md5);
+			UPDATE image_sources SET md5_match = CASE
+				WHEN lower(NEW.md5) = (SELECT md5 FROM images WHERE id = NEW.image_id) THEN 'match' ELSE 'differ' END
+			 WHERE image_id = NEW.image_id AND site = NEW.site AND post_id = NEW.post_id
+			   AND (SELECT md5 FROM images WHERE id = NEW.image_id) != '';
+		END`)
+	// Only a digest that moved re-opens the question: the lazy cell fill
+	// rewrites the same value on every hit, and re-deriving there would read
+	// the claim a refused refetch deliberately left behind.
+	b.exec("create trg_images_verdict_au", `CREATE TRIGGER IF NOT EXISTS trg_images_verdict_au
+		AFTER UPDATE OF md5 ON images
+		WHEN NEW.md5 != '' AND NEW.md5 IS NOT OLD.md5
+		BEGIN
+			UPDATE image_sources SET md5_match = CASE
+				WHEN lower(md5) = NEW.md5 THEN 'match' ELSE 'differ' END
+			 WHERE image_id = NEW.id AND md5 != '';
+		END`)
 	// VIRTUAL generated column over the lowercased filename basename so
 	// the name: filter and the system:name autocomplete seek a single
 	// indexed string instead of running lower(basename(canonical_path))
@@ -724,6 +779,14 @@ func Bootstrap(db *DB) error {
 	}
 	// Pinned to the version that introduced them so a later marker bump
 	// can't re-run them over pairs find-pairs has produced since.
+	if ratingRankUserVersion < 13 {
+		// The triggers only see writes from here on, so a library whose two
+		// digests are already stored gets its verdicts in one pass. Rows a
+		// fetch already ruled on are left alone - see trg_images_verdict_au.
+		b.exec("backfill source md5 verdicts", `UPDATE image_sources SET md5_match = CASE
+			WHEN lower(md5) = (SELECT md5 FROM images WHERE id = image_id) THEN 'match' ELSE 'differ' END
+		 WHERE md5_match = '' AND md5 != '' AND (SELECT md5 FROM images WHERE id = image_id) != ''`)
+	}
 	if ratingRankUserVersion < 12 {
 		// Tag rows an earlier metric admitted cannot be re-thresholded into
 		// the current one; drop them and let the next find-pairs run

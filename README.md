@@ -109,7 +109,7 @@ See the monbooru documentation for help. In-app, type `system:` in the search ba
 
 This section covers monbooru and its companion repos ([monloader](https://github.com/monbooru/monloader), [monsender](https://github.com/monbooru/monsender), [mondocs](https://github.com/monbooru/mondocs), [monbooru-plugins](https://github.com/monbooru/monbooru-plugins)).
 
-Thanks to [@gary-host-laptop](https://github.com/gary-host-laptop) for sustained contributions over time. Every shipped contribution is credited in the release that ships it; see [CONTRIBUTING](CONTRIBUTING.md).
+Thanks to [@gary-host-laptop](https://github.com/gary-host-laptop) and [@CeareDelafont](https://github.com/CeareDelafont) for sustained contributions over time. Every shipped contribution is credited in the release that ships it; see [CONTRIBUTING](CONTRIBUTING.md).
 
 This project is built on the work of others:
 

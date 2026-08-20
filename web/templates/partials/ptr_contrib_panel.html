@@ -1,3 +1,6 @@
+{{/* The ++ line: the new count, and how many of those are spellings the
+     repository holds nowhere (a send would create the tag). */}}
+{{define "ptr_contrib_new_line"}}<span class="ptr-contrib-plus">++</span> <span class="ptr-count" title="{{.NewTip}}">{{.NewCount}}</span> of this image's tags {{if eq .NewCount 1}}is{{else}}are{{end}} new to the Public Tag Repository{{if gt .UnknownCount 0}}, <span class="ptr-count" title="{{.UnknownTip}}">{{.UnknownCount}}</span> of them not {{if eq .UnknownCount 1}}a PTR tag{{else}}PTR tags{{end}}{{end}}.{{end}}
 {{define "partials/ptr_contrib_panel.html"}}
 <div class="ptr-contrib-card monloader-accent">
   <div class="ptr-contrib-head">
@@ -9,10 +12,10 @@
     <div class="ptr-contrib-lines">
       {{if and (gt .NewCount 0) (gt .PetitionCount 0)}}
       <ul>
-        <li><span class="ptr-contrib-plus">++</span> <span class="ptr-count" title="{{.NewTip}}">{{.NewCount}}</span> of this image's tags {{if eq .NewCount 1}}is{{else}}are{{end}} new to the Public Tag Repository.</li>
+        <li>{{template "ptr_contrib_new_line" .}}</li>
         <li><span class="ptr-contrib-minus">--</span> the Public Tag Repository holds <span class="ptr-count" title="{{.PetitionTip}}">{{.PetitionCount}}</span> tag{{if gt .PetitionCount 1}}s{{end}} this image does not carry.</li>
       </ul>
-      {{else if gt .NewCount 0}}<p><span class="ptr-contrib-plus">++</span> <span class="ptr-count" title="{{.NewTip}}">{{.NewCount}}</span> of this image's tags {{if eq .NewCount 1}}is{{else}}are{{end}} new to the Public Tag Repository.</p>
+      {{else if gt .NewCount 0}}<p>{{template "ptr_contrib_new_line" .}}</p>
       {{else if gt .PetitionCount 0}}<p><span class="ptr-contrib-minus">--</span> the Public Tag Repository holds <span class="ptr-count" title="{{.PetitionTip}}">{{.PetitionCount}}</span> tag{{if gt .PetitionCount 1}}s{{end}} this image does not carry.</p>
       {{else if gt .UnattributedCount 0}}<p><span class="ptr-contrib-same">==</span> the Public Tag Repository holds <span class="ptr-count" title="{{.UnattributedTip}}">{{.UnattributedCount}}</span> of this image's tags without being recorded as a source for {{if eq .UnattributedCount 1}}it{{else}}them{{end}}; a pull records it.</p>
       {{else if .AllKnown}}<p class="field-hint">this image's tags are all already on the Public Tag Repository.</p>

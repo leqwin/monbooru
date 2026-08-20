@@ -40,6 +40,7 @@ var Keywords = []string{
 	"tagcount",
 	"duration",
 	"hash",
+	"md5",
 	"prompt",
 	"model",
 	"sampler",
@@ -50,6 +51,7 @@ var Keywords = []string{
 	"similar",
 	"id",
 	"lookup",
+	"upgrade",
 }
 
 // keywordSet is the membership-test view of Keywords. Built once at
@@ -102,17 +104,18 @@ var Expansions = map[string][]string{
 	"via":        {"ingest", "upload"},
 	"relation":   {"duplicate", "original", "alternate", "version", "derivative", "source", "collection", "any", "none"},
 	"lookup":     {"never", "due", "missed", "exhausted", "off"},
+	"upgrade":    {"any", "bigger", "none", "unknown", "sample", "kept"},
 }
 
 // rangeKeys are excluded from closed-vocabulary validation: their Expansions
 // rows are hints (comparison operators for the numeric filters, the any/none
 // shortcuts for stale and source) rather than the full set of accepted
-// values. stale: also takes an open tag name and source: an open site label,
-// so their values are never flagged as unrecognised.
+// values. stale: also takes an open tag name, source: and upgrade: an open
+// site label, so their values are never flagged as unrecognised.
 var rangeKeys = map[string]bool{
 	"width": true, "height": true, "date": true, "size": true,
 	"ratio": true, "tagcount": true, "duration": true, "pages": true,
-	"stale": true, "source": true,
+	"stale": true, "source": true, "upgrade": true,
 }
 
 // closedVocab is the membership-test view of Expansions for the keys
@@ -185,7 +188,8 @@ var Descriptions = map[string]string{
 	"ratio":      "aspect ratio (width / height)",
 	"tagcount":   "number of tags",
 	"duration":   "video duration in seconds",
-	"hash":       "sha256 digest",
+	"hash":       "sha256 or md5 digest",
+	"md5":        "md5 digest",
 	"prompt":     "SD / ComfyUI prompt",
 	"model":      "SD / ComfyUI model",
 	"sampler":    "SD / ComfyUI sampler",
@@ -196,6 +200,7 @@ var Descriptions = map[string]string{
 	"similar":    "tag similarity to image id (~score 0..1 for a threshold)",
 	"id":         "image id",
 	"lookup":     "scheduled lookup state",
+	"upgrade":    "source serves a different file",
 }
 
 // ExpansionDescriptions maps level-2 rows to a short English label.

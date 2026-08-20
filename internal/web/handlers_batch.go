@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -73,10 +72,13 @@ func (s *Server) batchDelete(w http.ResponseWriter, r *http.Request) {
 	// returned by the SELECT is undefined under SQLite without an
 	// ORDER BY, so re-emit in the caller's input order via a map.
 	placeholders, args := db.InPlaceholders(ids)
-	rows, err := s.db().Read.Query(
-		`SELECT id, canonical_path, folder_path, is_missing FROM images WHERE id IN (`+placeholders+`)`,
-		args...,
-	)
+	loaded, err := db.QueryAll(s.db().Read, func(rows *sql.Rows) (search.DeleteTarget, error) {
+		var t search.DeleteTarget
+		var isMissing int
+		err := rows.Scan(&t.ID, &t.CanonicalPath, &t.FolderPath, &isMissing)
+		t.IsMissing = isMissing == 1
+		return t, err
+	}, `SELECT id, canonical_path, folder_path, is_missing FROM images WHERE id IN (`+placeholders+`)`, args...)
 	if err != nil {
 		// startBulkDelete(nil) would 202 with nothing queued, which the
 		// client reads as success - so surface the failure instead.
@@ -84,21 +86,9 @@ func (s *Server) batchDelete(w http.ResponseWriter, r *http.Request) {
 		flashStatus(w, http.StatusInternalServerError, "Could not load the selected images.")
 		return
 	}
-	defer func() { _ = rows.Close() }()
-	byID := make(map[int64]search.DeleteTarget, len(ids))
-	for rows.Next() {
-		var t search.DeleteTarget
-		var isMissing int
-		if err := rows.Scan(&t.ID, &t.CanonicalPath, &t.FolderPath, &isMissing); err != nil {
-			continue
-		}
-		t.IsMissing = isMissing == 1
+	byID := make(map[int64]search.DeleteTarget, len(loaded))
+	for _, t := range loaded {
 		byID[t.ID] = t
-	}
-	if err := rows.Err(); err != nil {
-		logx.Warnf("batch delete: scan targets: %v", err)
-		flashStatus(w, http.StatusInternalServerError, "Could not load the selected images.")
-		return
 	}
 	targets := make([]search.DeleteTarget, 0, len(ids))
 	for _, id := range ids {
@@ -189,6 +179,9 @@ func (s *Server) runBulkDelete(targets []search.DeleteTarget) {
 	s.jobs.Update(0, total, "deleting…")
 	done := 0
 	onDelete := s.onImagesDeleteCallback()
+	// image_paths cascades with the rows, so the chunk's other copies on
+	// disk are read inside the same transaction that removes them.
+	var chunkAliases map[int64][]string
 	affectedTags, processed, cancelled, err := s.tagSvc().ChunkedDeleteWithTagRecalc(
 		ctx, ids, "", nil,
 		func(tx *sql.Tx, chunk []int64, placeholders string, args []any) error {
@@ -197,7 +190,12 @@ func (s *Server) runBulkDelete(targets []search.DeleteTarget) {
 					return err
 				}
 			}
-			_, err := tx.Exec(`DELETE FROM images WHERE id IN (`+placeholders+`)`, args...)
+			aliases, err := gallery.AliasPathsFor(tx, chunk)
+			if err != nil {
+				return err
+			}
+			chunkAliases = aliases
+			_, err = tx.Exec(`DELETE FROM images WHERE id IN (`+placeholders+`)`, args...)
 			return err
 		},
 		func(chunk []int64) {
@@ -207,6 +205,7 @@ func (s *Server) runBulkDelete(targets []search.DeleteTarget) {
 				if !t.IsMissing {
 					gallery.UnlinkImageFile(s.galleryPath(), t.CanonicalPath, id)
 				}
+				gallery.UnlinkAliasFiles(s.galleryPath(), id, chunkAliases[id])
 			}
 			done += len(chunk)
 			s.jobs.Update(done, total, "deleting…")
@@ -241,13 +240,20 @@ func (s *Server) batchMove(w http.ResponseWriter, r *http.Request) {
 
 	// Validate the folder once up-front so the user sees the error inline
 	// rather than as a per-image log entry once the job starts.
-	if _, err := gallery.ResolveSubdir(s.galleryPath(), targetFolder); err != nil {
+	tmpl, err := gallery.ParseNameTemplate(targetFolder, gallery.ScopeMoveBatch)
+	if err != nil {
 		flashStatus(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if !tmpl.HasTokens() {
+		if _, err := gallery.ResolveSubdir(s.galleryPath(), targetFolder); err != nil {
+			flashStatus(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 
 	s.startScopedJob(w, r, "batch-move", models.JobTypeMove, func(ids []int64) {
-		s.runBatchMove(ids, targetFolder)
+		s.runBatchMove(ids, targetFolder, tmpl)
 	})
 }
 
@@ -299,41 +305,69 @@ func (s *Server) runPerImageJob(ids []int64, verb, gerund, past string, op func(
 	s.jobs.Complete(summary)
 }
 
-// runBatchMove relocates every target into one folder. Each MoveImage
+// runBatchMove relocates every target into one folder, or into the folder
+// its own row renders when the destination carries tokens. Each MoveImage
 // has its own small write txn + Rename.
-func (s *Server) runBatchMove(ids []int64, targetFolder string) {
-	s.runPerImageJob(ids, "move", "moving", "moved", func(_ int, id int64) error {
-		_, err := gallery.MoveImage(s.db(), s.galleryPath(), id, targetFolder)
+func (s *Server) runBatchMove(ids []int64, targetFolder string, tmpl *gallery.NameTemplate) {
+	s.runPerImageJob(ids, "move", "moving", "moved", func(i int, id int64) error {
+		folder, err := s.batchName(tmpl, targetFolder, i, len(ids), id)
+		if err != nil {
+			return err
+		}
+		_, err = gallery.MoveImage(s.db(), s.galleryPath(), id, folder)
 		return err
 	})
 }
 
+// batchName resolves the destination one image in a scoped job gets: the
+// literal the operator typed when it carries no tokens, otherwise the
+// row's own render with its position in the run.
+func (s *Server) batchName(tmpl *gallery.NameTemplate, literal string, i, total int, id int64) (string, error) {
+	if !tmpl.HasTokens() {
+		return literal, nil
+	}
+	facts, err := gallery.LoadNameFacts(s.db(), s.activeName, id)
+	if err != nil {
+		return "", err
+	}
+	facts.N, facts.NWidth = i+1, max(len(strconv.Itoa(total)), 2)
+	return tmpl.Render(facts), nil
+}
+
 // batchRename kicks off a background `move` job that renames the selected
-// image files to a numbered sequence off the given base name. It rides the
-// move job type for the same watcher suppression as batchMove.
+// image files off the given base name or template. It rides the move job
+// type for the same watcher suppression as batchMove.
 func (s *Server) batchRename(w http.ResponseWriter, r *http.Request) {
 	if !parseFormOK(w, r) {
 		return
 	}
 	base := strings.TrimSpace(r.FormValue("name"))
-	if base == "" || base != filepath.Base(base) || base == "." || base == ".." {
-		flashStatus(w, http.StatusBadRequest, "Base name required (no path separators).")
+	tmpl, err := gallery.ParseBatchRenameTemplate(base)
+	if err != nil {
+		flashStatus(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if tmpl == nil || base == "." || base == ".." {
+		flashStatus(w, http.StatusBadRequest, "Base name required.")
 		return
 	}
 
 	s.startScopedJob(w, r, "batch-rename", models.JobTypeMove, func(ids []int64) {
-		s.runBatchRename(ids, base)
+		s.runBatchRename(ids, tmpl)
 	})
 }
 
-// runBatchRename renames the scope to a numbered sequence, zero-padded
-// to the width the whole run needs so the names sort in one order.
-// Collisions still auto-suffix inside RenameImage; per-image failures
-// are logged and counted like batch moves.
-func (s *Server) runBatchRename(ids []int64, base string) {
-	width := max(len(strconv.Itoa(len(ids))), 2)
+// runBatchRename renames the scope to what the template renders per row,
+// with {n} zero-padded to the width the whole run needs so the names sort
+// in one order. Collisions still auto-suffix inside RenameImage;
+// per-image failures are logged and counted like batch moves.
+func (s *Server) runBatchRename(ids []int64, tmpl *gallery.NameTemplate) {
 	s.runPerImageJob(ids, "rename", "renaming", "renamed", func(i int, id int64) error {
-		_, err := gallery.RenameImage(s.db(), s.galleryPath(), id, fmt.Sprintf("%s%0*d", base, width, i+1))
+		name, err := s.batchName(tmpl, "", i, len(ids), id)
+		if err != nil {
+			return err
+		}
+		_, err = gallery.RenameImage(s.db(), s.galleryPath(), id, name)
 		return err
 	})
 }
@@ -931,10 +965,10 @@ func (s *Server) runBatchLookup(opts batchLookupOpts, ids []int64) {
 			if (i+1)%25 == 0 || i == total-1 {
 				s.jobs.Update(i+1, total, "looking up…")
 			}
-			var canonPath, sha string
+			var canonPath, sha, storedMD5 string
 			if err := cx.DB.Read.QueryRow(
-				`SELECT canonical_path, sha256 FROM images WHERE id = ?`, id,
-			).Scan(&canonPath, &sha); err != nil {
+				`SELECT canonical_path, sha256, md5 FROM images WHERE id = ?`, id,
+			).Scan(&canonPath, &sha, &storedMD5); err != nil {
 				continue
 			}
 			var err error
@@ -956,7 +990,7 @@ func (s *Server) runBatchLookup(opts batchLookupOpts, ids []int64) {
 				}
 				continue
 			default:
-				md5, hashErr := gallery.Md5File(canonPath)
+				md5, hashErr := lookupMD5(ctx, cx, id, storedMD5)
 				if hashErr != nil {
 					skipped++
 					continue

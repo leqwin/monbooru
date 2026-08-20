@@ -161,10 +161,11 @@
     {{if .Folded}}<button type="button" id="btn-batch-merge-folded" class="btn-sm">Merge into corrected spelling</button>{{end}}
     <button type="button" id="btn-batch-alias" class="btn-sm">Alias to…</button>
     <button type="button" id="btn-batch-imply" class="btn-sm">Imply…</button>
-    {{if and .MonloaderPaired .MonloaderPTR}}<button type="button" id="btn-batch-ptr" class="btn-sm monloader-accent">Find aliases and implications</button>{{end}}
+    {{if .MonloaderPTRPresent}}<button type="button" id="btn-batch-ptr" class="btn-sm monloader-accent"{{if not .MonloaderPTR}} disabled title="{{if .MonloaderPTRSyncing}}the Public Tag Repository index is still syncing{{else}}{{monloaderOffReason .MonloaderConn}}{{end}}"{{end}}>Find aliases and implications</button>{{end}}
     <button type="button" id="btn-batch-delete" class="btn-sm btn-danger">Delete</button>
   </div>
 
+  <div class="table-scroll">
   <table class="tag-table">
     <!-- Sortable headers: clicking sets the sort, clicking again flips
          the direction. -->
@@ -272,6 +273,7 @@
       {{end}}
     </tbody>
   </table>
+  </div>
 
   {{$page := .Page}}
   {{$tagsBase := printf "/tags?q=%s&sort=%s&order=%s&cat=%s&origin=%s&used_by=%s&type=%s&created_after=%s&conflicts=%s&stale=%s&folded=%s&show_zero=%s&page=" .Prefix .Sort .Order .CategoryID .Origin .UsedBy .Type .CreatedAfter $conflicts $stale $folded $zero}}
@@ -429,7 +431,7 @@
   </div>
 </dialog>
 
-{{if and .MonloaderPaired .MonloaderPTR}}
+{{if .MonloaderPTRPresent}}
 <!-- Batch PTR lookup dialog, same scope resolution as the delete. -->
 <dialog id="ptr-lookup-search-dialog">
   <p id="ptr-lookup-scope-line"></p>
@@ -714,25 +716,15 @@ function openBatchMerge() {
   var choices = document.getElementById('batch-merge-choices');
   choices.innerHTML = '';
   boxes.forEach(function(b, i) {
-    var li = document.createElement('li');
-    li.className = 'merge-dup-choice';
-    var label = document.createElement('label');
-    var radio = document.createElement('input');
-    radio.type = 'radio';
-    radio.name = 'merge_canon';
-    radio.value = b.value;
-    radio.checked = i === 0;
-    label.appendChild(radio);
-    var name = document.createElement('span');
-    name.textContent = b.dataset.name || b.value;
-    if (b.dataset.color) name.style.color = b.dataset.color;
-    label.appendChild(name);
-    var cat = document.createElement('span');
-    cat.className = 'merge-dup-meta';
-    cat.textContent = b.dataset.category || '';
-    label.appendChild(cat);
-    li.appendChild(label);
-    choices.appendChild(li);
+    choices.appendChild(mergeChoiceItem('merge_canon', b.value, i === 0, function(label) {
+      var name = document.createElement('span');
+      name.textContent = b.dataset.name || b.value;
+      if (b.dataset.color) name.style.color = b.dataset.color;
+      var cat = document.createElement('span');
+      cat.className = 'merge-dup-meta';
+      cat.textContent = b.dataset.category || '';
+      label.append(name, cat);
+    }));
   });
   document.getElementById('batch-merge-scope').textContent = 'Merge ' + tagScopeLabel() + ' into:';
   document.getElementById('batch-merge-dialog').showModal();

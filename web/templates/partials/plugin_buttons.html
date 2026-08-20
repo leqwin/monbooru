@@ -4,11 +4,11 @@
   <span class="plugin-peer">{{$g.Peer}}:</span>
   {{range $g.Buttons}}
   {{if eq .Mode "open"}}
-  <button type="button" class="btn-sm plugin-btn"
+  <button type="button" class="btn-sm plugin-btn"{{if .Off}} disabled title="{{.Why}}"{{end}}
           data-href="{{.Href}}" data-peer="{{$g.Peer}}"
           onclick="openPluginPage(this)">{{.Label}}</button>
   {{else}}
-  <button type="button" class="btn-sm plugin-btn"
+  <button type="button" class="btn-sm plugin-btn"{{if .Off}} disabled title="{{.Why}}"{{end}}
           data-plugin="{{$g.Peer}}" data-button="{{.Index}}"
           onclick="relayPlugin(this)">{{.Label}}</button>
   {{end}}

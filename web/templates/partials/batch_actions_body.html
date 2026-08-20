@@ -6,8 +6,8 @@
   <li class="actions-menu-sep" aria-hidden="true"></li>
   <li class="actions-menu-item" data-action="add"><button type="button" data-action="add">Add tags manually</button></li>
   <li class="actions-menu-item" data-action="strip"><button type="button" data-action="strip">Remove tags</button></li>
-  {{if .EnabledTaggers}}<li class="actions-menu-item" data-action="autotag"><button type="button" class="btn-autotag" data-action="autotag">Auto-tag</button></li>{{end}}
-  {{if .MonloaderUsable}}<li class="actions-menu-item" data-action="lookup"><button type="button" class="monloader-accent" data-action="lookup">Find tags</button></li>{{end}}
+  {{if .TaggersPresent}}<li class="actions-menu-item" data-action="autotag"><button type="button" class="btn-autotag"{{if not .EnabledTaggers}} disabled title="{{.TaggerReason}}"{{end}} data-action="autotag">Auto-tag</button></li>{{end}}
+  {{if .MonloaderPaired}}<li class="actions-menu-item" data-action="lookup"><button type="button" class="monloader-accent"{{if not .MonloaderUsable}} disabled title="{{monloaderOffReason .MonloaderConn}}"{{end}} data-action="lookup">Find tags</button></li>{{end}}
   <li class="actions-menu-sep" aria-hidden="true"></li>
   <li class="actions-menu-item" data-action="inbox-toggle"><button type="button" data-action="inbox-toggle">Archive / inbox</button></li>
   <li class="actions-menu-item" data-action="fav-toggle"><button type="button" data-action="fav-toggle">Toggle favorite</button></li>

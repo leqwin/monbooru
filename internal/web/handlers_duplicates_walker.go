@@ -44,6 +44,37 @@ type relationsWalkerData struct {
 	Kind          string // "sha256" or "marked"
 	Sha256Rows    []sha256DuplicateRow
 	MarkedRows    []markedDuplicateRow
+	Total         int
+	Page          int
+	TotalPages    int
+}
+
+// HasRows reports whether the walk found anything, which is what gates the
+// delete-all toolbar. Only one of the two slices is ever populated.
+func (d relationsWalkerData) HasRows() bool {
+	return len(d.Sha256Rows) > 0 || len(d.MarkedRows) > 0
+}
+
+// duplicatesWalkerPageSize caps each walker page. A find-pairs run can
+// mark tens of thousands of members on a large library, and both tables
+// lift a thumbnail per row.
+const duplicatesWalkerPageSize = 100
+
+// walkerPageOffset resolves ?page= against a row count, clamping a
+// past-the-end page onto the last one the way the gallery does.
+func walkerPageOffset(r *http.Request, total int) (page, totalPages, offset int) {
+	page = 1
+	if p, err := strconv.Atoi(r.URL.Query().Get("page")); err == nil && p > 1 {
+		page = p
+	}
+	totalPages = 1
+	if total > 0 {
+		totalPages = (total + duplicatesWalkerPageSize - 1) / duplicatesWalkerPageSize
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+	return page, totalPages, (page - 1) * duplicatesWalkerPageSize
 }
 
 // sha256WalkerPage renders every non-canonical alias path the gallery
@@ -55,16 +86,23 @@ func (s *Server) sha256WalkerPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ceiling := resolveCeiling(r, cx)
-	q := `SELECT i.id, i.canonical_path, ip.id, ip.path
-		FROM images i
+	from := ` FROM images i
 		JOIN image_paths ip ON ip.image_id = i.id AND ip.is_canonical = 0`
 	args := []any{}
 	if where, wargs := ceiling.WhereOne("i.id"); where != "" {
-		q += ` WHERE ` + where
+		from += ` WHERE ` + where
 		args = append(args, wargs...)
 	}
-	q += ` ORDER BY i.id, ip.id`
-	rows, err := cx.DB.Read.Query(q, args...)
+	var total int
+	if err := cx.DB.Read.QueryRow(`SELECT COUNT(*)`+from, args...).Scan(&total); err != nil {
+		logx.Warnf("sha256 walker count: %v", err)
+		http.Error(w, "load duplicates", http.StatusInternalServerError)
+		return
+	}
+	page, totalPages, offset := walkerPageOffset(r, total)
+	rows, err := cx.DB.Read.Query(
+		`SELECT i.id, i.canonical_path, ip.id, ip.path`+from+` ORDER BY i.id, ip.id LIMIT ? OFFSET ?`,
+		append(append([]any{}, args...), duplicatesWalkerPageSize, offset)...)
 	if err != nil {
 		logx.Warnf("sha256 walker query: %v", err)
 		http.Error(w, "load duplicates", http.StatusInternalServerError)
@@ -90,6 +128,9 @@ func (s *Server) sha256WalkerPage(w http.ResponseWriter, r *http.Request) {
 		ActiveGallery: s.activeName,
 		Kind:          "sha256",
 		Sha256Rows:    out,
+		Total:         total,
+		Page:          page,
+		TotalPages:    totalPages,
 	})
 }
 
@@ -104,17 +145,25 @@ func (s *Server) markedWalkerPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ceiling := resolveCeiling(r, cx)
-	q := `SELECT g.id, g.original_image_id, m.image_id, m.created_at
-		FROM dup_group_members m
+	from := ` FROM dup_group_members m
 		JOIN dup_groups g ON g.id = m.group_id
 		WHERE m.image_id != g.original_image_id`
 	args := []any{}
 	if where, wargs := ceiling.WhereTwo("g.original_image_id", "m.image_id"); where != "" {
-		q += ` AND ` + where
+		from += ` AND ` + where
 		args = append(args, wargs...)
 	}
-	q += ` ORDER BY m.created_at DESC, g.id DESC, m.image_id`
-	rows, err := cx.DB.Read.Query(q, args...)
+	var total int
+	if err := cx.DB.Read.QueryRow(`SELECT COUNT(*)`+from, args...).Scan(&total); err != nil {
+		logx.Warnf("marked walker count: %v", err)
+		http.Error(w, "load duplicates", http.StatusInternalServerError)
+		return
+	}
+	page, totalPages, offset := walkerPageOffset(r, total)
+	rows, err := cx.DB.Read.Query(
+		`SELECT g.id, g.original_image_id, m.image_id, m.created_at`+from+
+			` ORDER BY m.created_at DESC, g.id DESC, m.image_id LIMIT ? OFFSET ?`,
+		append(append([]any{}, args...), duplicatesWalkerPageSize, offset)...)
 	if err != nil {
 		logx.Warnf("marked walker query: %v", err)
 		http.Error(w, "load duplicates", http.StatusInternalServerError)
@@ -145,6 +194,9 @@ func (s *Server) markedWalkerPage(w http.ResponseWriter, r *http.Request) {
 		ActiveGallery: s.activeName,
 		Kind:          "marked",
 		MarkedRows:    out,
+		Total:         total,
+		Page:          page,
+		TotalPages:    totalPages,
 	})
 }
 

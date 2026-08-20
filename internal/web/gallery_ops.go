@@ -115,7 +115,7 @@ func (s *Server) AddGallery(name, galleryPath string) error {
 	s.cfg.Galleries = append(s.cfg.Galleries, g)
 	s.cfgMu.Unlock()
 	watch, maxMB := s.watcherSettings()
-	cx.startWatcher(watch, maxMB, s.jobs)
+	cx.startWatcher(watch, maxMB, s.ingestNaming(cx.Name), s.jobs)
 	s.ctxMu.Unlock()
 
 	if err := s.saveConfig(); err != nil {
@@ -254,7 +254,7 @@ func (s *Server) RenameGallery(oldName, newName string) error {
 		s.activeName = newName
 	}
 	watch, maxMB := s.watcherSettings()
-	newCx.startWatcher(watch, maxMB, s.jobs)
+	newCx.startWatcher(watch, maxMB, s.ingestNaming(newCx.Name), s.jobs)
 	s.ctxMu.Unlock()
 
 	if err := s.saveConfig(); err != nil {

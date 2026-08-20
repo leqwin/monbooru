@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/monbooru/monbooru/internal/gallery"
 	"github.com/monbooru/monbooru/internal/logx"
@@ -23,12 +23,12 @@ func (s *Server) generateMangaCollection(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	name, cx, uploadFolder, ok := s.collectionJobPrologue(w, r)
+	name, cx, writeDir, naming, ok := s.collectionJobPrologue(w, r)
 	if !ok {
 		return
 	}
 	s.goGenerationJob(func(ctx context.Context) (string, error) {
-		done, err := s.runMangaCollection(ctx, cx, img, name, uploadFolder)
+		done, err := s.runMangaCollection(ctx, cx, img, name, writeDir, naming)
 		return fmt.Sprintf("Generated %d page(s) into collection %q.", done, name), err
 	})
 	w.WriteHeader(http.StatusAccepted)
@@ -37,27 +37,29 @@ func (s *Server) generateMangaCollection(w http.ResponseWriter, r *http.Request)
 // collectionJobPrologue validates a generation request's label, claims the
 // job lane, and snapshots what the job runs against. SwitchGallery refuses
 // swaps while a job runs, so the snapshot stays valid for its lifetime.
-func (s *Server) collectionJobPrologue(w http.ResponseWriter, r *http.Request) (name string, cx *galleryCtx, uploadFolder string, ok bool) {
+func (s *Server) collectionJobPrologue(w http.ResponseWriter, r *http.Request) (name string, cx *galleryCtx, writeDir string, naming gallery.Naming, ok bool) {
 	if !parseFormOK(w, r) {
-		return "", nil, "", false
+		return "", nil, "", naming, false
 	}
 	name = strings.TrimSpace(r.FormValue("collection"))
 	if name == "" {
 		flashStatus(w, http.StatusBadRequest, "Collection label required.")
-		return "", nil, "", false
+		return "", nil, "", naming, false
 	}
 	if len(name) > maxExternalSourceLen {
 		flashStatus(w, http.StatusBadRequest, "Collection label too long.")
-		return "", nil, "", false
+		return "", nil, "", naming, false
 	}
 	if active := s.Active(); active == nil || active.Degraded {
 		flashStatus(w, http.StatusServiceUnavailable, "Generation unavailable: gallery path is unreadable.")
-		return "", nil, "", false
+		return "", nil, "", naming, false
 	}
 	if !s.startJob(w, models.JobTypeTag) {
-		return "", nil, "", false
+		return "", nil, "", naming, false
 	}
-	return name, s.Active(), s.defaultUploadFolder(), true
+	cx = s.Active()
+	writeDir, naming = s.receivedNaming(cx.Name)
+	return name, cx, writeDir, naming, true
 }
 
 // goGenerationJob runs one generation in the claimed lane. A user cancel is
@@ -81,8 +83,8 @@ func (s *Server) goGenerationJob(run func(ctx context.Context) (string, error)) 
 // runMangaCollection extracts every page of img into cx's gallery,
 // filing each under the collection label, and returns the page count. A
 // page that fails to extract aborts the job.
-func (s *Server) runMangaCollection(ctx context.Context, cx *galleryCtx, img *models.Image, name, uploadFolder string) (int, error) {
-	destDir, err := gallery.ResolveSubdir(cx.GalleryPath, uploadFolder)
+func (s *Server) runMangaCollection(ctx context.Context, cx *galleryCtx, img *models.Image, name, writeDir string, naming gallery.Naming) (int, error) {
+	destDir, err := gallery.ResolveSubdir(cx.GalleryPath, writeDir)
 	if err != nil {
 		return 0, err
 	}
@@ -106,13 +108,29 @@ func (s *Server) runMangaCollection(ctx context.Context, cx *galleryCtx, img *mo
 	total := *img.PageCount
 	s.jobs.Update(0, total, "generating…")
 	done := 0
+	filedDir := ""
 	for n := 1; n <= total; n++ {
 		if ctx.Err() != nil {
 			return done, ctx.Err()
 		}
-		pageID, err := s.extractMangaPageToGallery(cx, img, n, destDir, "p")
+		pageID, filed, err := s.extractMangaPageToGallery(cx, img, n, destDir, "p")
 		if err != nil {
 			return done, fmt.Errorf("page %d/%d: %w", n, total, err)
+		}
+		// The destination is resolved once, off the first page: the pages of
+		// one archive belong in one folder, and a template carrying {id} or
+		// a clock would scatter them otherwise.
+		if filed && naming.Folder != nil {
+			if filedDir == "" {
+				rendered, folderErr := naming.FolderFor(cx.DB, pageID)
+				if folderErr != nil {
+					return done, fmt.Errorf("page %d/%d destination: %w", n, total, folderErr)
+				}
+				filedDir = path.Join(rendered, sub)
+			}
+			if _, moveErr := gallery.PlaceImage(cx.DB, cx.GalleryPath, pageID, &filedDir, nil); moveErr != nil {
+				return done, fmt.Errorf("page %d/%d file: %w", n, total, moveErr)
+			}
 		}
 		// Archive page order becomes the collection position.
 		pos := n
@@ -132,12 +150,12 @@ func (s *Server) runMangaCollection(ctx context.Context, cx *galleryCtx, img *mo
 // while a tag-type job runs (see Watcher.jobSuppressesIngest), so the
 // mid-job archive is not double-ingested behind us.
 func (s *Server) generateCollectionCBZ(w http.ResponseWriter, r *http.Request) {
-	name, cx, uploadFolder, ok := s.collectionJobPrologue(w, r)
+	name, cx, writeDir, naming, ok := s.collectionJobPrologue(w, r)
 	if !ok {
 		return
 	}
 	s.goGenerationJob(func(ctx context.Context) (string, error) {
-		res, err := s.runCollectionCBZ(ctx, cx, name, uploadFolder)
+		res, err := s.runCollectionCBZ(ctx, cx, name, writeDir, naming)
 		return res.summary(), err
 	})
 	w.WriteHeader(http.StatusAccepted)
@@ -168,7 +186,7 @@ func (r collectionCBZResult) summary() string {
 // runCollectionCBZ builds a cbz from name's members in reading order and
 // ingests it as a manga row. An animated image, video or nested archive
 // among the members denies the whole generation.
-func (s *Server) runCollectionCBZ(ctx context.Context, cx *galleryCtx, name, uploadFolder string) (collectionCBZResult, error) {
+func (s *Server) runCollectionCBZ(ctx context.Context, cx *galleryCtx, name, writeDir string, naming gallery.Naming) (collectionCBZResult, error) {
 	var res collectionCBZResult
 	members, err := gallery.CollectionCBZMembers(cx.DB, name)
 	if err != nil {
@@ -177,7 +195,7 @@ func (s *Server) runCollectionCBZ(ctx context.Context, cx *galleryCtx, name, upl
 	if len(members) == 0 {
 		return res, fmt.Errorf("collection %q has no visible members", name)
 	}
-	destDir, err := gallery.ResolveSubdir(cx.GalleryPath, uploadFolder)
+	destDir, err := gallery.ResolveSubdir(cx.GalleryPath, writeDir)
 	if err != nil {
 		return res, err
 	}
@@ -203,6 +221,8 @@ func (s *Server) runCollectionCBZ(ctx context.Context, cx *galleryCtx, name, upl
 	if isDup && archive.CanonicalPath != dst {
 		gallery.DropDuplicateCopy(cx.DB, archive.ID, dst, "generate cbz")
 		res.Existing = filepath.Base(archive.CanonicalPath)
+	} else if _, err := naming.Apply(cx.DB, cx.GalleryPath, archive.ID, "", ""); err != nil {
+		logx.Warnf("generate cbz %q: file: %v", res.Filename, err)
 	}
 	cx.InvalidateCaches()
 	return res, nil
@@ -230,30 +250,9 @@ func shortHash(hash string) string {
 const maxCBZStemBytes = 180
 
 // sanitizeCollectionFilename maps a collection label onto a cbz filename
-// stem. Only what a filesystem would refuse is replaced - the Windows
-// reserved set covers POSIX's, and a gallery is often shared over SMB -
-// so a label in any script still names its own archive instead of
-// collapsing to underscores. Trailing dots and spaces go as well, since
-// Windows drops them silently and the path would stop round-tripping.
+// stem, under the shared rule every templated name goes through.
 func sanitizeCollectionFilename(name string) string {
-	var b strings.Builder
-	for _, r := range name {
-		if r < 0x20 || r == 0x7f || strings.ContainsRune(`<>:"/\|?*`, r) {
-			b.WriteRune('_')
-			continue
-		}
-		b.WriteRune(r)
-	}
-	out := strings.Trim(b.String(), " .")
-	if len(out) > maxCBZStemBytes {
-		// Back up to a rune boundary so a multi-byte character is never
-		// cut in half; the budget is bytes because the filesystem's is.
-		cut := maxCBZStemBytes
-		for cut > 0 && !utf8.RuneStart(out[cut]) {
-			cut--
-		}
-		out = strings.Trim(out[:cut], " .")
-	}
+	out := gallery.TruncateFilename(gallery.SanitizeFilename(name), maxCBZStemBytes)
 	if out == "" {
 		return "collection"
 	}
@@ -265,27 +264,29 @@ func sanitizeCollectionFilename(name string) string {
 // per-image cache as <prefix><n padded to 4>.<ext> (prefix "manga_p" for
 // the reader's extract button, "p" for the generate-collection job),
 // ingested, and linked back to the archive by a derivative edge. Returns
-// the new image id.
-func (s *Server) extractMangaPageToGallery(cx *galleryCtx, img *models.Image, n int, destDir, prefix string) (int64, error) {
+// the image id and whether the bytes landed as a new row - a page that
+// folded onto one the gallery already held is not this job's to file.
+func (s *Server) extractMangaPageToGallery(cx *galleryCtx, img *models.Image, n int, destDir, prefix string) (int64, bool, error) {
 	pagePath, err := gallery.EnsureMangaPage(cx.ThumbnailsPath, img.CanonicalPath, img.ID, n)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	dstPath := gallery.UniqueDestPath(destDir, fmt.Sprintf("%s%04d", prefix, n)+filepath.Ext(pagePath))
 	if err := copyFileContents(pagePath, dstPath); err != nil {
-		return 0, fmt.Errorf("copy page: %w", err)
+		return 0, false, fmt.Errorf("copy page: %w", err)
 	}
 	if _, err := gallery.DetectFileType(dstPath); err != nil {
 		_ = os.Remove(dstPath)
-		return 0, fmt.Errorf("detect type: %w", err)
+		return 0, false, fmt.Errorf("detect type: %w", err)
 	}
 	// No MaxFileSizeMB check: the bytes are already in the library.
 	page, isDup, err := gallery.Ingest(cx.DB, cx.GalleryPath, cx.ThumbnailsPath, dstPath, models.OriginExtract)
 	if err != nil {
 		_ = os.Remove(dstPath)
-		return 0, err
+		return 0, false, err
 	}
-	if isDup && page.CanonicalPath != dstPath {
+	folded := isDup && page.CanonicalPath != dstPath
+	if folded {
 		// Same unwind as the upload drop zone: the bytes already live in
 		// the gallery, so the fresh copy and its alias ingest are dead weight.
 		gallery.DropDuplicateCopy(cx.DB, page.ID, dstPath, "extract")
@@ -297,5 +298,5 @@ func (s *Server) extractMangaPageToGallery(cx *galleryCtx, img *models.Image, n 
 			logx.Debugf("extract: link %d -> %d skipped: %v", img.ID, page.ID, err)
 		}
 	}
-	return page.ID, nil
+	return page.ID, !folded, nil
 }

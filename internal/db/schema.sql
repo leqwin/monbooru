@@ -57,6 +57,11 @@ INSERT OR IGNORE INTO tags (name, category_id) VALUES
 CREATE TABLE IF NOT EXISTS images (
     id             INTEGER PRIMARY KEY,
     sha256         TEXT    NOT NULL UNIQUE,
+    -- Digest of the same bytes sha256 addresses, kept because boorus key
+    -- their posts on it. '' until computed; never a dedup key, and never
+    -- written from a source's claimed md5 (image_sources.md5), which is
+    -- allowed to disagree with the file.
+    md5            TEXT    NOT NULL DEFAULT '',
     canonical_path TEXT    NOT NULL,
     folder_path    TEXT    NOT NULL DEFAULT '',
     file_type      TEXT    NOT NULL,
@@ -161,8 +166,13 @@ CREATE TABLE IF NOT EXISTS image_sources (
     commentary TEXT    NOT NULL DEFAULT '', -- artist commentary from this source; operator-editable, overwritten by a re-pull
     original   TEXT    NOT NULL DEFAULT '', -- upstream artist source the booru post declared (usually a URL, newline-joined when several); operator-editable, overwritten by a re-pull
     similarity REAL    NOT NULL DEFAULT 0,  -- best similarity-service score (0-100) a lookup matched this origin with; 0 = exact or manual. A matched origin's file differs by design, so refetches skip the md5 verify
-    md5_match  TEXT    NOT NULL DEFAULT '', -- last claimed-md5 vs local-file verdict: '' unknown, 'match', 'differ'. Written where enrich already hashes the file; gates the [upgrade] action
+    md5_match  TEXT    NOT NULL DEFAULT '', -- claimed-md5 vs local-file verdict: '' unknown, 'match', 'differ'. Maintained by the trg_*_verdict triggers off the two stored digests; gates the [upgrade] action
     parent_url TEXT    NOT NULL DEFAULT '', -- canonical URL of the post this booru post declared as its parent; drives derivative-edge linking once both sides are in the gallery
+    upgrade_kept INTEGER NOT NULL DEFAULT 0, -- operator kept the local file; hides the upgrade offer until the post claims a different md5
+    post_width  INTEGER NOT NULL DEFAULT 0,  -- what the post says the file it serves is; 0 / '' where the source published nothing. Never measured here, unlike images.width
+    post_height INTEGER NOT NULL DEFAULT 0,
+    post_size   INTEGER NOT NULL DEFAULT 0,
+    post_ext    TEXT    NOT NULL DEFAULT '',
     fetched_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     PRIMARY KEY (image_id, site, post_id)
 );

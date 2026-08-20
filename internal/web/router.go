@@ -353,7 +353,8 @@ func contextMiddlewareBypass(path string) bool {
 		(strings.HasSuffix(path, "/sources/fetch") || strings.HasSuffix(path, "/lookup") ||
 			strings.HasSuffix(path, "/replace") ||
 			strings.HasSuffix(path, "/ptr-contrib-panel") || strings.HasSuffix(path, "/ptr-contrib-dialog") ||
-			strings.HasSuffix(path, "/ptr-contrib")) {
+			strings.HasSuffix(path, "/ptr-contrib") || strings.HasSuffix(path, "/ptr-lookup-preview") ||
+			strings.HasSuffix(path, "/ptr-lookup-search")) {
 		// These proxy to monloader over HTTP; holding the request read lock
 		// across the outbound call would stall a gallery switch. The handlers
 		// read their rows under their own short locks.
@@ -377,7 +378,7 @@ func (s *Server) StartWatchers() {
 	s.ctxMu.Lock()
 	defer s.ctxMu.Unlock()
 	for _, cx := range s.contexts {
-		cx.startWatcher(s.cfg.Gallery.WatchEnabled, s.cfg.Gallery.MaxFileSizeMB, s.jobs)
+		cx.startWatcher(s.cfg.Gallery.WatchEnabled, s.cfg.Gallery.MaxFileSizeMB, s.ingestNaming(cx.Name), s.jobs)
 		cx.startMangaReclaim()
 		go cx.warmCaches()
 	}
@@ -446,8 +447,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /images/{id}/sources/set", s.setSource)
 	mux.HandleFunc("POST /images/{id}/sources/remove", s.removeSource)
 	mux.HandleFunc("POST /images/{id}/sources/primary", s.makeSourcePrimary)
+	mux.HandleFunc("POST /images/{id}/sources/keep", s.keepLocalFile)
 	mux.HandleFunc("POST /images/{id}/annotations/set", s.setAnnotation)
 	mux.HandleFunc("POST /images/{id}/annotations/remove", s.removeAnnotation)
+	mux.HandleFunc("POST /images/{id}/markup/preview", s.previewMarkup)
 	mux.HandleFunc("POST /images/{id}/sources/fetch", s.fetchSource)
 	mux.HandleFunc("POST /images/{id}/lookup", s.lookupImage)
 	mux.HandleFunc("POST /images/{id}/replace", s.replaceImage)
@@ -551,7 +554,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /settings/relations", s.settingsRelationsPost)
 	mux.HandleFunc("POST /settings/maintenance/re-extract-metadata", s.reExtractMetadataPost)
 	mux.HandleFunc("POST /settings/maintenance/rebuild-thumbnails", s.rebuildThumbnailsPost)
-	mux.HandleFunc("POST /settings/maintenance/compute-phashes", s.computePhashesPost)
+	mux.HandleFunc("POST /settings/maintenance/compute-hashes", s.computeHashesPost)
 	mux.HandleFunc("POST /relations/find-pairs", s.findRelationPairsPost)
 	mux.HandleFunc("POST /relations/reset-skipped", s.resetSkippedPost)
 	mux.HandleFunc("POST /relations/phash/{id}/recompute", s.recomputePhashPost)
@@ -560,6 +563,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /relations/reverse", s.reverseRelationPost)
 	mux.HandleFunc("POST /relations/browse-groups/merge", s.mergeGroupsPost)
 	mux.HandleFunc("POST /relations/browse-groups/dissolve", s.dissolveGroupsPost)
+	mux.HandleFunc("GET /internal/images/{id}/md5", s.md5CellGet)
 	mux.HandleFunc("GET /internal/images/{id}/related-entries", s.relatedEntriesGet)
 	mux.HandleFunc("GET /internal/images/{id}/fetch-status", s.fetchStatusHandler)
 	mux.HandleFunc("GET /images/{id}/relations", s.imageRelationsPage)
@@ -600,6 +604,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /tags/{id}/ptr-contrib-panel", s.tagPtrContribPanel)
 	mux.HandleFunc("GET /tags/{id}/ptr-contrib-dialog", s.tagPtrContribDialog)
 	mux.HandleFunc("POST /tags/{id}/ptr-contrib", s.tagPtrContribSend)
+	mux.HandleFunc("GET /tags/{id}/ptr-lookup-dialog", s.tagPtrLookupDialog)
+	mux.HandleFunc("GET /tags/{id}/ptr-lookup-preview", s.tagPtrLookupPreview)
+	mux.HandleFunc("GET /tags/{id}/ptr-lookup-search", s.tagPtrLookupSearch)
 	mux.HandleFunc("POST /tags/{id}/ptr-lookup", s.ptrLookupTagPost)
 	mux.HandleFunc("POST /internal/delete-folder", s.deleteFolderPost)
 	mux.HandleFunc("GET /internal/tags/suggest", s.tagSuggest)
@@ -607,6 +614,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /internal/folders/suggest", s.foldersSuggest)
 	mux.HandleFunc("GET /internal/collection/suggest", s.collectionSuggest)
 	mux.HandleFunc("GET /internal/source/suggest", s.sourceSuggest)
+	mux.HandleFunc("GET /internal/name/preview", s.namePreview)
 	mux.HandleFunc("GET /internal/sidebar", s.gallerySidebar)
 	mux.HandleFunc("GET /internal/sidebar-browse", s.sidebarBrowse)
 	mux.HandleFunc("POST /internal/rating-ceiling", s.ratingCeilingPost)
@@ -762,6 +770,10 @@ type baseData struct {
 	// Theme is true while an operator-installed theme resolves, gating the
 	// /theme.css link between the bundled sheet and the operator's own.
 	Theme bool
+	// SidebarCollapsed hides the sidebar column on the layout's first paint.
+	// Rendered server-side so a navigation doesn't flash the column in and
+	// back out once main.js runs.
+	SidebarCollapsed bool
 	// BooruName is the operator's brand override (or "Monbooru" by
 	// default). Rendered into every page <title>, the topbar wordmark,
 	// and the login screen so a deployment that wants a different name
@@ -833,6 +845,23 @@ type baseData struct {
 	// MonloaderPTRSyncing caveats the lookup backend dialog while the PTR
 	// index is still building: it answers on partial data by design.
 	MonloaderPTRSyncing bool
+	// MonloaderPTRPresent gates the PTR-backed surfaces' render, where
+	// MonloaderPTR gates whether they are live. A paused or unreachable
+	// link reports no PTR either way, so the flag has to say "and we
+	// cannot currently tell" or the surfaces vanish on a pause.
+	MonloaderPTRPresent bool
+}
+
+// sidebarCookieName records the collapsed sidebar. The topbar toggle in
+// main.js writes it; only the layout reads it.
+const sidebarCookieName = "monbooru_sidebar"
+
+// sidebarCollapsed reports whether the operator hid the sidebar. Anything
+// other than the one stored value reads as shown, so a stale or
+// hand-edited cookie can't leave the column missing with no way back.
+func sidebarCollapsed(r *http.Request) bool {
+	c, err := r.Cookie(sidebarCookieName)
+	return err == nil && c.Value == "collapsed"
 }
 
 func (s *Server) base(r *http.Request, nav, title string) baseData {
@@ -878,6 +907,7 @@ func (s *Server) base(r *http.Request, nav, title string) baseData {
 		Variant:             Variant,
 		CustomCSS:           s.customCSSPath() != "",
 		Theme:               themeSheet,
+		SidebarCollapsed:    sidebarCollapsed(r),
 		BooruName:           s.booruName(),
 		BooruLogo:           s.booruLogoURL(),
 		BooruFavicon:        s.booruFaviconURL(),
@@ -888,6 +918,7 @@ func (s *Server) base(r *http.Request, nav, title string) baseData {
 		MonloaderVersion:    connVer,
 		MonloaderPTR:        ptrReady,
 		MonloaderPTRSyncing: ptrSyncing,
+		MonloaderPTRPresent: paired && (ptrReady || ptrSyncing || !monloaderUsable),
 		MonloaderContrib:    ptrContrib,
 		ActiveGallery:       s.activeName,
 		Galleries:           galleries,
@@ -1007,10 +1038,10 @@ func (s *Server) modelPath() string {
 }
 
 // The settings handlers rewrite these fields at runtime under the write
-// lock, so every serving path reads them through one of the accessors
-// below. A string field is two words, and a torn read of one yields a
-// slice header that never existed - default_upload_folder feeds
-// gallery.ResolveSubdir, which creates directories from it.
+// lock, so every serving path reads them under the read lock - through one
+// of the accessors below, or through a caller that takes several at once
+// (ingestNaming, receivedNaming). A string field is two words, and a torn
+// read of one yields a slice header that never existed.
 
 func (s *Server) authEnabled() bool {
 	s.cfgMu.RLock()
@@ -1054,12 +1085,6 @@ func (s *Server) watcherSettings() (bool, int) {
 	s.cfgMu.RLock()
 	defer s.cfgMu.RUnlock()
 	return s.cfg.Gallery.WatchEnabled, s.cfg.Gallery.MaxFileSizeMB
-}
-
-func (s *Server) defaultUploadFolder() string {
-	s.cfgMu.RLock()
-	defer s.cfgMu.RUnlock()
-	return s.cfg.Gallery.DefaultUploadFolder
 }
 
 func (s *Server) customCSSPath() string {

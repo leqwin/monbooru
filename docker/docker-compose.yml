@@ -2,7 +2,8 @@ services:
   monbooru:
     container_name: monbooru
 
-    # you can use monbooru:latest-cuda if you have a CUDA compatible GPU for faster auto-tagging
+    # you can use monbooru:latest-cuda if you have a CUDA compatible GPU, or
+    # monbooru:latest-openvino for an Intel GPU, for faster auto-tagging
     image: ghcr.io/monbooru/monbooru:latest
 
     # if using CUDA, pass the GPU to the container
@@ -13,6 +14,12 @@ services:
     #        - driver: nvidia
     #          count: all
     #          capabilities: [gpu]
+
+    # if using OpenVINO: 
+    #devices:
+    #  - /dev/dri:/dev/dri
+    #group_add:
+    #  - "993"
 
     ## set it to your host uid:gid
     user: "1000:1000"

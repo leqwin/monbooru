@@ -1,0 +1,64 @@
+# GPU variant: the monbooru binary on Intel's OpenVINO runtime base so the
+# tagger can load the OpenVINO execution provider. The base is there for the
+# Intel GPU user-mode stack (intel-opencl-icd, intel-level-zero-gpu); the ORT
+# wheel below bundles its own OpenVINO. The same binary runs on CPU.
+
+# Stage 1: build the binary.
+FROM golang:1.25-bookworm AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN VERSION=$(cat VERSION.md 2>/dev/null | tr -d '[:space:]') && \
+    REPO=$(cat REPOSITORY.md 2>/dev/null | tr -d '[:space:]') && \
+    DOC=$(cat DOC.md 2>/dev/null | tr -d '[:space:]') && \
+    CGO_ENABLED=1 go build -tags tagger \
+    -ldflags="-s -w -X 'github.com/monbooru/monbooru/internal/web.Version=${VERSION}' -X 'github.com/monbooru/monbooru/internal/web.RepoURL=${REPO}' -X 'github.com/monbooru/monbooru/internal/web.DocURL=${DOC}' -X 'github.com/monbooru/monbooru/internal/web.Variant=openvino'" \
+    -o /monbooru ./cmd/monbooru
+
+# Stage 2: runtime -- Intel OpenVINO 2026.3 on Ubuntu 22.04 (x86_64 only).
+FROM openvino/ubuntu22_runtime:2026.3.0
+USER root
+COPY --from=build /monbooru /usr/local/bin/monbooru
+
+# Single layer: install build-only fetch tools and pull a static
+# ffmpeg/ffprobe.
+ARG FFMPEG_RELEASE=n8.1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl xz-utils && \
+    curl -fsSL "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-${FFMPEG_RELEASE}-latest-linux64-gpl-${FFMPEG_RELEASE#n}.tar.xz" -o /tmp/ffmpeg.tar.xz && \
+    mkdir -p /tmp/ff && tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ff --strip-components=1 && \
+    cp /tmp/ff/bin/ffmpeg /tmp/ff/bin/ffprobe /usr/local/bin/ && \
+    apt-get purge -y curl xz-utils && apt-get autoremove -y && \
+    rm -rf /tmp/ff /tmp/ffmpeg.tar.xz /var/lib/apt/lists/*
+
+# ONNX Runtime with the OpenVINO execution provider. Upstream ships no
+# OpenVINO tarball, so the PyPI wheel is the only prebuilt source. Pinned
+# because an unpinned resolve follows the base image's Python (3.10 here)
+# and lands on whatever cp310 wheel is newest.
+ARG ORT_OPENVINO_VERSION=1.23.0
+
+# Link the whole capi directory, not just libonnxruntime.so: the provider
+# library pulls in the wheel's bundled OpenVINO by soname.
+RUN pip install --no-cache-dir onnxruntime-openvino==${ORT_OPENVINO_VERSION} && \
+    PKG_DIR=$(python3 -c "import onnxruntime, os; print(os.path.dirname(onnxruntime.__file__))") && \
+    find "$PKG_DIR" -name "*.so*" -type f -exec ln -sf {} /usr/local/lib/ \; && \
+    ORT_FILE=$(find "$PKG_DIR" -name "libonnxruntime.so.*" | head -1) && \
+    ln -sf "$ORT_FILE" /usr/local/lib/libonnxruntime.so && \
+    ldconfig
+
+# uid 1000 is the base image's own openvino user, homed at /home/openvino;
+# HOME below moves it, so the directory has to exist and be owned first.
+RUN mkdir -p /home/monbooru && chown 1000:1000 /home/monbooru
+
+USER 1000:1000
+
+ENV HOME=/home/monbooru \
+    MONBOORU_SERVER_BIND_ADDRESS=0.0.0.0:8080
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["/usr/local/bin/monbooru", "healthcheck", "-config", "/config/monbooru.toml"]
+
+ENTRYPOINT ["/usr/local/bin/monbooru", "-config", "/config/monbooru.toml"]

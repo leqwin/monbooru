@@ -1,0 +1,217 @@
+package web
+
+import (
+	"fmt"
+	"net/http"
+	"path/filepath"
+	"strconv"
+	"strings"
+
+	"github.com/monbooru/monbooru/internal/gallery"
+)
+
+// namePreviewRows caps what the preview shows: enough to see a sequence
+// advance, few enough that typing stays cheap on a large scope.
+const namePreviewRows = 3
+
+// namePreviewScopes maps the surface a field belongs to onto the parse
+// scope, so the preview refuses exactly what the submit would.
+var namePreviewScopes = map[string]gallery.Scope{
+	"rename":       gallery.ScopeRename,
+	"rename-batch": gallery.ScopeRenameBatch,
+	"move":         gallery.ScopeMove,
+	"move-batch":   gallery.ScopeMoveBatch,
+}
+
+// namePreview answers what a template would name the given images, so the
+// operator reads the result before committing to it. Every dialog and
+// settings field renders through this one endpoint rather than a second
+// implementation in the browser.
+func (s *Server) namePreview(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	if q.Get("scope") == "upload" {
+		s.uploadDestPreview(w, q.Get("folder"), q.Get("name"))
+		return
+	}
+	scope, known := namePreviewScopes[q.Get("scope")]
+	if !known {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	raw := strings.TrimSpace(q.Get("tmpl"))
+	var tmpl *gallery.NameTemplate
+	var err error
+	if scope == gallery.ScopeRenameBatch {
+		// The job's own entry point, so the preview shows the implicit {n}
+		// a plain base name gets instead of the whole scope on one name.
+		tmpl, err = gallery.ParseBatchRenameTemplate(raw)
+	} else {
+		tmpl, err = gallery.ParseNameTemplate(raw, scope)
+	}
+	if err != nil {
+		s.renderNamePreviewError(w, "", err.Error())
+		return
+	}
+	if tmpl == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	ids := s.namePreviewIDs(q["ids"])
+	if len(ids) == 0 {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	total, _ := strconv.Atoi(q.Get("total"))
+	total = max(total, len(ids))
+
+	rows := make([]namePreviewRow, 0, len(ids))
+	for i, id := range ids {
+		facts, factErr := gallery.LoadNameFacts(s.db(), s.activeName, id)
+		if factErr != nil {
+			continue
+		}
+		facts.N, facts.NWidth = i+1, max(len(strconv.Itoa(total)), 2)
+		// What the submit will actually use: singleName and batchName both
+		// take the literal when the template carries no token of its own,
+		// and only a render passes through the path tidying.
+		to := raw
+		if tmpl.HasTokens() {
+			to = tmpl.Render(facts)
+		}
+		if scope.Folder() {
+			// Containment is the move's other refusal, and the preview is
+			// where a destination gets checked: submitting an escaping one
+			// answers a status htmx discards, so the dialog would just sit
+			// there saying nothing.
+			if _, err := gallery.ResolveSubdir(s.galleryPath(), to); err != nil {
+				s.renderNamePreviewError(w, "", err.Error())
+				return
+			}
+			to += "/"
+		} else if onDisk := filepath.Ext(facts.Base); !strings.EqualFold(filepath.Ext(to), onDisk) {
+			// Mirror RenameImage: the extension already on disk is what gets
+			// appended, spelling included, when the render carries none.
+			to += onDisk
+		}
+		rows = append(rows, namePreviewRow{From: facts.Base, To: to})
+	}
+	if len(rows) == 0 {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	caption := ""
+	if total > len(rows) {
+		caption = fmt.Sprintf("first %d of %d, in scope order", len(rows), total)
+	}
+	s.renderNamePreview(w, caption, rows)
+}
+
+type namePreviewRow struct{ From, To string }
+
+func (s *Server) renderNamePreview(w http.ResponseWriter, caption string, rows []namePreviewRow) {
+	s.renderTemplate(w, "partials/name_preview.html", map[string]any{
+		"Caption": caption,
+		"Rows":    rows,
+	})
+}
+
+// renderNamePreviewError names the field a refusal came from when one slot
+// serves two of them.
+func (s *Server) renderNamePreviewError(w http.ResponseWriter, field, msg string) {
+	s.renderTemplate(w, "partials/name_preview.html", map[string]any{
+		"Field": field,
+		"Error": msg,
+	})
+}
+
+// uploadDestPreview answers the one path a file arriving now would land
+// at, so the two destination settings read as the single destination they
+// are. A refusal names the field it came from.
+func (s *Server) uploadDestPreview(w http.ResponseWriter, folder, name string) {
+	folderTmpl, err := gallery.ParseNameTemplate(folder, gallery.ScopeUploadFolder)
+	if err != nil {
+		s.renderNamePreviewError(w, "folder", err.Error())
+		return
+	}
+	nameTmpl, err := gallery.ParseNameTemplate(name, gallery.ScopeUploadName)
+	if err != nil {
+		s.renderNamePreviewError(w, "name", err.Error())
+		return
+	}
+	ids := s.namePreviewIDs(nil)
+	if (folderTmpl == nil && nameTmpl == nil) || len(ids) == 0 {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	facts, err := gallery.LoadNameFacts(s.db(), s.activeName, ids[0])
+	if err != nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	base := facts.Base
+	if nameTmpl != nil {
+		base = nameTmpl.Render(facts)
+		if onDisk := filepath.Ext(facts.Base); !strings.EqualFold(filepath.Ext(base), onDisk) {
+			base += onDisk
+		}
+	}
+	to := base
+	if folderTmpl != nil {
+		if dir := folderTmpl.Render(facts); dir != "" {
+			to = dir + "/" + base
+		}
+	}
+	s.renderNamePreview(w, "a file arriving now", []namePreviewRow{{From: facts.Base, To: to}})
+}
+
+// ingestNaming is where a file found on disk is filed, which is the
+// received-file destination behind the operator's opt-in. Empty when the
+// opt-in is off, which leaves a dropped file exactly as it arrived.
+func (s *Server) ingestNaming(galleryName string) gallery.Naming {
+	s.cfgMu.RLock()
+	on, folder, name := s.cfg.Gallery.RenameOnIngest, s.cfg.Gallery.DefaultUploadFolder, s.cfg.Gallery.DefaultUploadName
+	s.cfgMu.RUnlock()
+	if !on {
+		return gallery.Naming{}
+	}
+	return gallery.IngestNaming(galleryName, folder, name)
+}
+
+// receivedNaming is where a file monbooru writes itself goes: the directory
+// the bytes land in now, and the move that files the row once it exists.
+// The name half is deliberately left off - the reader extract, the generated
+// pages and the generated cbz each name their own output, and those names
+// carry the page order or the generation time.
+func (s *Server) receivedNaming(galleryName string) (writeDir string, n gallery.Naming) {
+	s.cfgMu.RLock()
+	folder := s.cfg.Gallery.DefaultUploadFolder
+	s.cfgMu.RUnlock()
+	return gallery.ReceivedNaming(galleryName, "", strings.TrimSpace(folder), "")
+}
+
+// namePreviewIDs takes the ids the caller named, or falls back to the
+// newest row so the settings fields have something real to render
+// against without the page knowing an id. htmx flattens an array value
+// into one comma-joined parameter, so both shapes are read.
+func (s *Server) namePreviewIDs(raw []string) []int64 {
+	flat := make([]string, 0, len(raw))
+	for _, v := range raw {
+		flat = append(flat, strings.Split(v, ",")...)
+	}
+	ids := parseIDList(flat)
+	if len(ids) > namePreviewRows {
+		ids = ids[:namePreviewRows]
+	}
+	if len(ids) > 0 {
+		return ids
+	}
+	var id int64
+	if err := s.db().Read.QueryRow(
+		`SELECT id FROM images WHERE is_missing = 0 ORDER BY id DESC LIMIT 1`,
+	).Scan(&id); err != nil {
+		return nil
+	}
+	return []int64{id}
+}

@@ -1133,31 +1133,15 @@ func pairHasOtherRelationTx(tx *sql.Tx, a, b int64, ignore string) (bool, error)
 		}
 	}
 	if ignore != "version" {
-		var n int
-		if err := tx.QueryRow(
-			`SELECT COUNT(*) FROM version_edges
-			 WHERE (child_image_id = ? AND parent_image_id = ?)
-			    OR (child_image_id = ? AND parent_image_id = ?)`,
-			a, b, b, a,
-		).Scan(&n); err != nil {
-			return false, err
-		}
-		if n > 0 {
-			return true, nil
+		ok, err := pairEdgeExistsTx(tx, "version_edges", "child_image_id", "parent_image_id", a, b)
+		if err != nil || ok {
+			return ok, err
 		}
 	}
 	if ignore != "derivative" {
-		var n int
-		if err := tx.QueryRow(
-			`SELECT COUNT(*) FROM derivative_edges
-			 WHERE (derivative_image_id = ? AND source_image_id = ?)
-			    OR (derivative_image_id = ? AND source_image_id = ?)`,
-			a, b, b, a,
-		).Scan(&n); err != nil {
-			return false, err
-		}
-		if n > 0 {
-			return true, nil
+		ok, err := pairEdgeExistsTx(tx, "derivative_edges", "derivative_image_id", "source_image_id", a, b)
+		if err != nil || ok {
+			return ok, err
 		}
 	}
 	if ignore != "not_related" {
@@ -1173,6 +1157,18 @@ func pairHasOtherRelationTx(tx *sql.Tx, a, b int64, ignore string) (bool, error)
 		}
 	}
 	return false, nil
+}
+
+// pairEdgeExistsTx reports whether an edge table holds the pair, in either
+// orientation. The table and both column names are compile-time constants,
+// never input, and the OR covers both directions so which column is named
+// first does not change the answer.
+func pairEdgeExistsTx(tx *sql.Tx, table, colA, colB string, a, b int64) (bool, error) {
+	var n int
+	err := tx.QueryRow(fmt.Sprintf(
+		`SELECT COUNT(*) FROM %s WHERE (%s = ? AND %s = ?) OR (%s = ? AND %s = ?)`,
+		table, colA, colB, colA, colB), a, b, b, a).Scan(&n)
+	return n > 0, err
 }
 
 // pairChainRelatedTx reports whether a and b already sit on one

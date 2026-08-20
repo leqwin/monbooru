@@ -1,6 +1,7 @@
 package gallery
 
 import (
+	"database/sql"
 	"errors"
 
 	"github.com/monbooru/monbooru/internal/db"
@@ -11,23 +12,13 @@ import (
 // carrying the row id and manual flag so the editable list can address a box
 // and distinguish operator-drawn boxes from source-pulled ones.
 func AnnotationsForImage(database *db.DB, imageID int64) ([]models.Annotation, error) {
-	rows, err := database.Read.Query(
-		`SELECT id, site, post_id, x, y, w, h, body, manual FROM image_annotations WHERE image_id = ? ORDER BY id`, imageID)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	var out []models.Annotation
-	for rows.Next() {
+	return db.QueryAll(database.Read, func(rows *sql.Rows) (models.Annotation, error) {
 		var a models.Annotation
 		var manual int
-		if err := rows.Scan(&a.ID, &a.Site, &a.PostID, &a.X, &a.Y, &a.W, &a.H, &a.Body, &manual); err != nil {
-			return nil, err
-		}
+		err := rows.Scan(&a.ID, &a.Site, &a.PostID, &a.X, &a.Y, &a.W, &a.H, &a.Body, &manual)
 		a.Manual = manual == 1
-		out = append(out, a)
-	}
-	return out, rows.Err()
+		return a, err
+	}, `SELECT id, site, post_id, x, y, w, h, body, manual FROM image_annotations WHERE image_id = ? ORDER BY id`, imageID)
 }
 
 // ReplaceSourceAnnotations sets the annotations attributed to one source to

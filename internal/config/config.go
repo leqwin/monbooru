@@ -306,10 +306,19 @@ type Gallery struct {
 type GalleryConfig struct {
 	WatchEnabled  bool `toml:"watch_enabled"`
 	MaxFileSizeMB int  `toml:"max_file_size_mb"`
-	// DefaultUploadFolder is the subfolder web-UI uploads land in when the
-	// upload form leaves the folder blank. Relative to the active gallery
+	// DefaultUploadFolder is the subfolder received files land in when the
+	// request leaves the folder blank. Relative to the active gallery
 	// root so one global value works across galleries; empty means root.
+	// Accepts the filename tokens (gallery.ParseNameTemplate).
 	DefaultUploadFolder string `toml:"default_upload_folder"`
+	// DefaultUploadName renames a received file once its row exists, which
+	// is what makes {id} and {hash} available. Empty keeps the name the
+	// sender gave.
+	DefaultUploadName string `toml:"default_upload_name"`
+	// RenameOnIngest extends DefaultUploadName to what the watcher and a
+	// sync pick up off the filesystem. Off by default: a file the operator
+	// dropped in themselves keeps the name they gave it.
+	RenameOnIngest bool `toml:"rename_on_ingest"`
 }
 
 type TaggerConfig struct {

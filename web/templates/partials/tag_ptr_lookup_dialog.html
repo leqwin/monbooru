@@ -1,0 +1,51 @@
+{{/* The tag page's look-up dialog: ask the PTR about a spelling of the
+     operator's choosing and preview what a pull under it would do to this
+     tag. Mounted in the same host as the contribute dialog; closing it
+     re-fetches the card the same way. */}}
+{{define "partials/tag_ptr_lookup_dialog.html"}}
+<dialog id="ptr-lookup-dialog" class="ptr-contrib-dialog" onclose="htmx.trigger(document.body,'ptr-contrib-closed')">
+  <header class="ptr-contrib-dialog-head">
+    <strong>look up in the Public Tag Repository</strong>
+    <span class="mono-small">tag {{.TagName}}</span>
+  </header>
+  <form id="ptr-lookup-form" hx-get="/tags/{{.TagID}}/ptr-lookup-preview"
+        hx-target="#ptr-lookup-result" hx-swap="innerHTML"
+        onsubmit="disarmSuggest('ptr-lookup-as')">
+    <div class="field">
+      {{/* The option rides above the input: the suggest dropdown overlays
+           whatever sits under the field, and a control the operator cannot
+           reach while typing is the one moment they want it. */}}
+      <div class="ptr-lookup-head">
+        <label for="ptr-lookup-as">spelling to look up (category:name, general when bare)</label>
+        <label class="ptr-lookup-anywhere">
+          {{/* Focus goes back to the input so the widened search's answer is
+               not dropped as a swap landing on an unfocused field. */}}
+          <input type="checkbox" id="ptr-lookup-anywhere" onchange="document.getElementById('ptr-lookup-as').focus()"{{if not .Qualified}} disabled title="a category:name spelling is needed to match anywhere"{{end}}>
+          match anywhere in the name <span class="field-hint">(slower)</span>
+        </label>
+      </div>
+      <div class="ptr-lookup-input">
+        <div class="series-input-wrap">
+          <input type="text" name="as" id="ptr-lookup-as" required autocomplete="off"
+                 hx-get="/tags/{{.TagID}}/ptr-lookup-search"
+                 hx-trigger="input changed delay:250ms, change from:#ptr-lookup-anywhere"
+                 hx-target="#ptr-lookup-suggest"
+                 hx-swap="innerHTML"
+                 hx-vals='js:{q: document.getElementById("ptr-lookup-as").value, anywhere: document.getElementById("ptr-lookup-anywhere").checked ? "1" : ""}'
+                 hx-sync="closest form:abort"
+                 hx-on::before-request="if (suggestDisarmed(this)) event.preventDefault()"
+                 oninput="delete this.dataset.suggestStale"
+                 onkeydown="handleSuggestKey(event, 'ptr-lookup-suggest', 'ptr-lookup-as')">
+          <div id="ptr-lookup-suggest" class="suggest-dropdown tag-suggest-dropdown"></div>
+        </div>
+        <button type="submit" class="monloader-accent">look up</button>
+      </div>
+    </div>
+  </form>
+  <div id="ptr-lookup-result" hx-get="/tags/{{.TagID}}/ptr-lookup-search" hx-trigger="load" hx-swap="innerHTML">
+    <div class="dialog-actions">
+      <button type="button" onclick="document.getElementById('ptr-lookup-dialog').close()">cancel</button>
+    </div>
+  </div>
+</dialog>
+{{end}}

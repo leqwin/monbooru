@@ -25,7 +25,7 @@ import (
 // fires sees a path whose sha the DB already carries and dedups to a no-op;
 // either crash window is one rename wide and surfaces as the standard
 // missing-file banner, with the backup restorable by hand.
-func ApplyReplacedFile(database *db.DB, thumbnailsPath string, imageID int64, stagedPath, newSHA, newType string) error {
+func ApplyReplacedFile(database *db.DB, thumbnailsPath string, imageID int64, stagedPath, newSHA, newMD5, newType string) error {
 	var oldPath string
 	var oldW, oldH *int
 	if err := database.Read.QueryRow(
@@ -67,9 +67,9 @@ func ApplyReplacedFile(database *db.DB, thumbnailsPath string, imageID int64, st
 		}
 		defer func() { _ = tx.Rollback() }()
 		if _, err := tx.Exec(
-			`UPDATE images SET sha256 = ?, canonical_path = ?, file_type = ?, file_size = ?,
+			`UPDATE images SET sha256 = ?, md5 = ?, canonical_path = ?, file_type = ?, file_size = ?,
 			        width = ?, height = ?, source_type = ?, is_missing = 0 WHERE id = ?`,
-			newSHA, newPath, newType, fi.Size(), toNullInt(newW), toNullInt(newH), sourceType, imageID,
+			newSHA, newMD5, newPath, newType, fi.Size(), toNullInt(newW), toNullInt(newH), sourceType, imageID,
 		); err != nil {
 			return fmt.Errorf("update images row: %w", err)
 		}

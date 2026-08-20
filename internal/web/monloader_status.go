@@ -5,8 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -216,6 +219,58 @@ func (s *Server) ptrTagLookup(ctx context.Context, names []string) (map[string]p
 	return out.Results, nil
 }
 
+// ptrCluster is one sibling cluster monloader's spelling search answered with,
+// in monbooru-form names.
+type ptrCluster struct {
+	Ideal        string   `json:"ideal"`
+	Matched      []string `json:"matched"`
+	Aliases      int      `json:"aliases"`
+	Implications int      `json:"implications"`
+	ImpliedBy    int      `json:"implied_by"`
+}
+
+// errPTRNoSearch marks a monloader too old to answer the spelling search, so
+// the dialog drops back to its plain input rather than reading as broken.
+var errPTRNoSearch = errors.New("monloader does not serve the spelling search")
+
+// errPTRSearchUnbounded is the refusal for a substring query with no namespace
+// to scope it to.
+var errPTRSearchUnbounded = errors.New("a substring search needs a category")
+
+// ptrSpellingSearch asks monloader which spellings the PTR holds near a
+// monbooru-form prefix. mode is empty for the prefix seek or "contains" for
+// the namespace walk.
+func (s *Server) ptrSpellingSearch(ctx context.Context, q, mode string, limit int) (clusters []ptrCluster, truncated bool, err error) {
+	v := url.Values{"q": {q}, "limit": {strconv.Itoa(limit)}}
+	if mode != "" {
+		v.Set("mode", mode)
+	}
+	resp, err := s.monloaderDo(ctx, http.MethodGet, "/api/v1/ptr/tags/search?"+v.Encode(), nil)
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound:
+		return nil, false, errPTRNoSearch
+	case http.StatusBadRequest:
+		return nil, false, errPTRSearchUnbounded
+	case http.StatusConflict:
+		return nil, false, errPTRUnavailable
+	default:
+		return nil, false, fmt.Errorf("monloader returned %s", resp.Status)
+	}
+	var out struct {
+		Clusters  []ptrCluster `json:"clusters"`
+		Truncated bool         `json:"truncated"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, false, err
+	}
+	return out.Clusters, out.Truncated, nil
+}
+
 // monloaderAPIBase is the address monbooru calls monloader at: the operator's
 // configured override when set, otherwise the address discovered during pairing
 // (the source the request came from, stored on the paired token). A paused
@@ -274,17 +329,13 @@ func (s *Server) checkMonloader(ctx context.Context) (status, version string, pt
 	tok := s.cfg.Monloader.APIToken
 	s.cfgMu.RUnlock()
 	if tok != "" {
-		qreq, _ := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/v1/queue?limit=1", nil)
-		qreq.Header.Set("Authorization", "Bearer "+tok)
-		if qresp, qerr := monloaderClient.Do(qreq); qerr == nil {
+		if qresp, qerr := s.monloaderDo(ctx, http.MethodGet, "/api/v1/queue?limit=1", nil); qerr == nil {
 			defer func() { _ = qresp.Body.Close() }()
 			if qresp.StatusCode == http.StatusUnauthorized || qresp.StatusCode == http.StatusForbidden {
 				return "rejected", version, false, false, false, 0, false
 			}
 		}
-		preq, _ := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/v1/ptr/status", nil)
-		preq.Header.Set("Authorization", "Bearer "+tok)
-		if presp, perr := monloaderClient.Do(preq); perr == nil {
+		if presp, perr := s.monloaderDo(ctx, http.MethodGet, "/api/v1/ptr/status", nil); perr == nil {
 			var p struct {
 				Enabled  bool `json:"enabled"`
 				Progress struct {

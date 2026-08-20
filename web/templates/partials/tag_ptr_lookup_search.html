@@ -1,0 +1,23 @@
+{{/* The look-up dialog's candidate spellings. Rendered into the body on open
+     (Seed: with its note and cancel) and into the input's dropdown while
+     typing (rows only). Picking a row fills the input and runs the preview. */}}
+{{define "partials/tag_ptr_lookup_search.html"}}
+{{if and .Seed .Note}}<p class="field-hint ptr-lookup-note">{{.Note}}</p>{{end}}
+{{if .Rows}}
+<div class="suggest-list">
+  {{range .Rows}}
+  <button type="button" class="suggest-item" style="color:{{catColor .Color}}"
+          data-spelling="{{.Spelling}}" onclick="applyPTRSpelling(this)">
+    <span class="suggest-name">{{.Spelling}}</span>
+    <span class="suggest-description">{{.Note}}</span>
+  </button>
+  {{end}}
+</div>
+{{end}}
+{{if and (not .Seed) .Note}}<p class="field-hint ptr-lookup-note">{{.Note}}</p>{{end}}
+{{if .Seed}}
+<div class="dialog-actions">
+  <button type="button" onclick="document.getElementById('ptr-lookup-dialog').close()">cancel</button>
+</div>
+{{end}}
+{{end}}

@@ -145,7 +145,14 @@ func (s *Service) ImplicationsForParents(parentIDs []int64) (map[int64][]models.
 	}
 	err := db.Chunked(parentIDs, 500, func(batch []int64) error {
 		placeholders, args := db.InPlaceholders(batch)
-		rows, err := s.db.Read.Query(
+		imps, err := db.QueryAll(s.db.Read, func(rows *sql.Rows) (models.Implication, error) {
+			var im models.Implication
+			err := rows.Scan(
+				&im.ParentID, &im.ImpliedID,
+				&im.ImpliedName, &im.ImpliedCategoryName, &im.ImpliedCategoryColor,
+			)
+			return im, err
+		},
 			`SELECT ti.parent_tag_id, ti.implied_tag_id,
 			        i.name, ic.name, ic.color
 			 FROM tag_implications ti
@@ -153,23 +160,14 @@ func (s *Service) ImplicationsForParents(parentIDs []int64) (map[int64][]models.
 			 JOIN tag_categories ic ON ic.id = i.category_id
 			 WHERE ti.parent_tag_id IN (`+placeholders+`)
 			 ORDER BY i.name`,
-			args...,
-		)
+			args...)
 		if err != nil {
 			return err
 		}
-		defer func() { _ = rows.Close() }()
-		for rows.Next() {
-			var im models.Implication
-			if err := rows.Scan(
-				&im.ParentID, &im.ImpliedID,
-				&im.ImpliedName, &im.ImpliedCategoryName, &im.ImpliedCategoryColor,
-			); err != nil {
-				return err
-			}
+		for _, im := range imps {
 			out[im.ParentID] = append(out[im.ParentID], im)
 		}
-		return rows.Err()
+		return nil
 	})
 	if err != nil {
 		return nil, err
@@ -264,38 +262,24 @@ func bfsImpliedTx(tx *sql.Tx, start []int64, visit func(int64) bool) error {
 	frontier := append([]int64(nil), start...)
 	for depth := 0; depth < MaxImplicationDepth && len(frontier) > 0; depth++ {
 		placeholders, args := db.InPlaceholders(frontier)
-		rows, err := tx.Query(
+		// Read the whole level before visiting any of it: visit is the
+		// caller's own code and must not run with a cursor held open.
+		ids, err := db.QueryIDs(tx,
 			`SELECT DISTINCT implied_tag_id FROM tag_implications WHERE parent_tag_id IN (`+placeholders+`)`,
-			args...,
-		)
+			args...)
 		if err != nil {
 			return err
 		}
 		var next []int64
-		stopped := false
-		for rows.Next() {
-			var id int64
-			if err := rows.Scan(&id); err != nil {
-				_ = rows.Close()
-				return err
-			}
+		for _, id := range ids {
 			if _, ok := seen[id]; ok {
 				continue
 			}
 			seen[id] = struct{}{}
 			if !visit(id) {
-				stopped = true
-				break
+				return nil
 			}
 			next = append(next, id)
-		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
-			return err
-		}
-		_ = rows.Close()
-		if stopped {
-			return nil
 		}
 		frontier = next
 	}

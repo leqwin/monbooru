@@ -1,7 +1,6 @@
 package web
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -115,10 +114,12 @@ func (s *Server) uploadPost(w http.ResponseWriter, r *http.Request) {
 
 	tagInput := strings.TrimSpace(r.FormValue("tags"))
 	autotagAfter := r.FormValue("autotag") == "on"
-	folderInput := strings.TrimSpace(r.FormValue("folder"))
 	// The inline inbox drop zone posts no folder field, so fall back to the
-	// operator's configured default; an explicit folder still wins.
-	folderInput = cmp.Or(folderInput, strings.TrimSpace(cfg.Gallery.DefaultUploadFolder))
+	// operator's configured destination; an explicit folder still wins.
+	folderInput, naming := gallery.ReceivedNaming(s.activeName,
+		strings.TrimSpace(r.FormValue("folder")),
+		strings.TrimSpace(cfg.Gallery.DefaultUploadFolder),
+		strings.TrimSpace(cfg.Gallery.DefaultUploadName))
 	taggerName := strings.TrimSpace(r.FormValue("tagger_name"))
 	files := r.MultipartForm.File["files"]
 	if len(files) == 0 {
@@ -218,6 +219,10 @@ func (s *Server) uploadPost(w http.ResponseWriter, r *http.Request) {
 			dupeIDs = append(dupeIDs, img.ID)
 			dupes++
 			continue
+		}
+
+		if _, err := naming.Apply(s.db(), s.galleryPath(), img.ID, "", ""); err != nil {
+			logx.Warnf("upload: name %d: %v", img.ID, err)
 		}
 
 		for _, ct := range tagPairs {

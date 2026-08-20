@@ -1,27 +1,16 @@
-{{/* The per-image scheduled-lookup controls, at the right of the Sources
-     field's add row - one per phase enabled in Settings, because the PTR is
-     free and the boorus spend a quota, so an image can be worth one and not
-     the other. A link pair rather than a select: the third state is a
-     result, not a choice - nothing the operator picks writes "nothing
-     found". */}}
+{{/* One line per backend: the operator's opt-in for that phase, then what
+     the schedule will do with it next. A link pair rather than a select -
+     the ladder's verdict is a result, not something anyone picks - and the
+     verdict stays in the status column so it never replaces the switch. */}}
 {{define "partials/scheduled_lookup.html"}}
 {{$l := .Lookup}}
 {{$csrf := .CSRFToken}}
+{{$id := $l.ImageID}}
 <div id="scheduled-lookup" class="scheduled-lookup">
-  {{if $l.Unsourced}}
-  {{$id := $l.ImageID}}
   {{range $l.Backends}}
-  <div class="scheduled-lookup-switch">
-    <span class="monloader-accent">Scheduled {{.Label}} lookup:</span>
-    {{if .Exhausted}}
-    <span class="tag-mode-current">nothing found</span>
-    <form hx-post="/images/{{$id}}/scheduled-lookup/reset" hx-target="#scheduled-lookup" hx-swap="outerHTML"
-          hx-headers='{"X-CSRF-Token":"{{$csrf}}"}' style="display:inline">
-      <input type="hidden" name="_csrf" value="{{$csrf}}">
-      <input type="hidden" name="backend" value="{{.Backend}}">
-      <button type="submit" class="tag-mode-toggle" title="Put this image back in the schedule">[look again]</button>
-    </form>
-    {{else}}
+  {{$off := ""}}{{if not .ScheduleOn}}{{$off = " lookup-line-off"}}{{end}}
+  <span class="lookup-backend{{$off}}">{{.Label}}</span>
+  <span class="lookup-switch{{$off}}">
     {{if .Enabled}}<span class="tag-mode-current">[on]</span>
     {{else}}<form hx-post="/images/{{$id}}/scheduled-lookup" hx-target="#scheduled-lookup" hx-swap="outerHTML"
           hx-headers='{"X-CSRF-Token":"{{$csrf}}"}' style="display:inline">
@@ -39,19 +28,9 @@
       <button type="submit" class="tag-mode-toggle">off</button>
     </form>
     {{else}}<span class="tag-mode-current">[off]</span>{{end}}
-    {{end}}
-  </div>
-  <span class="field-hint">
-    {{if .LastAt.IsZero}}Never looked up.{{else}}Last looked up {{localDate .LastAt}},
-      {{if and .Exhausted (gt .Attempts 1)}}no match after {{.Attempts}} tries.{{else}}{{lookupResultLabel .LastResult}}.{{end}}{{end}}
   </span>
-  {{/* Due, not next: the date is when the image becomes eligible again, and
-       a run bounded by the daily budget reaches it whenever the backlog
-       ahead of it clears. Its own line, so the history reads as history. */}}
-  {{if and .Enabled (not .Exhausted) (not .NextDueAt.IsZero)}}
-  <span class="field-hint">Due again {{localDate .NextDueAt}}.</span>
-  {{end}}
-  {{end}}
+  {{$s := .Status}}
+  <span class="lookup-status{{$off}}{{with $s.Tone}} lookup-status-{{.}}{{end}}">{{$s.Text}}</span>
   {{end}}
 </div>
 {{end}}

@@ -37,8 +37,8 @@
     <span class="batch-bar-spacer"></span>
     <button type="button" onclick="openTagSelectedDialog()">Add tags manually</button>
     <button type="button" onclick="openStripSelectedDialog()">Remove tags</button>
-    {{if .EnabledTaggers}}<button type="button" class="btn-autotag" onclick="openBatchAutotagDialog('selection')">Auto-tag</button>{{end}}
-    {{if .MonloaderUsable}}<button type="button" class="monloader-accent" onclick="openBatchLookupDialog('selection')">Find tags</button>{{end}}
+    {{if .TaggersPresent}}<button type="button" class="btn-autotag"{{if not .EnabledTaggers}} disabled title="{{.TaggerReason}}"{{end}} onclick="openBatchAutotagDialog('selection')">Auto-tag</button>{{end}}
+    {{if .MonloaderPaired}}<button type="button" class="monloader-accent"{{if not .MonloaderUsable}} disabled title="{{monloaderOffReason .MonloaderConn}}"{{end}} onclick="openBatchLookupDialog('selection')">Find tags</button>{{end}}
     <span class="batch-bar-sep" aria-hidden="true"></span>
     <button type="button" onclick="openBatchInboxDialog('selection')">Inbox</button>
     <button type="button" onclick="openBatchFavoriteDialog('selection')">Favorite</button>
@@ -238,13 +238,20 @@
 <!-- Rename dialog (scope flip via hidden #batch-rename-scope). -->
 <dialog id="batch-rename-dialog">
   <p>Rename {{template "batch_count" "batch-rename"}}:</p>
-  <p class="field-hint">Files become name01.ext, name02.ext, ... in scope order; extensions are kept.</p>
+  <p class="field-hint">Plain text numbers the scope in order: name01.ext, name02.ext, ... A template with tokens names each file on its own. Extensions are kept.</p>
   <form id="batch-rename-form" onsubmit="event.preventDefault(); confirmBatchRename();">
     <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
     <input type="hidden" id="batch-rename-scope">
     <div class="field">
       <input type="text" name="name" id="batch-rename-name" class="upload-wide-input"
-             placeholder="Base name..." required autocomplete="off">
+             placeholder="Base name or template..." required autocomplete="off">
+      {{template "partials/name_tokens.html" (dict "Target" "batch-rename-name" "Batch" true)}}
+      <div id="batch-rename-preview"
+           hx-get="/internal/name/preview"
+           hx-trigger="input delay:200ms from:#batch-rename-name"
+           hx-target="this"
+           hx-vals='js:{...namePreviewVals("batch-rename-name", "rename-batch", "batch-rename-scope")}'
+           hx-swap="innerHTML"></div>
     </div>
     <div id="batch-rename-flash"></div>
     <div class="dialog-actions">
@@ -271,6 +278,13 @@
              hx-vals='js:{prefix: document.getElementById("batch-move-folder").value}'
              onkeydown="handleSuggestKey(event, 'batch-move-suggest', 'batch-move-folder')">
       <div id="batch-move-suggest" class="suggest-dropdown folder-suggest-dropdown"></div>
+      {{template "partials/name_tokens.html" (dict "Target" "batch-move-folder" "Batch" true)}}
+      <div id="batch-move-preview"
+           hx-get="/internal/name/preview"
+           hx-trigger="input delay:200ms from:#batch-move-folder"
+           hx-target="this"
+           hx-vals='js:{...namePreviewVals("batch-move-folder", "move-batch", "batch-move-scope")}'
+           hx-swap="innerHTML"></div>
     </div>
     <div id="batch-move-flash"></div>
     <div class="dialog-actions">
@@ -416,11 +430,11 @@ function openBatchLookupDialog(scope) {
     beforeShow: function() {
       _batchLookupCounts = {total: 0, sourced: 0, unsourced: 0};
       updateBatchLookupSummary();
-      var params = ['_csrf=' + encodeURIComponent(csrfValue()), 'scope=' + encodeURIComponent(scope)]
+      var params = ['_csrf=' + encodeURIComponent(getCSRFToken()), 'scope=' + encodeURIComponent(scope)]
         .concat(scope === 'search' ? searchScopeParts() : (selectionScopeIds() || []));
       fetch('/internal/batch-lookup/count', {
         method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRF-Token': csrfValue()},
+        headers: {'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRF-Token': getCSRFToken()},
         body: params.join('&')
       }).then(function(r) { return r.ok ? r.json() : null; }).then(function(c) {
         if (c) _batchLookupCounts = c;
@@ -509,7 +523,7 @@ function confirmBatchDelete() {
 
 function openBatchRenameDialog(scope) {
   openBatchDialog('batch-rename', scope, {
-    clearIds: ['batch-rename-name'],
+    clearIds: ['batch-rename-name', 'batch-rename-preview'],
     focusId: 'batch-rename-name'
   });
 }
@@ -522,7 +536,7 @@ function confirmBatchRename() {
 
 function openBatchMoveDialog(scope) {
   openBatchDialog('batch-move', scope, {
-    clearIds: ['batch-move-folder', 'batch-move-suggest'],
+    clearIds: ['batch-move-folder', 'batch-move-suggest', 'batch-move-preview'],
     focusId: 'batch-move-folder'
   });
 }

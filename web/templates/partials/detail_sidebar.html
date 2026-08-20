@@ -47,6 +47,12 @@
           {{range .Rows}}
           <li class="tag-entry{{if not .Removable}} tag-entry-implied{{end}}{{if .Stale}} tag-entry-stale{{end}}"
               data-name="{{.TagName}}" data-tag-id="{{.TagID}}" data-source="{{.Source}}" data-depth="{{.Depth}}">
+            {{if not .Removable}}<span class="tag-entry-branch">└</span>{{end}}
+            <a href="/?q={{.Category}}:{{.TagName}}" class="tag-link" style="color:{{catColor .Color}}"
+               title="{{.NameHint}}">{{.TagName}}</a>
+            {{if .Marker}}<span class="tag-marker tag-marker-{{.MarkerKind}}"{{if .MarkerHint}} title="{{.MarkerHint}}"{{end}}>{{.Marker}}</span>{{end}}
+            <span class="tag-count" title="{{.UsageCount}} images in the library with this tag">{{abbrevCount .UsageCount}}</span>
+            {{/* Last so the DOM order matches the visual one; the CSS lifts it over the count. */}}
             {{if .Removable}}
             <button type="button" class="tag-entry-remove"
                     hx-delete="{{.RemoveURL}}"
@@ -54,11 +60,7 @@
                     hx-swap="outerHTML"
                     hx-headers='{"X-CSRF-Token":"{{$sb.CSRFToken}}"}'
                     title="{{if eq $sb.Mode "source"}}Drop this source's claim on the tag{{else}}Remove tag{{end}}">[x]</button>
-            {{else}}<span class="tag-entry-branch">└</span>{{end}}
-            <a href="/?q={{.Category}}:{{.TagName}}" class="tag-link" style="color:{{catColor .Color}}"
-               title="{{.NameHint}}">{{.TagName}}</a>
-            {{if .Marker}}<span class="tag-marker tag-marker-{{.MarkerKind}}"{{if .MarkerHint}} title="{{.MarkerHint}}"{{end}}>{{.Marker}}</span>{{end}}
-            <span class="tag-count" title="images in the library with this tag">{{.UsageCount}}</span>
+            {{end}}
           </li>
           {{end}}
         </ul>
@@ -84,10 +86,11 @@
 
   {{/* Folder tree, source filters, and saved searches. Lazy-loaded so the
        folder-tree aggregation doesn't block first paint - same pattern the
-       gallery sidebar uses. BackQuery drives active-state highlighting when
+       gallery sidebar uses, including dropping the load trigger while the
+       column is collapsed. BackQuery drives active-state highlighting when
        the detail page was reached with gallery context. */}}
   <div id="detail-sidebar-browse"
        hx-get="/internal/sidebar-browse?q={{.BackQuery}}"
-       hx-trigger="load"
+       hx-trigger="{{if .SidebarCollapsed}}sidebar-shown from:body{{else}}load{{end}}"
        hx-swap="innerHTML"></div>
 {{end}}

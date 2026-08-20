@@ -16,6 +16,7 @@ import (
 	"github.com/monbooru/monbooru/internal/logx"
 	"github.com/monbooru/monbooru/internal/models"
 	"github.com/monbooru/monbooru/internal/tags"
+	"github.com/monbooru/monbooru/internal/upgrade"
 )
 
 // ratingCeilingPost sets or clears the monbooru_rating_ceiling cookie.
@@ -364,6 +365,20 @@ func (s *Server) makeSourcePrimary(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// keepLocalFile records or clears the operator's ruling that this origin's
+// file is not worth taking, which withholds [upgrade] and drops the image
+// out of upgrade:any until the post claims a different md5.
+func (s *Server) keepLocalFile(w http.ResponseWriter, r *http.Request) {
+	kept := r.FormValue("keep") == "1"
+	msg := "Upgrade offered again."
+	if kept {
+		msg = "Keeping the local file."
+	}
+	s.sourceMembershipAction(w, r, msg, func(id int64, site, postID string) error {
+		return gallery.SetSourceUpgradeKept(s.db(), id, site, postID, kept)
+	})
+}
+
 // fetchSource enqueues a metadata-only refetch of one source's URL on
 // monloader, which maps the post's tags + commentary + notes and enriches this
 // image back through the enrich endpoint. The button renders only when
@@ -426,17 +441,17 @@ func (s *Server) lookupImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	galleryName := cx.Name
-	var canonPath, sha string
+	var sha, storedMD5 string
 	if err := cx.DB.Read.QueryRow(
-		`SELECT canonical_path, sha256 FROM images WHERE id = ?`, id,
-	).Scan(&canonPath, &sha); err != nil {
+		`SELECT sha256, md5 FROM images WHERE id = ?`, id,
+	).Scan(&sha, &storedMD5); err != nil {
 		externalErr(w, r, "image not found", http.StatusNotFound)
 		return
 	}
 	var md5 string
 	if backend != "ptr" {
 		var err error
-		if md5, err = gallery.Md5File(canonPath); err != nil {
+		if md5, err = lookupMD5(r.Context(), cx, id, storedMD5); err != nil {
 			externalErr(w, r, "cannot hash the file: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -493,13 +508,13 @@ func (s *Server) replaceImage(w http.ResponseWriter, r *http.Request) {
 	galleryName := cx.Name
 	src := models.ImageSource{Site: site, PostID: postID}
 	if err := cx.DB.Read.QueryRow(
-		`SELECT url, similarity, md5_match FROM image_sources WHERE image_id = ? AND site = ? AND post_id = ?`,
+		`SELECT url, similarity, md5_match, upgrade_kept FROM image_sources WHERE image_id = ? AND site = ? AND post_id = ?`,
 		id, site, postID,
-	).Scan(&src.URL, &src.Similarity, &src.MD5Match); err != nil {
+	).Scan(&src.URL, &src.Similarity, &src.MD5Match, &src.UpgradeKept); err != nil {
 		externalErr(w, r, "source not found", http.StatusNotFound)
 		return
 	}
-	if !src.UpgradeEligible() {
+	if !upgrade.Eligible(src) {
 		externalErr(w, r, "this source's file is not known to differ from the local one", http.StatusConflict)
 		return
 	}
@@ -719,6 +734,16 @@ func (s *Server) removeAnnotation(w http.ResponseWriter, r *http.Request) {
 	hxDone(w, r, "Annotation removed.", "", "/images/"+strconv.FormatInt(id, 10))
 }
 
+// previewMarkup renders a dialog's draft body through the renderer the page
+// itself uses, so a preview can never disagree with what saving would show -
+// including whether a referenced tag exists in this gallery.
+func (s *Server) previewMarkup(w http.ResponseWriter, r *http.Request) {
+	if _, ok := imageIDForm(w, r); !ok {
+		return
+	}
+	s.renderTemplate(w, "partials/markup_preview.html", s.renderMarkup(r.FormValue("body")))
+}
+
 // annotationCoord parses one non-negative integer coordinate field.
 func annotationCoord(r *http.Request, field string) (int, bool) {
 	n, err := strconv.Atoi(strings.TrimSpace(r.FormValue(field)))
@@ -904,12 +929,33 @@ func (s *Server) singleImageMoveJob(w http.ResponseWriter, r *http.Request, done
 // moveImage relocates the one image at {id} into the requested folder.
 func (s *Server) moveImage(w http.ResponseWriter, r *http.Request) {
 	targetFolder := strings.TrimSpace(r.FormValue("folder"))
+	tmpl, parseErr := gallery.ParseNameTemplate(targetFolder, gallery.ScopeMove)
 	s.singleImageMoveJob(w, r, "Moved image.", func(id int64) (string, bool, error) {
-		if _, err := gallery.MoveImage(s.db(), s.galleryPath(), id, targetFolder); err != nil {
+		if parseErr != nil {
+			return "", false, parseErr
+		}
+		folder, err := s.singleName(tmpl, targetFolder, id)
+		if err != nil {
 			return "", false, err
 		}
-		return fmt.Sprintf("Moved image to %s.", cmp.Or(targetFolder, "gallery root")), false, nil
+		if _, err := gallery.MoveImage(s.db(), s.galleryPath(), id, folder); err != nil {
+			return "", false, err
+		}
+		return fmt.Sprintf("Moved image to %s.", cmp.Or(folder, "gallery root")), false, nil
 	})
+}
+
+// singleName resolves what one image is renamed or moved to: the literal
+// when the template carries no tokens, otherwise the row's own render.
+func (s *Server) singleName(tmpl *gallery.NameTemplate, literal string, id int64) (string, error) {
+	if !tmpl.HasTokens() {
+		return literal, nil
+	}
+	facts, err := gallery.LoadNameFacts(s.db(), s.activeName, id)
+	if err != nil {
+		return "", err
+	}
+	return tmpl.Render(facts), nil
 }
 
 // renameImage renames the one image at {id}'s file in place. The
@@ -919,8 +965,16 @@ func (s *Server) moveImage(w http.ResponseWriter, r *http.Request) {
 func (s *Server) renameImage(w http.ResponseWriter, r *http.Request) {
 	newName := strings.TrimSpace(r.FormValue("name"))
 	inline := r.FormValue("inline") == "1"
+	tmpl, parseErr := gallery.ParseNameTemplate(newName, gallery.ScopeRename)
 	s.singleImageMoveJob(w, r, "Renamed image.", func(id int64) (string, bool, error) {
-		res, err := gallery.RenameImage(s.db(), s.galleryPath(), id, newName)
+		if parseErr != nil {
+			return "", false, parseErr
+		}
+		name, err := s.singleName(tmpl, newName, id)
+		if err != nil {
+			return "", false, err
+		}
+		res, err := gallery.RenameImage(s.db(), s.galleryPath(), id, name)
 		if err != nil {
 			return "", false, err
 		}

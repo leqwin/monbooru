@@ -59,6 +59,7 @@ func MediaKind(fileType string) string {
 type Image struct {
 	ID             int64
 	SHA256         string
+	MD5            string // digest of the same bytes; "" until computed. Distinct from ImageSource.MD5, which is a source's claim
 	CanonicalPath  string
 	FolderPath     string // relative dir from gallery_path root; "" = root
 	FileType       string // "jpeg" | "png" | "webp" | "gif" | "mp4" | "webm" | "cbz"
@@ -104,17 +105,15 @@ type ImageSource struct {
 	Similarity float64 // best similarity-service score a lookup matched this origin with; 0 = exact or manual
 	MD5        string  // md5 the source last claimed; "" when it never claimed one
 	MD5Match   string  // last claimed-md5 vs local-file verdict: "" unknown, "match", "differ"
-}
-
-// UpgradeEligible reports whether this origin's file is known (recorded
-// hash mismatch) or presumed (similarity match with no hash claim to
-// compare) to differ from the local one - the gate for the [upgrade]
-// action. A verified match withholds it: an upgrade would no-op.
-func (s ImageSource) UpgradeEligible() bool {
-	if s.URL == "" {
-		return false
-	}
-	return s.MD5Match == "differ" || (s.Similarity > 0 && s.MD5Match == "")
+	// UpgradeKept is the operator's "keep my file" ruling on this origin.
+	// It hides the upgrade offer until the post claims an md5 it has not
+	// claimed before.
+	UpgradeKept bool
+	// What the post says about the file it serves. Zero / "" where the
+	// source published nothing, which is most sites for most fields.
+	PostWidth, PostHeight int
+	PostSize              int64
+	PostExt               string
 }
 
 // Annotation is one positional note box overlaid on an image, in original-image
@@ -325,7 +324,7 @@ const (
 	JobTypePruneThumbs   = "prune-thumbs"
 	JobTypeVacuum        = "vacuum"
 	JobTypeFreeMemory    = "free-memory"
-	JobTypePhash         = "phash"
+	JobTypeHashes        = "hashes"
 	JobTypeRelations     = "relations"
 	JobTypeFold          = "fold"
 	JobTypeLookup        = "lookup"
@@ -364,7 +363,7 @@ type RowScanner interface {
 // ImageRowColumns is the canonical SELECT list ScanImageRow reads, in
 // the order it scans them. Callers alias the images table as `i`. The
 // column order is load-bearing: the Scan is positional.
-const ImageRowColumns = `i.id, i.sha256, i.canonical_path, i.folder_path, i.file_type,
+const ImageRowColumns = `i.id, i.sha256, i.md5, i.canonical_path, i.folder_path, i.file_type,
 	        i.width, i.height, i.file_size, i.is_missing, i.is_favorited,
 	        i.is_inbox, i.auto_tagged_at, i.source_type, i.origin, i.source, i.url, i.note, i.original_source,
 	        i.page_count, i.last_read_page, i.duration_seconds, i.series, i.series_order, i.phash, i.ingested_at, i.upload_batch`
@@ -381,7 +380,7 @@ func ScanImageRow(row RowScanner) (Image, error) {
 	var phash *int64
 	var ingestedAt string
 	if err := row.Scan(
-		&img.ID, &img.SHA256, &img.CanonicalPath, &img.FolderPath, &img.FileType,
+		&img.ID, &img.SHA256, &img.MD5, &img.CanonicalPath, &img.FolderPath, &img.FileType,
 		&width, &height, &img.FileSize, &isMissing, &isFav,
 		&isInbox, &autoTaggedAt, &img.SourceType, &img.Origin, &img.Source, &img.URL, &img.Note, &img.OriginalSource,
 		&pageCount, &lastReadPage, &durationSec, &img.Series, &seriesOrder, &phash, &ingestedAt, &img.UploadBatch,

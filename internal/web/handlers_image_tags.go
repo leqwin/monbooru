@@ -1,6 +1,7 @@
 package web
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"html/template"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/monbooru/monbooru/internal/db"
 	"github.com/monbooru/monbooru/internal/logx"
 	"github.com/monbooru/monbooru/internal/models"
 	"github.com/monbooru/monbooru/internal/tags"
@@ -86,21 +88,23 @@ func (s *Server) parseTagInput(tagInput string) ([]catTag, string) {
 // `character:foo` as a literal general tag, so a cursor error is
 // surfaced rather than swallowed.
 func (s *Server) categoryIDsByName() (map[string]int64, error) {
-	rows, err := s.db().Read.Query(`SELECT id, name FROM tag_categories`)
+	type catRow struct {
+		id   int64
+		name string
+	}
+	cats, err := db.QueryAll(s.db().Read, func(rows *sql.Rows) (catRow, error) {
+		var c catRow
+		err := rows.Scan(&c.id, &c.name)
+		return c, err
+	}, `SELECT id, name FROM tag_categories`)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
-	out := map[string]int64{}
-	for rows.Next() {
-		var id int64
-		var name string
-		if err := rows.Scan(&id, &name); err != nil {
-			return nil, err
-		}
-		out[name] = id
+	out := make(map[string]int64, len(cats))
+	for _, c := range cats {
+		out[c.name] = c.id
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // splitTagTokens splits tag-input into whitespace-separated tokens while
@@ -304,29 +308,30 @@ func (s *Server) renderTagListWithSidebar(w http.ResponseWriter, r *http.Request
 		filename = filepath.Base(canonicalPath)
 	}
 	s.renderTemplate(w, "partials/tag_list.html", map[string]any{
-		"ImageID":       id,
-		"ImageTags":     imageTags,
-		"TagSidebar":    s.buildTagSidebar(id, csrfToken, tagMode, imageTags),
-		"SidebarTags":   true,
-		"DangerZone":    true,
-		"HasUserTags":   hasUserTags,
-		"HasStaleTags":  hasStaleTags,
-		"ImageTaggers":  distinctTaggerNames(imageTags, true),
-		"ImageSources":  distinctTaggerNames(imageTags, false),
-		"CanTransfer":   len(s.galleryList()) > 1,
-		"BackQuery":     back.Q,
-		"BackSort":      back.Sort,
-		"BackOrder":     back.Order,
-		"BackPage":      back.Page,
-		"BackSeed":      back.Seed,
-		"CSRFToken":     csrfToken,
-		"EditMode":      true,
-		"ErrMsg":        errMsg,
-		"WarnMsg":       warnMsg,
-		"OkMsg":         okMsg,
-		"ClearInput":    clearInput,
-		"CurrentFolder": folderPath,
-		"Filename":      filename,
+		"ImageID":          id,
+		"ImageTags":        imageTags,
+		"TagSidebar":       s.buildTagSidebar(id, csrfToken, tagMode, imageTags),
+		"SidebarTags":      true,
+		"SidebarCollapsed": sidebarCollapsed(r),
+		"DangerZone":       true,
+		"HasUserTags":      hasUserTags,
+		"HasStaleTags":     hasStaleTags,
+		"ImageTaggers":     distinctTaggerNames(imageTags, true),
+		"ImageSources":     distinctTaggerNames(imageTags, false),
+		"CanTransfer":      len(s.galleryList()) > 1,
+		"BackQuery":        back.Q,
+		"BackSort":         back.Sort,
+		"BackOrder":        back.Order,
+		"BackPage":         back.Page,
+		"BackSeed":         back.Seed,
+		"CSRFToken":        csrfToken,
+		"EditMode":         true,
+		"ErrMsg":           errMsg,
+		"WarnMsg":          warnMsg,
+		"OkMsg":            okMsg,
+		"ClearInput":       clearInput,
+		"CurrentFolder":    folderPath,
+		"Filename":         filename,
 	})
 }
 

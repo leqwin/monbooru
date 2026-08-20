@@ -1,0 +1,11 @@
+{{define "partials/md5_cell.html"}}
+{{- if .MD5 -}}
+<button type="button" class="mono-small sha-truncated sha-copyable"
+        data-copy="{{.MD5}}" title="{{.MD5}} (click to copy)">{{elideHash .MD5}}</button>
+<span class="copy-flash" hidden>copied</span>
+{{- else if .Deferred -}}
+<span class="field-hint" title="Left to Settings - Maintenance - Compute hashes">(over the size limit)</span>
+{{- else -}}
+<span class="field-hint">(unreadable)</span>
+{{- end -}}
+{{end}}

@@ -52,6 +52,34 @@ func (s *Server) renderSearchSuggest(w http.ResponseWriter, rows []suggestItem) 
 // move dialogs. Root (empty folder_path) is excluded from suggestions because it
 // maps to an empty input anyway.
 //
+// suggestLabels runs a single-text-column suggest query and collects its
+// non-blank values, owning the cursor. A row that will not scan is skipped
+// rather than dropping the whole list: an autocomplete showing most of its
+// matches beats one showing none. logLabel names the surface in the log.
+func (s *Server) suggestLabels(q db.Querier, logLabel, query string, args ...any) []string {
+	rows, err := q.Query(query, args...)
+	if err != nil {
+		logx.Warnf("%s suggest: %v", logLabel, err)
+		return nil
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			logx.Warnf("%s suggest: scan: %v", logLabel, err)
+			continue
+		}
+		if v != "" {
+			out = append(out, v)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		logx.Warnf("%s suggest: iter: %v", logLabel, err)
+	}
+	return out
+}
+
 // The half-open range form `folder_path >= prefix AND folder_path < prefix||X`
 // (where X is one codepoint past the prefix's last char) lets SQLite seek to
 // the first match and stop at the boundary - a `LIKE ?||'%'` form forces a
@@ -64,44 +92,21 @@ func (s *Server) renderSearchSuggest(w http.ResponseWriter, rows []suggestItem) 
 // prefix and vice versa.
 func (s *Server) foldersSuggest(w http.ResponseWriter, r *http.Request) {
 	prefix := strings.TrimSpace(r.URL.Query().Get("prefix"))
-	var (
-		rows *sql.Rows
-		err  error
-	)
+	var folders []string
 	if prefix == "" {
-		rows, err = s.db().Read.Query(
+		folders = s.suggestLabels(s.db().Read, "folders",
 			`SELECT DISTINCT folder_path FROM images INDEXED BY idx_images_folder_nocase_visible
 			 WHERE is_missing = 0 AND folder_path != ''
-			 ORDER BY folder_path COLLATE NOCASE LIMIT 10`,
-		)
+			 ORDER BY folder_path COLLATE NOCASE LIMIT 10`)
 	} else {
 		lo, hi := nocasePrefixRange(prefix)
-		rows, err = s.db().Read.Query(
+		folders = s.suggestLabels(s.db().Read, "folders",
 			`SELECT DISTINCT folder_path FROM images INDEXED BY idx_images_folder_nocase_visible
 			 WHERE is_missing = 0
 			   AND folder_path >= ? COLLATE NOCASE
 			   AND folder_path < ? COLLATE NOCASE
 			 ORDER BY folder_path COLLATE NOCASE LIMIT 10`,
-			lo, hi,
-		)
-	}
-	if err != nil {
-		logx.Warnf("folders suggest: %v", err)
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-	defer func() { _ = rows.Close() }()
-	var folders []string
-	for rows.Next() {
-		var fp string
-		if err := rows.Scan(&fp); err != nil {
-			logx.Warnf("folders suggest: scan: %v", err)
-			continue
-		}
-		folders = append(folders, fp)
-	}
-	if err := rows.Err(); err != nil {
-		logx.Warnf("folders suggest: iter: %v", err)
+			lo, hi)
 	}
 	if len(folders) == 0 {
 		w.WriteHeader(http.StatusNoContent)
@@ -156,38 +161,16 @@ func (s *Server) renderLabelSuggest(w http.ResponseWriter, r *http.Request, quer
 // stays in step with the matching case-insensitive filter. Reading the
 // membership table (not the scalar mirror) surfaces secondary entries too.
 func (s *Server) queryDistinctLabels(table, col, prefix string, limit int, logLabel string) []string {
-	var (
-		rows *sql.Rows
-		err  error
-	)
 	if prefix == "" {
-		rows, err = s.db().Read.Query(
+		return s.suggestLabels(s.db().Read, logLabel,
 			`SELECT DISTINCT `+col+` FROM `+table+` WHERE `+col+` != ''
 			 ORDER BY `+col+` LIMIT ?`, limit)
-	} else {
-		lo, hi := nocasePrefixRange(prefix)
-		rows, err = s.db().Read.Query(
-			`SELECT DISTINCT `+col+` FROM `+table+`
-			 WHERE `+col+` >= ? AND `+col+` < ?
-			 ORDER BY `+col+` LIMIT ?`, lo, hi, limit)
 	}
-	if err != nil {
-		logx.Warnf("%s suggest: %v", logLabel, err)
-		return nil
-	}
-	defer func() { _ = rows.Close() }()
-	var out []string
-	for rows.Next() {
-		var sv string
-		if err := rows.Scan(&sv); err != nil {
-			continue
-		}
-		out = append(out, sv)
-	}
-	if err := rows.Err(); err != nil {
-		logx.Warnf("%s suggest: %v", logLabel, err)
-	}
-	return out
+	lo, hi := nocasePrefixRange(prefix)
+	return s.suggestLabels(s.db().Read, logLabel,
+		`SELECT DISTINCT `+col+` FROM `+table+`
+		 WHERE `+col+` >= ? AND `+col+` < ?
+		 ORDER BY `+col+` LIMIT ?`, lo, hi, limit)
 }
 
 // querySourceLabels drives the `source:` autocomplete in the search-bar
@@ -218,33 +201,12 @@ func (s *Server) queryNameBasenames(prefix string, limit int) []string {
 		return nil
 	}
 	low := strings.ToLower(prefix)
-	rows, err := d.Read.Query(
+	return s.suggestLabels(d.Read, "name",
 		`SELECT DISTINCT basename_lower FROM images INDEXED BY idx_images_basename_lower_visible
 		 WHERE is_missing = 0 AND basename_lower != ''
 		   AND basename_lower >= ? AND basename_lower < ?
 		 ORDER BY basename_lower LIMIT ?`,
-		low, nextPrefix(low), limit,
-	)
-	if err != nil {
-		logx.Warnf("name suggest: %v", err)
-		return nil
-	}
-	defer func() { _ = rows.Close() }()
-	out := make([]string, 0, limit)
-	for rows.Next() {
-		var base string
-		if err := rows.Scan(&base); err != nil {
-			continue
-		}
-		if base == "" {
-			continue
-		}
-		out = append(out, base)
-	}
-	if err := rows.Err(); err != nil {
-		logx.Warnf("name suggest: %v", err)
-	}
-	return out
+		low, nextPrefix(low), limit)
 }
 
 // querySDStringField returns up to limit distinct values from the
@@ -263,53 +225,34 @@ func (s *Server) querySDStringField(sdField, comfyField, prefix string, limit in
 	seen := make(map[string]struct{}, limit*2)
 	out := make([]string, 0, limit*2)
 	for _, t := range tables {
-		var rows *sql.Rows
-		var err error
+		var values []string
 		switch {
 		case prefix == "":
-			rows, err = d.Read.Query(
+			values = s.suggestLabels(d.Read, t.field,
 				`SELECT DISTINCT `+t.field+` FROM `+t.table+`
 				 WHERE `+t.field+` IS NOT NULL AND `+t.field+` != ''
 				 ORDER BY `+t.field+` LIMIT ?`,
-				limit,
-			)
+				limit)
 		case substring:
-			rows, err = d.Read.Query(
+			values = s.suggestLabels(d.Read, t.field,
 				`SELECT DISTINCT `+t.field+` FROM `+t.table+`
 				 WHERE `+t.field+` LIKE ? ESCAPE '\'
 				 ORDER BY `+t.field+` LIMIT ?`,
-				"%"+db.EscapeLike(prefix)+"%", limit,
-			)
+				"%"+db.EscapeLike(prefix)+"%", limit)
 		default:
-			rows, err = d.Read.Query(
+			values = s.suggestLabels(d.Read, t.field,
 				`SELECT DISTINCT `+t.field+` FROM `+t.table+`
 				 WHERE `+t.field+` >= ? AND `+t.field+` < ?
 				 ORDER BY `+t.field+` LIMIT ?`,
-				prefix, nextPrefix(prefix), limit,
-			)
+				prefix, nextPrefix(prefix), limit)
 		}
-		if err != nil {
-			logx.Warnf("%s suggest: %v", t.field, err)
-			continue
-		}
-		for rows.Next() {
-			var v string
-			if err := rows.Scan(&v); err != nil {
-				continue
-			}
-			if v == "" {
-				continue
-			}
+		for _, v := range values {
 			if _, dup := seen[v]; dup {
 				continue
 			}
 			seen[v] = struct{}{}
 			out = append(out, v)
 		}
-		if err := rows.Err(); err != nil {
-			logx.Warnf("%s suggest: %v", t.field, err)
-		}
-		_ = rows.Close()
 		if len(out) >= limit {
 			out = out[:limit]
 			break
@@ -687,20 +630,12 @@ func (s *Server) systemCategoryRows() []systemCategoryRow {
 	if d == nil {
 		return nil
 	}
-	dbrows, err := d.Read.Query(`SELECT name, color FROM tag_categories ORDER BY name`)
-	if err != nil {
-		return nil
-	}
-	defer func() { _ = dbrows.Close() }()
-	var out []systemCategoryRow
-	for dbrows.Next() {
+	out, err := db.QueryAll(d.Read, func(rows *sql.Rows) (systemCategoryRow, error) {
 		var name, color string
-		if err := dbrows.Scan(&name, &color); err != nil {
-			return out
-		}
-		out = append(out, systemCategoryRow{Name: name, Color: tags.SafeCategoryColor(color)})
-	}
-	if err := dbrows.Err(); err != nil {
+		err := rows.Scan(&name, &color)
+		return systemCategoryRow{Name: name, Color: tags.SafeCategoryColor(color)}, err
+	}, `SELECT name, color FROM tag_categories ORDER BY name`)
+	if err != nil {
 		logx.Warnf("system category rows: %v", err)
 	}
 	return out

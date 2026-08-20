@@ -1,0 +1,22 @@
+{{define "partials/markup_bar.html"}}
+<div class="markup-bar" data-target="{{.Target}}">
+  <button type="button" class="btn-link-accent" data-wrap="b" title="Bold">[b]</button>
+  <button type="button" class="btn-link-accent" data-wrap="i" title="Italic">[i]</button>
+  <button type="button" class="btn-link-accent" data-wrap="u" title="Underline">[u]</button>
+  <button type="button" class="btn-link-accent" data-wrap="s" title="Struck through">[s]</button>
+  <button type="button" class="btn-link-accent" data-wrap="code" title="Code">[code]</button>
+  <button type="button" class="btn-link-accent" data-wrap="tn" title="Translator note">[tn]</button>
+  <span class="markup-bar-sep">|</span>
+  <button type="button" class="btn-link-accent" data-wrap="tag" title="Link a tag search">[tag]</button>
+  <button type="button" class="btn-link-accent" data-wrap="url" title="Link a URL">[link]</button>
+  <button type="button" class="btn-link-accent" data-wrap="image" title="Link an image in this gallery">[image]</button>
+  <span class="markup-bar-sep">|</span>
+  <button type="button" class="btn-link-accent"
+          hx-post="/images/{{.ImageID}}/markup/preview"
+          hx-include="closest form"
+          hx-vals='js:{body: document.getElementById("{{.Target}}").value}'
+          hx-target="#{{.Target}}-preview"
+          hx-swap="innerHTML">[preview]</button>
+</div>
+<div id="{{.Target}}-preview" class="markup-preview"></div>
+{{end}}

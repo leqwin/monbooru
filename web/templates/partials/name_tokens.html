@@ -1,0 +1,8 @@
+{{define "partials/name_tokens.html"}}
+{{$t := or .Targets .Target}}
+<div class="tok-chips">
+  {{range list "{name}" "{ext}" "{id}" "{hash:8}" "{md5}" "{date}" "{year}" "{month}" "{gallery}" "{type}"}}<button type="button" class="tok-chip" data-targets="{{$t}}" data-token="{{.}}" onmousedown="event.preventDefault()" onclick="insertToken(this)" tabindex="-1">{{.}}</button>{{end}}
+  {{if .Batch}}<button type="button" class="tok-chip" data-targets="{{$t}}" data-token="{n}" onmousedown="event.preventDefault()" onclick="insertToken(this)" tabindex="-1">{n}</button>{{end}}
+  {{if .Received}}{{range list "{source}" "{post_id}"}}<button type="button" class="tok-chip" data-targets="{{$t}}" data-token="{{.}}" onmousedown="event.preventDefault()" onclick="insertToken(this)" tabindex="-1">{{.}}</button>{{end}}{{end}}
+</div>
+{{end}}

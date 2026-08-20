@@ -1,0 +1,10 @@
+{{define "partials/name_preview.html"}}
+{{if .Error}}
+<div class="name-preview-err">{{with .Field}}<span class="name-preview-field">{{.}}:</span> {{end}}{{.Error}}</div>
+{{else}}
+<div class="name-preview">
+  {{with .Caption}}<span class="name-preview-cap">{{.}}</span>{{end}}
+  {{range .Rows}}<span class="name-preview-row"><span class="name-preview-from">{{.From}}</span> <span class="name-preview-arrow">-&gt;</span> <span class="name-preview-to">{{.To}}</span></span>{{end}}
+</div>
+{{end}}
+{{end}}

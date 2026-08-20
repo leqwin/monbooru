@@ -40,13 +40,13 @@
             hx-on:htmx:response-error="document.getElementById('sync-flash').innerHTML=event.detail.xhr.responseText;refreshJobStatus();setTimeout(function(){var el=document.getElementById('sync-flash');if(el)el.innerHTML='';},5000)"
             style="display:inline">
         <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
-        <button type="submit" title="Sync gallery">⟳</button>
+        <button type="submit" class="topbar-action" title="Sync gallery">[⟳ sync]</button>
       </form>
       {{end}}
       {{if .AuthEnabled}}
         <form method="POST" action="/logout" style="display:inline">
           <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
-          <button type="submit">Logout</button>
+          <button type="submit" class="topbar-action">[logout]</button>
         </form>
       {{end}}
     </div>
@@ -56,7 +56,7 @@
     ⚠ Gallery path is unreadable - sync and watch are disabled. Check your configuration.
   </div>
   {{end}}
-  <div id="main-layout">
+  <div id="main-layout"{{if .SidebarCollapsed}} class="sidebar-collapsed"{{end}}>
     <aside id="sidebar">
 {{end}}
 
@@ -100,6 +100,7 @@
     <p id="confirm-dialog-danger" class="confirm-dialog-danger"></p>
     <div class="dialog-actions">
       <button type="button" id="confirm-dialog-ok" class="btn-danger">OK</button>
+      <button type="button" id="confirm-dialog-alt" hidden></button>
       <button type="button" id="confirm-dialog-cancel">Cancel</button>
     </div>
   </dialog>
@@ -112,6 +113,7 @@
           <tbody>
             <tr><td><kbd>?</kbd></td><td>Toggle this overlay</td></tr>
             <tr><td><kbd>s</kbd> / <kbd>/</kbd></td><td>Focus search</td></tr>
+            <tr><td><kbd>b</kbd></td><td>Show / hide the sidebar</td></tr>
             <tr><td><kbd>Esc</kbd></td><td>Close dialog · back</td></tr>
             <tr><td><kbd>g g</kbd></td><td>Gallery</td></tr>
             <tr><td><kbd>g i</kbd></td><td>Inbox</td></tr>

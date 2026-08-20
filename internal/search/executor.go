@@ -865,7 +865,7 @@ func SidebarTagsWithGlobalCount(database *db.DB, imageIDs []int64) ([]models.Tag
 
 	placeholders, args := db.InPlaceholders(imageIDs)
 
-	rows, err := database.Read.Query(
+	return db.QueryAll(database.Read, tags.ScanTag,
 		fmt.Sprintf(
 			`WITH tag_counts AS (
 			     SELECT t.id AS tag_id, t.name AS tag_name, tc.name AS cat_name,
@@ -888,13 +888,7 @@ func SidebarTagsWithGlobalCount(database *db.DB, imageIDs []int64) ([]models.Tag
 			 ORDER BY page_count DESC, tag_name ASC`,
 			placeholders,
 		),
-		append(args, sidebarMaxPerCategory)...,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	return tags.ScanTags(rows)
+		append(args, sidebarMaxPerCategory)...)
 }
 
 // suggestCandidateCap bounds how many prefix/substring-matching tags are

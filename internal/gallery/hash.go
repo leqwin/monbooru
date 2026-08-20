@@ -1,6 +1,7 @@
 package gallery
 
 import (
+	"context"
 	"crypto/md5"
 	"crypto/sha256"
 	"encoding/binary"
@@ -118,30 +119,64 @@ func uniquePathBy(dir, filename string, nameNth func(stem, ext string, i int) st
 	}
 }
 
-// hashFileWith streams the file at path through h in 32 KB chunks.
-func hashFileWith(path string, h hash.Hash) (string, error) {
+// cancellableReader stops a read once its context is done. io.Copy has no
+// cancellation of its own, and an original can be gigabytes.
+type cancellableReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c cancellableReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
+}
+
+// streamFile copies the file at path into w in 32 KB chunks, giving up
+// between chunks when ctx is done.
+func streamFile(ctx context.Context, path string, w io.Writer) error {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", fmt.Errorf("opening file for hashing: %w", err)
+		return fmt.Errorf("opening file for hashing: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 	buf := make([]byte, 32*1024)
-	if _, err := io.CopyBuffer(h, f, buf); err != nil {
-		return "", fmt.Errorf("hashing file: %w", err)
+	if _, err := io.CopyBuffer(w, cancellableReader{ctx, f}, buf); err != nil {
+		return fmt.Errorf("hashing file: %w", err)
+	}
+	return nil
+}
+
+// hashFileWith streams the file at path through h.
+func hashFileWith(ctx context.Context, path string, h hash.Hash) (string, error) {
+	if err := streamFile(ctx, path, h); err != nil {
+		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // HashFile computes the SHA-256 of the file at path.
 func HashFile(path string) (string, error) {
-	return hashFileWith(path, sha256.New())
+	return hashFileWith(context.Background(), path, sha256.New())
 }
 
-// Md5File computes the MD5 of the file at path. Used only to verify a source
-// refetch still points at the same bytes (boorus key posts on md5), never for
-// dedup - sha256 remains the content address.
+// Md5File computes the MD5 of the file at path. Boorus key their posts on
+// md5; sha256 remains the content address, and md5 is never a dedup key.
 func Md5File(path string) (string, error) {
-	return hashFileWith(path, md5.New())
+	return hashFileWith(context.Background(), path, md5.New())
+}
+
+// HashFileDigests computes both stored digests of the file at path in one
+// read. Every path that writes images.sha256 goes through here, so the two
+// columns cannot drift apart: an md5 describing bytes the row no longer
+// holds is what a later booru lookup would search for.
+func HashFileDigests(path string) (sha, sum string, err error) {
+	shaH, md5H := sha256.New(), md5.New()
+	if err := streamFile(context.Background(), path, io.MultiWriter(shaH, md5H)); err != nil {
+		return "", "", err
+	}
+	return hex.EncodeToString(shaH.Sum(nil)), hex.EncodeToString(md5H.Sum(nil)), nil
 }
 
 // DetectFileType returns the file type constant for the given path,

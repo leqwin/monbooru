@@ -72,30 +72,23 @@ func FindPairs(ctx context.Context, database *db.DB, tree *BKTree, opts FindPair
 	// Archives ride the tree (search still probes them) but stay out of
 	// the pair queue: their phash is only the cover page.
 	type row struct {
-		id    int64
-		phash sql.NullInt64
+		id       int64
+		phash    sql.NullInt64
+		fileType string
 	}
-	rows, err := database.Read.Query(`SELECT id, phash, file_type FROM images WHERE is_missing = 0 ORDER BY id`)
+	entries, err := db.QueryAll(database.Read, func(rows *sql.Rows) (row, error) {
+		var r row
+		err := rows.Scan(&r.id, &r.phash, &r.fileType)
+		return r, err
+	}, `SELECT id, phash, file_type FROM images WHERE is_missing = 0 ORDER BY id`)
 	if err != nil {
 		return 0, fmt.Errorf("load image ids: %w", err)
 	}
-	var entries []row
 	archives := make(map[int64]bool)
-	for rows.Next() {
-		var r row
-		var fileType string
-		if err := rows.Scan(&r.id, &r.phash, &fileType); err != nil {
-			_ = rows.Close()
-			return 0, err
-		}
-		if fileType == models.FileTypeCBZ {
+	for _, r := range entries {
+		if r.fileType == models.FileTypeCBZ {
 			archives[r.id] = true
 		}
-		entries = append(entries, r)
-	}
-	_ = rows.Close()
-	if err := rows.Err(); err != nil {
-		return 0, err
 	}
 
 	if err := tree.EnsureBuilt(database); err != nil {
