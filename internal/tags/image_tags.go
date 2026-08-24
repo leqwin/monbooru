@@ -400,30 +400,48 @@ func (s *Service) BatchAddTagsTx(tx *sql.Tx, imageIDs []int64, tagIDs []int64) (
 
 // BatchRemoveTagsTx is the remove twin of BatchAddTagsTx: removes each
 // (imageID, tagID) pair via removeTagFromImageTx so usage_count and the
-// implied closure stay consistent. Returns the count of pairs that
-// touched an existing row.
-func (s *Service) BatchRemoveTagsTx(tx *sql.Tx, imageIDs []int64, tagIDs []int64) (int, error) {
-	removed := 0
+// implied closure stay consistent. removed counts the pairs that touched
+// an existing row; implied counts the ones left standing because a parent
+// on the image still implies them. A batch names tags rather than rows,
+// so it reports those instead of failing the whole scope on one.
+func (s *Service) BatchRemoveTagsTx(tx *sql.Tx, imageIDs []int64, tagIDs []int64) (removed, implied int, err error) {
 	for _, imageID := range imageIDs {
 		for _, tagID := range tagIDs {
 			before := 0
 			if err := tx.QueryRow(`SELECT COUNT(*) FROM image_tags WHERE image_id = ? AND tag_id = ?`, imageID, tagID).Scan(&before); err != nil {
-				return removed, err
+				return removed, implied, err
 			}
 			if before == 0 {
 				continue
 			}
+			switch isImplied, err := impliedByParentOnImage(tx, imageID, tagID); {
+			case err != nil:
+				return removed, implied, err
+			case isImplied:
+				implied++
+				continue
+			}
 			if _, err := removeTagFromImageTx(tx, imageID, tagID); err != nil {
-				return removed, err
+				return removed, implied, err
 			}
 			removed++
 		}
 	}
-	return removed, nil
+	return removed, implied, nil
 }
 
+// RemoveTagFromImage drops one operator-named tag from one image. An
+// implied row a parent on the image still justifies is refused with
+// ErrTagImplied: the detail sidebar renders no remove button for those,
+// and the routes behind it owe the same answer.
 func (s *Service) RemoveTagFromImage(imageID, tagID int64) error {
 	return s.inWriteTx(func(tx *sql.Tx) error {
+		switch implied, err := impliedByParentOnImage(tx, imageID, tagID); {
+		case err != nil:
+			return err
+		case implied:
+			return ErrTagImplied
+		}
 		_, err := removeTagFromImageTx(tx, imageID, tagID)
 		return err
 	})
@@ -452,6 +470,14 @@ func (s *Service) RemoveTagsFromOneImage(imageID int64, tagIDs []int64) error {
 		return nil
 	}
 	return s.inWriteTx(func(tx *sql.Tx) error {
+		for _, tagID := range tagIDs {
+			switch implied, err := impliedByParentOnImage(tx, imageID, tagID); {
+			case err != nil:
+				return err
+			case implied:
+				return ErrTagImplied
+			}
+		}
 		_, err := removeTagIDsFromImageTx(tx, imageID, tagIDs)
 		return err
 	})

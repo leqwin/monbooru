@@ -36,7 +36,7 @@
         </div>
         {{range .Actionable}}
         <label class="ptr-row ptr-row-add">
-          <input type="checkbox" name="{{$.PickName}}" value="{{if $.Pairs}}{{.Value}}{{else}}{{.Tag}}{{end}}"><span class="ptr-gut"></span><span class="ptr-mark"></span>{{template "ptr_contrib_name" (dict "Pairs" $.Pairs "Row" .)}}<span class="ptr-note{{if not $.Pairs}}{{if .UnknownTag}} ptr-note-warn{{else if .PTRDiffers}} ptr-note-under{{end}}{{end}}">{{if $.Pairs}}{{.Rel}}{{else if .UnknownTag}}not a PTR tag{{else if .PTRDiffers}}PTR spelling: {{.PTR}}{{end}}</span>
+          <input type="checkbox" name="{{$.PickName}}" value="{{if $.Pairs}}{{.Value}}{{else}}{{.Sent}}{{end}}"><span class="ptr-gut"></span><span class="ptr-mark"></span>{{template "ptr_contrib_name" (dict "Pairs" $.Pairs "Row" .)}}<span class="ptr-note{{if not $.Pairs}}{{if .UnknownTag}} ptr-note-warn{{else if .PTRDiffers}} ptr-note-under{{end}}{{end}}">{{if $.Pairs}}{{.Rel}}{{else if .UnknownTag}}not a PTR tag{{else if .PTRDiffers}}PTR spelling: {{.PTR}}{{end}}</span>
         </label>
         {{end}}
         {{if not .Actionable}}<p class="field-hint">nothing new to {{.Verb}}.</p>{{end}}

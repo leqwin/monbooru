@@ -20,11 +20,20 @@ import (
 // says nothing, and a run where every row was refused still lands in
 // the terminal success state. Capped at three: the summary is one line
 // and wants the shape of the failure, not every instance of it.
-type skipReasons struct{ seen []string }
+type skipReasons struct {
+	seen []string
+	// dropped counts the distinct reasons past the cap, so a truncated
+	// list says it was cut rather than reading as the whole story.
+	dropped int
+}
 
 func (s *skipReasons) add(err error) {
 	msg := err.Error()
-	if len(s.seen) >= 3 || slices.Contains(s.seen, msg) {
+	if slices.Contains(s.seen, msg) {
+		return
+	}
+	if len(s.seen) >= 3 {
+		s.dropped++
 		return
 	}
 	s.seen = append(s.seen, msg)
@@ -32,7 +41,13 @@ func (s *skipReasons) add(err error) {
 
 func (s *skipReasons) any() bool { return len(s.seen) > 0 }
 
-func (s *skipReasons) String() string { return strings.Join(s.seen, "; ") }
+func (s *skipReasons) String() string {
+	out := strings.Join(s.seen, "; ")
+	if s.dropped > 0 {
+		out += fmt.Sprintf("; and %d more", s.dropped)
+	}
+	return out
+}
 
 // finishTagScopeJob writes a tag-scope batch's terminal state. A run
 // that changed nothing and was refused for a reason fails rather than
@@ -170,6 +185,12 @@ func (s *Server) batchTagCategoryPost(w http.ResponseWriter, r *http.Request) {
 func (s *Server) runBatchTagCategory(ids []int64, catID int64, merge bool) {
 	mergedCount := 0
 	changed, skipped, reasons, cancelled := s.runTagScopeLoop(ids, "moving tags…", 50, func(id int64) (bool, error) {
+		// A tag already in the target moved nowhere; counting it as one
+		// leaves a summary that reports work the catalog does not show.
+		var current int64
+		if err := s.db().Read.QueryRow(`SELECT category_id FROM tags WHERE id = ?`, id).Scan(&current); err == nil && current == catID {
+			return false, nil
+		}
 		if !merge {
 			if err := s.tagSvc().ChangeTagCategory(id, catID); err != nil {
 				logx.Warnf("batch category tag %d: %v", id, err)

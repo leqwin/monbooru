@@ -1,0 +1,17 @@
+{{/* The pieces both PTR contribute panels carry identically: the sync
+     caveat, the failed-upload line, and the Contribute button with the
+     rule for when it is live. The card shell around them stays per
+     surface - one of the two hangs a [look up as...] off its head, and a
+     two-slot shell in Go templates costs more markup than it saves. */}}
+{{define "ptr_contrib_provisional"}}{{if .}}<p class="field-hint">the repository copy is still syncing, so this diff may overstate what is new.</p>{{end}}{{end}}
+
+{{/* dict: FailedUploads, Monloader */}}
+{{define "ptr_contrib_failed"}}{{if .FailedUploads}}<p class="ptr-contrib-failed">{{.FailedUploads}} contribution{{if gt .FailedUploads 1}}s{{end}} failed to upload - {{if .Monloader}}<a href="{{.Monloader}}/ptr" target="_blank" rel="noopener">contribution history</a>{{else}}see monloader's contribution history{{end}}.</p>{{end}}{{end}}
+
+{{/* dict: DialogURL, CanContribute, NewCount, PetitionCount, ContribHint */}}
+{{define "ptr_contrib_button"}}<button type="button" class="btn-ptr-contribute"
+        {{if and .CanContribute (or (gt .NewCount 0) (gt .PetitionCount 0))}}
+        hx-get="{{.DialogURL}}"
+        hx-target="#ptr-contrib-dialog-host" hx-swap="innerHTML"
+        hx-on::after-request="var d=document.getElementById('ptr-contrib-dialog'); if(d) d.showModal(); else htmx.trigger(document.body,'ptr-contrib-closed');"
+        {{else}}disabled{{if .ContribHint}} title="{{.ContribHint}}"{{end}}{{end}}>Contribute...</button>{{end}}

@@ -129,8 +129,9 @@ func (s *Server) recalcTagsPost(w http.ResponseWriter, r *http.Request) {
 	writeInlineFlash(w, "ok", fmt.Sprintf("Recalculated %d tag count(s).", updated))
 }
 
-// tagCategoryConflictsPost counts tags whose name occupies more than one
-// category and points the operator at the Tags page's Conflicts filter,
+// tagCategoryConflictsPost counts the tag rows whose name occupies more
+// than one category (the same number the Conflicts badge carries, so the
+// two surfaces agree) and points the operator at the Tags page's filter,
 // where the fix tools live (inline category select with merge-on-collision,
 // the batch bar). The split is legal - a tag's unique key is
 // (name, category_id) - but usually means two sources disagreed. Read-only.
@@ -146,7 +147,7 @@ func (s *Server) tagCategoryConflictsPost(w http.ResponseWriter, r *http.Request
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = fmt.Fprintf(w,
-		`<div class="flash flash-ok"><strong>%d</strong> tag name%s span multiple categories - <a href="/tags?conflicts=1">review them on the Tags page</a>.</div>`,
+		`<div class="flash flash-ok"><strong>%d</strong> tag%s share a name across categories - <a href="/tags?conflicts=1">review them on the Tags page</a>.</div>`,
 		n, plural(n))
 }
 
@@ -191,11 +192,20 @@ func (s *Server) duplicatesListHandler(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/relations#file-duplicates", http.StatusSeeOther)
 		return
 	}
+	// This is the one duplicates surface that renders filenames and ids
+	// rather than counts, so it owes the ceiling the same filter the
+	// sha256 walker and the delete-all branch apply - otherwise a SFW
+	// ceiling still prints the paths of what it hides, and [promote]
+	// acts on them.
+	from := ` FROM images i
+		JOIN image_paths ip ON ip.image_id = i.id AND ip.is_canonical = 0`
+	args := []any{}
+	if where, wargs := resolveCeiling(r, s.Active()).WhereOne("i.id"); where != "" {
+		from += ` WHERE ` + where
+		args = append(args, wargs...)
+	}
 	var total int
-	if err := s.db().Read.QueryRow(`
-		SELECT COUNT(*) FROM images i
-		JOIN image_paths ip ON ip.image_id = i.id AND ip.is_canonical = 0
-	`).Scan(&total); err != nil {
+	if err := s.db().Read.QueryRow(`SELECT COUNT(*)`+from, args...).Scan(&total); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -209,13 +219,9 @@ func (s *Server) duplicatesListHandler(w http.ResponseWriter, r *http.Request) {
 		var a aliasRow
 		err := rows.Scan(&a.ImageID, &a.CanonicalPath, &a.PathID, &a.AliasPath)
 		return a, err
-	}, `
-		SELECT i.id, i.canonical_path, ip.id as path_id, ip.path
-		FROM images i
-		JOIN image_paths ip ON ip.image_id = i.id AND ip.is_canonical = 0
+	}, `SELECT i.id, i.canonical_path, ip.id as path_id, ip.path`+from+`
 		ORDER BY i.id, ip.id
-		LIMIT ?
-	`, duplicatesFragmentCap)
+		LIMIT ?`, append(append([]any{}, args...), duplicatesFragmentCap)...)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -573,12 +579,7 @@ func (s *Server) freeMemoryPost(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.jobs.Complete("Memory caches released.")
 	before := readVmRSS()
-	s.ctxMu.RLock()
-	ctxs := make([]*galleryCtx, 0, len(s.contexts))
-	for _, cx := range s.contexts {
-		ctxs = append(ctxs, cx)
-	}
-	s.ctxMu.RUnlock()
+	ctxs := s.allContexts()
 	for _, cx := range ctxs {
 		if err := cx.DB.ShrinkMemory(context.Background()); err != nil {
 			logx.Warnf("free memory: shrink %q: %v", cx.Name, err)
@@ -764,33 +765,8 @@ func reExtractApply(ctx context.Context, database *db.DB, imageID int64, sourceT
 			return fmt.Errorf("update duration_seconds: %w", err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM sd_metadata WHERE image_id = ?`, imageID); err != nil {
-		return fmt.Errorf("delete sd_metadata: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM comfyui_metadata WHERE image_id = ?`, imageID); err != nil {
-		return fmt.Errorf("delete comfyui_metadata: %w", err)
-	}
-	if sdMeta != nil {
-		sdMeta.ImageID = imageID
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO sd_metadata (image_id, prompt, negative_prompt, model, seed, sampler, steps, cfg_scale, raw_params, generation_hash)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			sdMeta.ImageID, sdMeta.Prompt, sdMeta.NegativePrompt, sdMeta.Model,
-			sdMeta.Seed, sdMeta.Sampler, sdMeta.Steps, sdMeta.CFGScale, sdMeta.RawParams, sdMeta.GenerationHash,
-		); err != nil {
-			return fmt.Errorf("insert sd_metadata: %w", err)
-		}
-	}
-	if comfyMeta != nil {
-		comfyMeta.ImageID = imageID
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO comfyui_metadata (image_id, prompt, model_checkpoint, seed, sampler, steps, cfg_scale, raw_workflow, generation_hash)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			comfyMeta.ImageID, comfyMeta.Prompt, comfyMeta.ModelCheckpoint,
-			comfyMeta.Seed, comfyMeta.Sampler, comfyMeta.Steps, comfyMeta.CFGScale, comfyMeta.RawWorkflow, comfyMeta.GenerationHash,
-		); err != nil {
-			return fmt.Errorf("insert comfyui_metadata: %w", err)
-		}
+	if err := gallery.ReplaceGenerationMetadata(ctx, tx, imageID, sdMeta, comfyMeta); err != nil {
+		return err
 	}
 	return tx.Commit()
 }

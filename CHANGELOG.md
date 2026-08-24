@@ -1,5 +1,33 @@
 # Changelog
 
+## [v1.19.1] - 2026-08-24
+### Added
+- The PTR look-up for tags can pull in either direction, keeping the local spelling or the repository's.
+
+### Changed
+- The sidebar toggle above 768px is now a rail instead of a topbar button. ([#118](https://github.com/monbooru/monbooru/issues/118))
+- A gallery import in merge mode reports what it added and tagged, not a bare success.
+- The tag detail page opens faster in a large catalog.
+
+### Fixed
+- Deleting one copy of a file the gallery holds twice no longer hides the image.
+- A crash while saving settings can no longer leave a truncated config file.
+- The gallery JSON export carries perceptual hashes, stale flags, bookmarks and the lookup ledger.
+- A rename or move whose template renders nothing is refused, not filed under bare ids.
+- `{md5}` renders for an image whose digest was never computed.
+- A separator a rename/move template asked for between two tokens survives instead of collapsing.
+- The name preview uses the field's full width and clears when the template does.
+- A move preview pairs whole paths and shows the destination the job will use.
+- The file-duplicates listing honours the rating ceiling.
+- A batch category move counts a tag already in the target as skipped, not moved.
+- The footer's tag count updates when adding a tag creates a catalog row.
+- The Tags page Conflicts badge counts rows the way its listing does.
+- A PTR contribution goes up under the spelling the repository knows the tag by.
+- A tag carried under a pulled alias no longer offers both an upload and a petition.
+- The look-up's match-anywhere option works on a general tag instead of sitting disabled.
+
+Thanks to @CeareDelafont for the suggestion (https://github.com/monbooru/monbooru/issues/118).
+
 ## [v1.19.0] - 2026-08-20
 ### Added
 - Filename template for rename, move and upload destinations. ([#75](https://github.com/monbooru/monbooru/issues/75))

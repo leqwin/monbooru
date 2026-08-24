@@ -301,9 +301,7 @@ func RemoveSourceMembership(database *db.DB, imageID int64, site, postID string)
 			imageID, site, postID); err != nil {
 			return err
 		}
-		_, err := tx.Exec(`DELETE FROM image_annotations WHERE image_id = ? AND site = ? AND post_id = ? AND manual = 0`,
-			imageID, site, postID)
-		return err
+		return deletePulledAnnotationsTx(tx, imageID, site, postID)
 	})
 }
 
@@ -378,8 +376,7 @@ func SetPrimarySource(database *db.DB, imageID int64, site, url string) error {
 			if _, err := tx.Exec(`DELETE FROM image_sources WHERE rowid = ?`, rid); err != nil {
 				return err
 			}
-			if _, err := tx.Exec(`DELETE FROM image_annotations WHERE image_id = ? AND site = ? AND post_id = ? AND manual = 0`,
-				imageID, curSite, curPost); err != nil {
+			if err := deletePulledAnnotationsTx(tx, imageID, curSite, curPost); err != nil {
 				return err
 			}
 		default:

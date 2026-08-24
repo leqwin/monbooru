@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/monbooru/monbooru/internal/counts"
 	"github.com/monbooru/monbooru/internal/db"
 	"github.com/monbooru/monbooru/internal/tags"
 )
@@ -188,7 +189,7 @@ func similarityMatchIDs(ctx context.Context, database *db.DB, q Query) []int64 {
 // candidate on every render. Falls back to the scored ORDER BY when
 // the tallies are unavailable.
 func fanSimilarityIDs(ctx context.Context, database *db.DB, seed tags.OverlapSeed, order, where string, args []any) []int64 {
-	totals, err := database.CountedTagTotals(ctx, seed.MaxUsage)
+	totals, err := counts.CountedTagTotals(ctx, database, seed.MaxUsage)
 	if err != nil {
 		orderClause, orderArgs := similarityOrderClause(seed, order)
 		return fetchSortedMatchIDs(ctx, database, "", where, args, orderClause, orderArgs, adjacencyCacheMaxIDs)

@@ -1,3 +1,6 @@
+{{/* An archive says how many pages it holds, or just that it is one. Used
+     by every surface that renders a card: the grid and the related strip. */}}
+{{define "manga_pill"}}{{if eq .FileType "cbz"}}{{if .PageCount}}<span class="manga-pill">{{deref .PageCount}} pages</span>{{else}}<span class="manga-pill">manga</span>{{end}}{{end}}{{end}}
 {{define "partials/thumbnail_grid.html"}}
 {{if .InboxUploadActive}}
 <div id="inbox-upload" class="inbox-upload">
@@ -67,13 +70,7 @@
           <span class="badge badge-filesize">{{humanBytes .FileSize}}</span>
         {{end}}
       </div>
-      {{if eq .FileType "cbz"}}
-        {{if .PageCount}}
-        <span class="manga-pill">{{deref .PageCount}} pages</span>
-        {{else}}
-        <span class="manga-pill">manga</span>
-        {{end}}
-      {{end}}
+      {{template "manga_pill" .}}
       {{if .Series}}
         <span class="series-pill" title="Collection: {{.Series}}{{if .SeriesOrder}} #{{deref .SeriesOrder}}{{end}}">
           {{if .SeriesOrder}}<span class="series-pill-order">#{{deref .SeriesOrder}}</span>{{end}}

@@ -69,7 +69,7 @@ func (s *Server) pluginRows() []pluginRowView {
 		}
 		if p.Installed {
 			row.Command = commandLine(p)
-			row.RunState = s.managedState(p.Name)
+			row.RunState = s.pluginSupervisor.State(p.Name)
 			managed = append(managed, row)
 			continue
 		}
@@ -211,7 +211,7 @@ func (s *Server) pluginPairRemove(w http.ResponseWriter, r *http.Request) {
 			// with it.
 			if p.Enabled {
 				s.setPluginEnabled(name, false)
-				s.stopManaged(name)
+				s.pluginSupervisor.Stop(name)
 				s.markPluginDown(name)
 				s.pairs.dropPending(name)
 			}
@@ -259,7 +259,7 @@ func (s *Server) pluginStart(w http.ResponseWriter, r *http.Request) {
 	}
 	if p, ok := s.effective(r.PathValue("name")); ok && p.Installed {
 		s.setPluginEnabled(p.Name, true)
-		s.startManaged(p)
+		s.pluginSupervisor.Start(launchOf(p))
 		s.clearPluginProbe(p.Name)
 		logx.Infof("plugins: started %s from %s", p.Name, clientIP(r))
 	}
@@ -274,7 +274,7 @@ func (s *Server) pluginStop(w http.ResponseWriter, r *http.Request) {
 	if p, ok := s.effective(name); ok && p.Installed {
 		s.setPluginEnabled(name, false)
 	}
-	s.stopManaged(name)
+	s.pluginSupervisor.Stop(name)
 	s.markPluginDown(name)
 	logx.Infof("plugins: stopped %s from %s", name, clientIP(r))
 	s.renderPluginRows(w, r, false)

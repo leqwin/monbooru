@@ -21,10 +21,12 @@ import (
 
 	"github.com/monbooru/monbooru/internal/api"
 	"github.com/monbooru/monbooru/internal/config"
+	"github.com/monbooru/monbooru/internal/counts"
 	"github.com/monbooru/monbooru/internal/gallery"
 	"github.com/monbooru/monbooru/internal/jobs"
 	"github.com/monbooru/monbooru/internal/logx"
 	"github.com/monbooru/monbooru/internal/models"
+	"github.com/monbooru/monbooru/internal/plugins"
 	"github.com/monbooru/monbooru/internal/search"
 	"github.com/monbooru/monbooru/internal/tagger"
 	"github.com/monbooru/monbooru/internal/tags"
@@ -122,10 +124,11 @@ type Server struct {
 	themeWarnMu sync.Mutex
 	themeWarned string
 
-	// managedMu guards managed, the supervised child process of every
-	// [[plugin]] block carrying a command line.
-	managedMu sync.Mutex
-	managed   map[string]*managedPlugin
+	// pluginSupervisor owns the child process of every dropped plugin the
+	// operator enabled. The supervision state lives there rather than on
+	// Server so launch, restart backoff and stop-grace are exercisable
+	// without a whole HTTP server.
+	pluginSupervisor *plugins.Supervisor
 
 	// pluginProbeMu guards pluginProbes, one cached /health result per paired
 	// plugin. Button rendering gates on it, so a peer that went away stops
@@ -173,8 +176,8 @@ func NewServer(cfg *config.Config, configPath string, jobManager *jobs.Manager) 
 		activeName:   cfg.DefaultGallery,
 		fetchStatus:  map[string]fetchStatusEntry{},
 		pluginProbes: map[string]pluginProbe{},
-		managed:      map[string]*managedPlugin{},
 	}
+	s.pluginSupervisor = plugins.New(s.pluginCallbackURL, s.done)
 
 	applyRelationsConfig(cfg.Relations)
 
@@ -258,14 +261,9 @@ func (s *Server) runMemoryReclaim() {
 			if s.jobs.IsRunning() {
 				continue
 			}
-			s.ctxMu.RLock()
-			ctxs := make([]*galleryCtx, 0, len(s.contexts))
-			for _, cx := range s.contexts {
-				ctxs = append(ctxs, cx)
-			}
-			s.ctxMu.RUnlock()
+			ctxs := s.allContexts()
 			for _, cx := range ctxs {
-				dropped := cx.DB.ReleaseIdleCountedTags(idleIndexReleaseAfter)
+				dropped := counts.ReleaseIdleCountedTags(cx.DB, idleIndexReleaseAfter)
 				if cx.bkTree != nil && cx.bkTree.ReleaseIdle(idleIndexReleaseAfter) {
 					dropped = true
 				}
@@ -659,6 +657,20 @@ func (s *Server) Handler() http.Handler {
 	return h
 }
 
+// allContexts snapshots every open gallery under the context lock. The
+// copy is the point: the callers walk it doing DB work, and holding the
+// lock across that would block a gallery switch for the length of the
+// walk.
+func (s *Server) allContexts() []*galleryCtx {
+	s.ctxMu.RLock()
+	defer s.ctxMu.RUnlock()
+	out := make([]*galleryCtx, 0, len(s.contexts))
+	for _, cx := range s.contexts {
+		out = append(out, cx)
+	}
+	return out
+}
+
 // apiResolver looks up a gallery by name for the API package. Empty name
 // falls back to the active gallery.
 func (s *Server) apiResolver(name string) (api.Gallery, bool) {
@@ -672,11 +684,7 @@ func (s *Server) apiResolver(name string) (api.Gallery, bool) {
 		return api.Gallery{}, false
 	}
 	return api.Gallery{
-		Name:             cx.Name,
-		GalleryPath:      cx.GalleryPath,
-		ThumbnailsPath:   cx.ThumbnailsPath,
-		DB:               cx.DB,
-		TagSvc:           cx.TagSvc,
+		Handle:           cx.Handle,
 		RelationsSvc:     cx.RelationsSvc,
 		InvalidateCaches: cx.InvalidateCaches,
 		RecordFetch:      func(id int64, state, msg string) { s.recordFetchStatus(cx.Name, id, state, msg) },
@@ -1438,7 +1446,7 @@ func (s *Server) Close() {
 	default:
 		close(s.done)
 	}
-	s.stopAllManaged()
+	s.pluginSupervisor.StopAll()
 	tagger.ReleaseAll()
 	s.ctxMu.Lock()
 	defer s.ctxMu.Unlock()

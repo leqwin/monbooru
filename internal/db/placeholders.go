@@ -123,6 +123,28 @@ func QueryIDs(q Querier, query string, args ...any) ([]int64, error) {
 	return ScanIDs(rows)
 }
 
+// QueryIDsFunc runs query and hands each int64 to visit, stopping as soon
+// as visit reports false. For a listing whose answer sits early in an
+// ordered scan, this is the difference between fetching two rows and
+// materialising the whole result.
+func QueryIDsFunc(q Querier, visit func(int64) bool, query string, args ...any) error {
+	rows, err := q.Query(query, args...)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return err
+		}
+		if !visit(id) {
+			return nil
+		}
+	}
+	return rows.Err()
+}
+
 // QueryIDsContext is QueryIDs on a cancellable read.
 func QueryIDsContext(ctx context.Context, q CtxQuerier, query string, args ...any) ([]int64, error) {
 	rows, err := q.QueryContext(ctx, query, args...)

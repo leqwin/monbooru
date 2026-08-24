@@ -88,23 +88,8 @@ func ApplyReplacedFile(database *db.DB, thumbnailsPath string, imageID int64, st
 		); err != nil {
 			return fmt.Errorf("update canonical path: %w", err)
 		}
-		if _, err := tx.Exec(`DELETE FROM sd_metadata WHERE image_id = ?`, imageID); err != nil {
-			return fmt.Errorf("clear sd_metadata: %w", err)
-		}
-		if _, err := tx.Exec(`DELETE FROM comfyui_metadata WHERE image_id = ?`, imageID); err != nil {
-			return fmt.Errorf("clear comfyui_metadata: %w", err)
-		}
-		if sdMeta != nil {
-			sdMeta.ImageID = imageID
-			if err := insertSDMeta(tx, sdMeta); err != nil {
-				return fmt.Errorf("insert sd_metadata: %w", err)
-			}
-		}
-		if comfyMeta != nil {
-			comfyMeta.ImageID = imageID
-			if err := insertComfyMeta(tx, comfyMeta); err != nil {
-				return fmt.Errorf("insert comfyui_metadata: %w", err)
-			}
+		if err := ReplaceGenerationMetadata(context.Background(), tx, imageID, sdMeta, comfyMeta); err != nil {
+			return err
 		}
 		if oldW != nil && oldH != nil && newW != nil && newH != nil &&
 			*oldW > 0 && *oldH > 0 && (*oldW != *newW || *oldH != *newH) {
@@ -170,6 +155,17 @@ func moveIntoPlace(src, dst string) error {
 	if err := os.Rename(src, dst); err == nil {
 		return nil
 	}
+	if err := CopyFileContents(src, dst); err != nil {
+		return err
+	}
+	return os.Remove(src)
+}
+
+// CopyFileContents streams src to a new file at dst, unlinking a partial
+// dst on failure. A copy rather than a rename, for the callers whose two
+// paths can sit on different filesystems: the cross-device replace above
+// and the transfer between gallery roots.
+func CopyFileContents(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
@@ -184,8 +180,5 @@ func moveIntoPlace(src, dst string) error {
 		_ = os.Remove(dst)
 		return err
 	}
-	if err := out.Close(); err != nil {
-		return err
-	}
-	return os.Remove(src)
+	return out.Close()
 }

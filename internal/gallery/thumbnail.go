@@ -18,6 +18,7 @@ import (
 	_ "golang.org/x/image/webp"
 
 	"github.com/monbooru/monbooru/internal/db"
+	"github.com/monbooru/monbooru/internal/fsx"
 	"github.com/monbooru/monbooru/internal/logx"
 )
 
@@ -354,7 +355,7 @@ func scaleImage(src image.Image, maxDim int) image.Image {
 
 // writeJPEGAtomic encodes img as JPEG at path via a temp file + rename.
 func writeJPEGAtomic(img image.Image, path string, quality int) error {
-	return writeAtomic(path, ".thumb.*", func(f *os.File) error {
+	return fsx.WriteAtomic(path, ".thumb.*", func(f *os.File) error {
 		if err := jpeg.Encode(f, img, &jpeg.Options{Quality: quality}); err != nil {
 			return fmt.Errorf("encoding jpeg: %w", err)
 		}
@@ -372,29 +373,4 @@ func RegenerateDerived(database *db.DB, thumbnailsPath, path string, imageID int
 	} else if err := RecomputeAndStorePhash(context.Background(), database, imageID, thumbnailsPath); err != nil {
 		logx.Warnf("%s: phash for %q: %v", logCtx, path, err)
 	}
-}
-
-// writeAtomic runs write against a temp file beside path and renames it
-// into place, so a concurrent reader never sees a partial file. The temp
-// is removed on every failure path.
-func writeAtomic(path, pattern string, write func(*os.File) error) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), pattern)
-	if err != nil {
-		return fmt.Errorf("creating temp file: %w", err)
-	}
-	tmpName := tmp.Name()
-	if err := write(tmp); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		_ = os.Remove(tmpName)
-		return fmt.Errorf("renaming temp file: %w", err)
-	}
-	return nil
 }

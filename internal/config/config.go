@@ -16,6 +16,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/monbooru/monbooru/internal/fsx"
 	"github.com/monbooru/monbooru/internal/logx"
 	"github.com/monbooru/monbooru/internal/models"
 )
@@ -692,24 +693,20 @@ func Save(cfg *Config, path string) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("creating config directory: %w", err)
 	}
-	tmpFile, err := os.CreateTemp(dir, ".monbooru.toml.*")
-	if err != nil {
-		return fmt.Errorf("creating temp file: %w", err)
+	// The rename is atomic for the directory entry, not for the bytes
+	// behind it. Without the flush a crash in the window leaves a
+	// truncated monbooru.toml where the old one was, and Load refuses to
+	// parse it - taking the gallery registry, the password hash and every
+	// API token with it. A thumbnail regenerates; this does not.
+	if err := fsx.WriteAtomic(path, ".monbooru.toml.*", func(f *os.File) error {
+		if err := toml.NewEncoder(f).Encode(cfg); err != nil {
+			return fmt.Errorf("encoding config: %w", err)
+		}
+		return f.Sync()
+	}); err != nil {
+		return err
 	}
-	tmpName := tmpFile.Name()
-	if err := toml.NewEncoder(tmpFile).Encode(cfg); err != nil {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmpName)
-		return fmt.Errorf("encoding config: %w", err)
-	}
-	if err := tmpFile.Close(); err != nil {
-		_ = os.Remove(tmpName)
-		return fmt.Errorf("closing temp file: %w", err)
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		_ = os.Remove(tmpName)
-		return fmt.Errorf("renaming temp file: %w", err)
-	}
+	fsx.SyncDir(dir)
 	return nil
 }
 

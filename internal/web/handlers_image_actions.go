@@ -2,6 +2,7 @@ package web
 
 import (
 	"cmp"
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -896,10 +897,7 @@ func unlinkUnderGallery(galleryRoot, victim string) error {
 // auto-dismisses like any other. op returns the success flash, and
 // answered when it has already written the response body itself.
 func (s *Server) singleImageMoveJob(w http.ResponseWriter, r *http.Request, doneMsg string, op func(id int64) (flash string, answered bool, err error)) {
-	if !parseFormOK(w, r) {
-		return
-	}
-	id, ok := pathInt64(w, r, "id")
+	id, ok := idAndForm(w, r)
 	if !ok {
 		return
 	}
@@ -934,7 +932,7 @@ func (s *Server) moveImage(w http.ResponseWriter, r *http.Request) {
 		if parseErr != nil {
 			return "", false, parseErr
 		}
-		folder, err := s.singleName(tmpl, targetFolder, id)
+		folder, err := s.singleName(r.Context(), tmpl, targetFolder, id)
 		if err != nil {
 			return "", false, err
 		}
@@ -947,15 +945,15 @@ func (s *Server) moveImage(w http.ResponseWriter, r *http.Request) {
 
 // singleName resolves what one image is renamed or moved to: the literal
 // when the template carries no tokens, otherwise the row's own render.
-func (s *Server) singleName(tmpl *gallery.NameTemplate, literal string, id int64) (string, error) {
+func (s *Server) singleName(ctx context.Context, tmpl *gallery.NameTemplate, literal string, id int64) (string, error) {
 	if !tmpl.HasTokens() {
 		return literal, nil
 	}
-	facts, err := gallery.LoadNameFacts(s.db(), s.activeName, id)
+	facts, err := gallery.LoadNameFacts(ctx, s.db(), s.activeName, id, 0, tmpl)
 	if err != nil {
 		return "", err
 	}
-	return tmpl.Render(facts), nil
+	return tmpl.Render(facts)
 }
 
 // renameImage renames the one image at {id}'s file in place. The
@@ -970,7 +968,7 @@ func (s *Server) renameImage(w http.ResponseWriter, r *http.Request) {
 		if parseErr != nil {
 			return "", false, parseErr
 		}
-		name, err := s.singleName(tmpl, newName, id)
+		name, err := s.singleName(r.Context(), tmpl, newName, id)
 		if err != nil {
 			return "", false, err
 		}

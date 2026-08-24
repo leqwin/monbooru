@@ -221,7 +221,7 @@ func (s *Server) uploadPost(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		if _, err := naming.Apply(s.db(), s.galleryPath(), img.ID, "", ""); err != nil {
+		if _, err := naming.Apply(r.Context(), s.db(), s.galleryPath(), img.ID, "", ""); err != nil {
 			logx.Warnf("upload: name %d: %v", img.ID, err)
 		}
 
@@ -418,11 +418,8 @@ func (s *Server) autotagImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, ok := pathInt64(w, r, "id")
+	id, ok := idAndForm(w, r)
 	if !ok {
-		return
-	}
-	if !parseFormOK(w, r) {
 		return
 	}
 	taggerName := strings.TrimSpace(r.FormValue("tagger_name"))

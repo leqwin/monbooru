@@ -1,14 +1,14 @@
 module github.com/monbooru/monbooru
 
-go 1.25.12
+go 1.25.14
 
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/yalue/onnxruntime_go v1.19.0
-	golang.org/x/crypto v0.54.0
-	golang.org/x/image v0.44.0
-	modernc.org/sqlite v1.56.0
+	golang.org/x/crypto v0.55.0
+	golang.org/x/image v0.45.0
+	modernc.org/sqlite v1.57.0
 )
 
 require (

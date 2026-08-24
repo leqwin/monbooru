@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"strings"
 
+	"github.com/monbooru/monbooru/internal/counts"
 	"github.com/monbooru/monbooru/internal/db"
 	"github.com/monbooru/monbooru/internal/searchkw"
 	"github.com/monbooru/monbooru/internal/tags"
@@ -602,9 +603,8 @@ func parseBoolVal(v string) (bool, bool) {
 // fastCountTagged returns the exact fast-path count for tagged:true and
 // autotagged:true. Computes visible_total - untagged_visible: the
 // untagged subtrahend is a NOT-EXISTS walk over image_tags that hits
-// multi-second p95 on a million-row library, so it rides the DB-level
-// count cache that InvalidateCachedCounts drops on every membership
-// write. Falls back to (0, false) on any DB error so the slow path
+// multi-second p95 on a million-row library, so it rides the counts
+// cache that counts.Invalidate drops on every membership write. Falls back to (0, false) on any DB error so the slow path
 // takes over.
 func fastCountTagged(database *db.DB, e FilterExpr) (int, bool) {
 	val, ok := parseBoolVal(e.Val)
@@ -617,9 +617,9 @@ func fastCountTagged(database *db.DB, e FilterExpr) (int, bool) {
 	}
 	var untagged int
 	if e.Key == "autotagged" {
-		untagged, ok = database.AutoUntaggedVisibleCount()
+		untagged, ok = counts.AutoUntaggedVisibleCount(database)
 	} else {
-		untagged, ok = database.UntaggedVisibleCount()
+		untagged, ok = counts.UntaggedVisibleCount(database)
 	}
 	if !ok {
 		return 0, false
@@ -682,5 +682,5 @@ func fastCountGenerated(database *db.DB, e FilterExpr) (int, bool) {
 // similarity weights is computed once per invalidation rather than
 // once per caller.
 func fastVisibleCount(database *db.DB) (int, bool) {
-	return database.VisibleCount()
+	return counts.VisibleCount(database)
 }

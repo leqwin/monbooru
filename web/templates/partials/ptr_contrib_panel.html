@@ -6,8 +6,8 @@
   <div class="ptr-contrib-head">
     <span class="ptr-contrib-title">Public Tag Repository</span>
   </div>
-  {{if .Provisional}}<p class="field-hint">the repository copy is still syncing, so this diff may overstate what is new.</p>{{end}}
-  {{if .FailedUploads}}<p class="ptr-contrib-failed">{{.FailedUploads}} contribution{{if gt .FailedUploads 1}}s{{end}} failed to upload - {{if .Monloader}}<a href="{{.Monloader}}/ptr" target="_blank" rel="noopener">contribution history</a>{{else}}see monloader's contribution history{{end}}.</p>{{end}}
+  {{template "ptr_contrib_provisional" .Provisional}}
+  {{template "ptr_contrib_failed" (dict "FailedUploads" .FailedUploads "Monloader" .Monloader)}}
   <div class="ptr-contrib-row">
     <div class="ptr-contrib-lines">
       {{if and (gt .NewCount 0) (gt .PetitionCount 0)}}
@@ -31,12 +31,7 @@
               title="Add the tags it holds and record it as a source for the ones this image already carries"
               data-confirm-ok="Pull tags">Pull tags</button>
       {{end}}
-      <button type="button" class="btn-ptr-contribute"
-              {{if and .CanContribute (or (gt .NewCount 0) (gt .PetitionCount 0))}}
-              hx-get="/images/{{.ImageID}}/ptr-contrib-dialog"
-              hx-target="#ptr-contrib-dialog-host" hx-swap="innerHTML"
-              hx-on::after-request="var d=document.getElementById('ptr-contrib-dialog'); if(d) d.showModal(); else htmx.trigger(document.body,'ptr-contrib-closed');"
-              {{else}}disabled{{if .ContribHint}} title="{{.ContribHint}}"{{end}}{{end}}>Contribute...</button>
+      {{template "ptr_contrib_button" (dict "DialogURL" (printf "/images/%d/ptr-contrib-dialog" .ImageID) "CanContribute" .CanContribute "NewCount" .NewCount "PetitionCount" .PetitionCount "ContribHint" .ContribHint)}}
     </div>
   </div>
 </div>

@@ -92,11 +92,8 @@ func (s *Server) createCategoryPost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) updateCategoryPatch(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathInt64(w, r, "id")
+	id, ok := idAndForm(w, r)
 	if !ok {
-		return
-	}
-	if !parseFormOK(w, r) {
 		return
 	}
 	err := s.tagSvc().UpdateCategoryColor(id, r.FormValue("color"))
@@ -127,11 +124,8 @@ func (s *Server) updateCategoryPatch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteCategoryDelete(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathInt64(w, r, "id")
+	id, ok := idAndForm(w, r)
 	if !ok {
-		return
-	}
-	if !parseFormOK(w, r) {
 		return
 	}
 	action := r.FormValue("action") // "move" | "delete_all"
@@ -151,11 +145,8 @@ func (s *Server) deleteCategoryDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) renameCategoryPost(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathInt64(w, r, "id")
+	id, ok := idAndForm(w, r)
 	if !ok {
-		return
-	}
-	if !parseFormOK(w, r) {
 		return
 	}
 	newName := strings.TrimSpace(r.FormValue("name"))

@@ -542,10 +542,7 @@ func (s *Server) createAliasPost(w http.ResponseWriter, r *http.Request) {
 // token in `name` becomes an alias pointing at {id}. Failures flash in
 // place; success refreshes the page so the new rows render.
 func (s *Server) addTagAliasPost(w http.ResponseWriter, r *http.Request) {
-	if !parseFormOK(w, r) {
-		return
-	}
-	id, ok := pathInt64(w, r, "id")
+	id, ok := idAndForm(w, r)
 	if !ok {
 		return
 	}
@@ -675,11 +672,8 @@ func (s *Server) runDeleteTagsByIDs(ids []int64) {
 }
 
 func (s *Server) renameTagPost(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathInt64(w, r, "id")
+	id, ok := idAndForm(w, r)
 	if !ok {
-		return
-	}
-	if !parseFormOK(w, r) {
 		return
 	}
 	newName := strings.TrimSpace(r.FormValue("name"))

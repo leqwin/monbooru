@@ -203,6 +203,20 @@ var Descriptions = map[string]string{
 	"upgrade":    "source serves a different file",
 }
 
+// numericComparisons is the operator vocabulary every plain numeric range
+// filter shares. size:, ratio: and duration: word theirs after the unit
+// they carry, which is what makes these four a real duplicate rather than
+// a coincidence. Read-only: ExpansionDescriptions is only ever read (by
+// the system: cheat sheet), so the four keys sharing one map is safe.
+var numericComparisons = map[string]string{
+	">=": "at least",
+	"<=": "at most",
+	">":  "more than",
+	"<":  "less than",
+	"=":  "exactly",
+	"..": "range",
+}
+
 // ExpansionDescriptions maps level-2 rows to a short English label.
 // Boolean expansions (true / false) and rating values are intentionally
 // absent - they're self-explanatory in their bare form. Operators and
@@ -216,22 +230,8 @@ var ExpansionDescriptions = map[string]map[string]string{
 		"=":  "exactly",
 		"..": "range",
 	},
-	"width": {
-		">=": "at least",
-		"<=": "at most",
-		">":  "more than",
-		"<":  "less than",
-		"=":  "exactly",
-		"..": "range",
-	},
-	"height": {
-		">=": "at least",
-		"<=": "at most",
-		">":  "more than",
-		"<":  "less than",
-		"=":  "exactly",
-		"..": "range",
-	},
+	"width":  numericComparisons,
+	"height": numericComparisons,
 	"ai": {
 		"a1111":   "A1111 / Forge",
 		"comfyui": "ComfyUI",
@@ -239,14 +239,7 @@ var ExpansionDescriptions = map[string]map[string]string{
 		"any":     "any AI tool",
 		"sd":      "alias of a1111",
 	},
-	"pages": {
-		">=": "at least",
-		"<=": "at most",
-		">":  "more than",
-		"<":  "less than",
-		"=":  "exactly",
-		"..": "range",
-	},
+	"pages": numericComparisons,
 	"type": {
 		"image":    "regular images (jpeg / png / webp)",
 		"archive":  "cbz / zip archives",
@@ -268,14 +261,7 @@ var ExpansionDescriptions = map[string]map[string]string{
 		"=":  "exact ratio",
 		"..": "range",
 	},
-	"tagcount": {
-		">=": "at least",
-		"<=": "at most",
-		">":  "more than",
-		"<":  "less than",
-		"=":  "exactly",
-		"..": "range",
-	},
+	"tagcount": numericComparisons,
 	"duration": {
 		">=": "at least N seconds",
 		"<=": "at most N seconds",

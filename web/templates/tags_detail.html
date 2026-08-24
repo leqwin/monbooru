@@ -276,6 +276,7 @@
 
 <script>
 var TAG_ID = {{.Tag.ID}};
+var TAG_NAME = {{.Tag.Name}};
 
 (function() {
   var btn = document.getElementById('btn-detail-rename');
@@ -333,10 +334,7 @@ function confirmDetailAlias() {
     flashId: 'detail-alias-flash',
     failMsg: 'Alias failed.',
     catchMsg: 'Alias request failed.',
-    onOK: function() {
-      _pendingGalleryReload = true;
-      if (typeof refreshJobStatus === 'function') refreshJobStatus();
-    }
+    onOK: armGalleryReload
   });
 }
 
@@ -346,10 +344,7 @@ function postTagPTRPull(params) {
     flashId: 'tag-flash',
     failMsg: 'PTR lookup failed.',
     catchMsg: 'PTR lookup request failed.',
-    onOK: function() {
-      _pendingGalleryReload = true;
-      if (typeof refreshJobStatus === 'function') refreshJobStatus();
-    }
+    onOK: armGalleryReload
   });
 }
 
@@ -363,6 +358,18 @@ function pullTagPTRAs(spelling) {
   var d = document.getElementById('ptr-lookup-dialog');
   if (d) d.close();
   postTagPTRPull({as: spelling});
+}
+
+// The same pull the other way round: this tag merges into the repository's
+// spelling first, so the cluster lands on the name the repository uses. The
+// merge moves images and cannot be undone, which the preview does not show,
+// so this direction confirms where the plain pull does not.
+function pullTagPTRKeeping(spelling) {
+  var d = document.getElementById('ptr-lookup-dialog');
+  if (d) d.close();
+  showConfirm('Pull and keep ' + spelling + '?', function() {
+    postTagPTRPull({as: spelling, merge: '1'});
+  }, 'Every image tagged ' + TAG_NAME + ' moves to it and ' + TAG_NAME + ' stays as a zero-usage alias. This cannot be undone.', 'Pull and keep');
 }
 
 (function() {

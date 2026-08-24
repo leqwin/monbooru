@@ -5,7 +5,6 @@ import (
 
 	"github.com/monbooru/monbooru/internal/db"
 	"github.com/monbooru/monbooru/internal/gallery"
-	"github.com/monbooru/monbooru/internal/logx"
 )
 
 // PhashBackfillProgress is the per-image progress callback the
@@ -29,29 +28,11 @@ func BackfillPhashes(ctx context.Context, database *db.DB, thumbnailsPath string
 		return 0, 0, err
 	}
 
-	total := len(ids)
-	for _, id := range ids {
-		if ctx.Err() != nil {
-			return processed, updated, ctx.Err()
-		}
-		if progress != nil {
-			progress(processed, total, "")
-		}
-		if err := gallery.RecomputeAndStorePhash(ctx, database, id, thumbnailsPath); err != nil {
-			// Decode / thumbnail-missing failures are common during a
-			// backfill (rebuild-thumbs hasn't run, the row is for a video
-			// whose thumbnail never generated). Log at debug and move on;
-			// the row stays at NULL and the operator can retry after
-			// rebuilding thumbnails.
-			logx.Debugf("phash backfill image %d: %v", id, err)
-			processed++
-			continue
-		}
-		processed++
-		updated++
-	}
-	if progress != nil {
-		progress(processed, total, "")
-	}
-	return processed, updated, nil
+	// Decode / thumbnail-missing failures are common during a backfill
+	// (rebuild-thumbs hasn't run, the row is for a video whose thumbnail
+	// never generated). The walk logs and moves on; the row stays at NULL
+	// and the operator can retry after rebuilding thumbnails.
+	return gallery.BackfillWalk(ctx, ids, progress, "phash", "", func(id int64) error {
+		return gallery.RecomputeAndStorePhash(ctx, database, id, thumbnailsPath)
+	})
 }

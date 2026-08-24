@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -26,16 +27,17 @@ var namePreviewScopes = map[string]gallery.Scope{
 // namePreview answers what a template would name the given images, so the
 // operator reads the result before committing to it. Every dialog and
 // settings field renders through this one endpoint rather than a second
-// implementation in the browser.
+// implementation in the browser. Nothing to show answers an empty body
+// rather than a 204: htmx does not swap on No Content, which would leave
+// the last render standing under a field that no longer says it.
 func (s *Server) namePreview(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	if q.Get("scope") == "upload" {
-		s.uploadDestPreview(w, q.Get("folder"), q.Get("name"))
+		s.uploadDestPreview(r.Context(), w, q.Get("folder"), q.Get("name"))
 		return
 	}
 	scope, known := namePreviewScopes[q.Get("scope")]
 	if !known {
-		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	raw := strings.TrimSpace(q.Get("tmpl"))
@@ -53,22 +55,23 @@ func (s *Server) namePreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if tmpl == nil {
-		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
 	ids := s.namePreviewIDs(q["ids"])
 	if len(ids) == 0 {
-		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	total, _ := strconv.Atoi(q.Get("total"))
 	total = max(total, len(ids))
 
 	rows := make([]namePreviewRow, 0, len(ids))
+	var rowErr error
+	md5Cap := s.previewMD5Cap()
 	for i, id := range ids {
-		facts, factErr := gallery.LoadNameFacts(s.db(), s.activeName, id)
+		facts, factErr := gallery.LoadNameFacts(r.Context(), s.db(), s.activeName, id, md5Cap, tmpl)
 		if factErr != nil {
+			rowErr = factErr
 			continue
 		}
 		facts.N, facts.NWidth = i+1, max(len(strconv.Itoa(total)), 2)
@@ -77,27 +80,44 @@ func (s *Server) namePreview(w http.ResponseWriter, r *http.Request) {
 		// and only a render passes through the path tidying.
 		to := raw
 		if tmpl.HasTokens() {
-			to = tmpl.Render(facts)
+			rendered, renderErr := tmpl.Render(facts)
+			if renderErr != nil {
+				rowErr = renderErr
+				continue
+			}
+			to = rendered
 		}
+		from := facts.Base
 		if scope.Folder() {
 			// Containment is the move's other refusal, and the preview is
 			// where a destination gets checked: submitting an escaping one
 			// answers a status htmx discards, so the dialog would just sit
 			// there saying nothing.
-			if _, err := gallery.ResolveSubdir(s.galleryPath(), to); err != nil {
+			abs, err := gallery.ResolveSubdir(s.galleryPath(), to)
+			if err != nil {
 				s.renderNamePreviewError(w, "", err.Error())
 				return
 			}
-			to += "/"
+			// Show where the move lands, not what was typed: ResolveSubdir
+			// trims and cleans, so `a//b` files under `a/b` and `./x` under
+			// `x`. A preview the job then rewrites is the one thing the
+			// affordance must not do.
+			to = gallery.FolderPath(s.galleryPath(), filepath.Join(abs, facts.Base))
+			// A move keeps the name and changes the folder, so both sides
+			// carry the whole path; naming only the destination folder reads
+			// as renaming the file to a directory.
+			from, to = namePath(facts.Folder, facts.Base), namePath(to, facts.Base)
 		} else if onDisk := filepath.Ext(facts.Base); !strings.EqualFold(filepath.Ext(to), onDisk) {
 			// Mirror RenameImage: the extension already on disk is what gets
 			// appended, spelling included, when the render carries none.
 			to += onDisk
 		}
-		rows = append(rows, namePreviewRow{From: facts.Base, To: to})
+		rows = append(rows, namePreviewRow{From: from, To: to})
 	}
 	if len(rows) == 0 {
-		w.WriteHeader(http.StatusNoContent)
+		if rowErr != nil {
+			s.renderNamePreviewError(w, "", rowErr.Error())
+		}
 		return
 	}
 	caption := ""
@@ -108,6 +128,24 @@ func (s *Server) namePreview(w http.ResponseWriter, r *http.Request) {
 }
 
 type namePreviewRow struct{ From, To string }
+
+// previewMD5Cap bounds the lazy {md5} fill the preview endpoints can
+// trigger. They run off a keystroke on ids the caller names, so without
+// it typing {md5} into a dialog reads whole files inside the request.
+// Over the cap the token renders empty and the backfill job owns the
+// digest, matching the detail page's md5 cell.
+func (s *Server) previewMD5Cap() int64 {
+	return int64(s.maxFileSizeMB()) * 1024 * 1024
+}
+
+// namePath places base under dir. An empty dir is the gallery root, where
+// the path is the name on its own.
+func namePath(dir, base string) string {
+	if dir == "" {
+		return base
+	}
+	return dir + "/" + base
+}
 
 func (s *Server) renderNamePreview(w http.ResponseWriter, caption string, rows []namePreviewRow) {
 	s.renderTemplate(w, "partials/name_preview.html", map[string]any{
@@ -128,7 +166,7 @@ func (s *Server) renderNamePreviewError(w http.ResponseWriter, field, msg string
 // uploadDestPreview answers the one path a file arriving now would land
 // at, so the two destination settings read as the single destination they
 // are. A refusal names the field it came from.
-func (s *Server) uploadDestPreview(w http.ResponseWriter, folder, name string) {
+func (s *Server) uploadDestPreview(ctx context.Context, w http.ResponseWriter, folder, name string) {
 	folderTmpl, err := gallery.ParseNameTemplate(folder, gallery.ScopeUploadFolder)
 	if err != nil {
 		s.renderNamePreviewError(w, "folder", err.Error())
@@ -141,27 +179,32 @@ func (s *Server) uploadDestPreview(w http.ResponseWriter, folder, name string) {
 	}
 	ids := s.namePreviewIDs(nil)
 	if (folderTmpl == nil && nameTmpl == nil) || len(ids) == 0 {
-		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	facts, err := gallery.LoadNameFacts(s.db(), s.activeName, ids[0])
+	facts, err := gallery.LoadNameFacts(ctx, s.db(), s.activeName, ids[0], s.previewMD5Cap(), folderTmpl, nameTmpl)
 	if err != nil {
-		w.WriteHeader(http.StatusNoContent)
+		s.renderNamePreviewError(w, "", err.Error())
 		return
 	}
 
 	base := facts.Base
 	if nameTmpl != nil {
-		base = nameTmpl.Render(facts)
+		if base, err = nameTmpl.Render(facts); err != nil {
+			s.renderNamePreviewError(w, "name", err.Error())
+			return
+		}
 		if onDisk := filepath.Ext(facts.Base); !strings.EqualFold(filepath.Ext(base), onDisk) {
 			base += onDisk
 		}
 	}
 	to := base
 	if folderTmpl != nil {
-		if dir := folderTmpl.Render(facts); dir != "" {
-			to = dir + "/" + base
+		dir, dirErr := folderTmpl.Render(facts)
+		if dirErr != nil {
+			s.renderNamePreviewError(w, "folder", dirErr.Error())
+			return
 		}
+		to = namePath(dir, base)
 	}
 	s.renderNamePreview(w, "a file arriving now", []namePreviewRow{{From: facts.Base, To: to}})
 }

@@ -33,11 +33,8 @@ func (s *Server) ptrLookupSearchPost(w http.ResponseWriter, r *http.Request) {
 // names another spelling to ask the PTR under - the one the look-up dialog
 // previewed - instead of the tag's own name.
 func (s *Server) ptrLookupTagPost(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathInt64(w, r, "id")
+	id, ok := idAndForm(w, r)
 	if !ok {
-		return
-	}
-	if !parseFormOK(w, r) {
 		return
 	}
 	as := strings.TrimSpace(r.FormValue("as"))
@@ -49,11 +46,43 @@ func (s *Server) ptrLookupTagPost(w http.ResponseWriter, r *http.Request) {
 		}
 		as = form
 	}
+	// merge takes the other direction: the looked-up spelling becomes the
+	// canonical here and this tag an alias of it, so there is no `as` left to
+	// ask under once the sweep runs.
+	merge := r.FormValue("merge") != ""
+	if merge && as == "" {
+		http.Error(w, "not a tag name", http.StatusBadRequest)
+		return
+	}
 	if !s.startJob(w, models.JobTypeTag) {
 		return
 	}
-	go s.runPTRTagSweep([]int64{id}, as)
+	if merge {
+		go s.runPTRMergeSweep(id, as)
+	} else {
+		go s.runPTRTagSweep([]int64{id}, as)
+	}
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// runPTRMergeSweep moves the tag onto the looked-up spelling and then sweeps
+// what survives: the repository's name ends up the canonical here and the
+// operator's an alias of it, so the cluster lands on the name the repository
+// uses and the image pages contribute under it. Both halves share the one job
+// slot the sweep already holds.
+func (s *Server) runPTRMergeSweep(id int64, spelling string) {
+	target, msg := s.resolveCanonicalTagInput(spelling, true)
+	if msg != "" {
+		s.jobs.Fail(msg)
+		return
+	}
+	s.jobs.Update(0, 1, "aliasing tag…")
+	if err := s.tagSvc().MergeTags(id, target); err != nil {
+		s.jobs.Fail(err.Error())
+		return
+	}
+	s.Active().InvalidateCaches()
+	s.runPTRTagSweep([]int64{target}, "")
 }
 
 // ptrSpellingForm validates an operator-typed spelling and returns it in

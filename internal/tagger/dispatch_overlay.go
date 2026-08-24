@@ -2,11 +2,12 @@ package tagger
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"sync"
+
+	"github.com/monbooru/monbooru/internal/fsx"
 )
 
 // EmbeddedDispatchRules returns the shipped default rules for one
@@ -108,23 +109,8 @@ func SaveDispatchOverlay(modelPath, taggerName string, rules []DispatchEntry) er
 		return err
 	}
 	data = append(data, '\n')
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".dispatch.json.*")
-	if err != nil {
-		return fmt.Errorf("creating temp file: %w", err)
-	}
-	tmpName := tmp.Name()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
+	return fsx.WriteAtomic(path, ".dispatch.json.*", func(f *os.File) error {
+		_, err := f.Write(data)
 		return err
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-	return nil
+	})
 }

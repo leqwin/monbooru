@@ -112,7 +112,7 @@ func (s *Server) tagDetailHandler(w http.ResponseWriter, r *http.Request) {
 			recentQ += ` AND ` + where
 			recentArgs = append(recentArgs, wargs...)
 		}
-		data.RecentImageIDs, err = db.QueryIDs(s.db().Read, recentQ+` ORDER BY it.image_id DESC LIMIT 8`, recentArgs...)
+		data.RecentImageIDs, err = db.QueryIDs(s.db().Read, recentQ+` ORDER BY it.image_id DESC LIMIT 7`, recentArgs...)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

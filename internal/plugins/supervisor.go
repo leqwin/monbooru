@@ -1,10 +1,18 @@
-package web
+// Package plugins supervises the child processes monbooru launches for
+// operator-installed plugins. Monbooru is a launcher here, not a package
+// manager: it starts, restarts and stops a binary the operator put on disk
+// and named in a folder manifest, and never downloads or installs
+// anything.
+//
+// It holds no HTTP concern - the routes, the button rendering and the
+// config reads stay in the web layer, which hands this the launch line and
+// the address a child calls back on.
+package plugins
 
 import (
 	"bufio"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"os/exec"
 	"strconv"
@@ -13,6 +21,35 @@ import (
 
 	"github.com/monbooru/monbooru/internal/logx"
 )
+
+// Launch is everything the supervisor needs to run one plugin: its name
+// and the command line its manifest declared.
+type Launch struct {
+	Name    string
+	Command string
+	Args    []string
+	Dir     string
+}
+
+// Supervisor owns the running children. CallbackURL answers the address a
+// child is told to reach monbooru on, and Done closes at shutdown so a
+// supervisor parked on its restart backoff lets go.
+type Supervisor struct {
+	CallbackURL func() string
+	Done        <-chan struct{}
+
+	mu      sync.Mutex
+	managed map[string]*managedPlugin
+}
+
+// New returns a supervisor with nothing running yet.
+func New(callbackURL func() string, done <-chan struct{}) *Supervisor {
+	return &Supervisor{
+		CallbackURL: callbackURL,
+		Done:        done,
+		managed:     map[string]*managedPlugin{},
+	}
+}
 
 const (
 	// managedStopGrace is how long a managed plugin gets to exit after its
@@ -23,18 +60,20 @@ const (
 	// clearing the restart counter so an occasional crash doesn't ratchet
 	// the backoff up forever.
 	managedHealthyAfter = 30 * time.Second
-	managedBackoffMin   = time.Second
-	managedBackoffMax   = time.Minute
-	// managedLogLineMax caps one drained output line. A traceback carrying a
+	// BackoffMin is the first restart delay after a crash; it doubles up
+	// to managedBackoffMax. Exported so a caller waiting on a restart
+	// knows how long that is.
+	BackoffMin        = time.Second
+	managedBackoffMax = time.Minute
+	// LogLineMax caps one drained output line. A traceback carrying a
 	// large repr or a JSON dump goes past the scanner's own 64 KiB default,
-	// which ends the drain while the child is still writing.
-	managedLogLineMax = 1 << 20
+	// which ends the drain while the child is still writing. Exported
+	// because it is a behavioural boundary, not a tuning knob: past it the
+	// rest of the line is discarded rather than logged.
+	LogLineMax = 1 << 20
 )
 
-// managedPlugin supervises one operator-launched plugin process. Monbooru is
-// a launcher here, not a package manager: it starts, restarts and stops a
-// binary the operator put on disk and named in a config-file-only `command`,
-// and never downloads or installs anything.
+// managedPlugin supervises one operator-launched plugin process.
 type managedPlugin struct {
 	name    string
 	command string
@@ -52,34 +91,17 @@ type managedPlugin struct {
 	stop        chan struct{}
 }
 
-// startManagedPlugins launches every dropped plugin the operator enabled.
-func (s *Server) startManagedPlugins() {
-	for _, p := range s.effectivePlugins() {
-		if !p.Installed {
-			continue
-		}
-		if !p.Enabled {
-			// Nothing is listening on the other end, and a cold probe cache
-			// reads optimistic - without this the buttons of a plugin the
-			// operator disabled come back on every restart.
-			s.markPluginDown(p.Name)
-			continue
-		}
-		s.startManaged(p)
-	}
-}
-
-// startManaged begins (or resumes) supervision of one plugin.
-func (s *Server) startManaged(p effectivePlugin) {
-	s.managedMu.Lock()
+// Start begins (or resumes) supervision of one plugin.
+func (s *Supervisor) Start(p Launch) {
+	s.mu.Lock()
 	m, ok := s.managed[p.Name]
 	if !ok {
 		m = &managedPlugin{name: p.Name}
 		s.managed[p.Name] = m
 	}
-	s.managedMu.Unlock()
+	s.mu.Unlock()
 
-	env := []string{"MONBOORU_URL=" + s.pluginCallbackURL()}
+	env := []string{"MONBOORU_URL=" + s.CallbackURL()}
 
 	m.mu.Lock()
 	m.command, m.args = p.Command, p.Args
@@ -97,36 +119,15 @@ func (s *Server) startManaged(p effectivePlugin) {
 	}
 	m.supervising = true
 	m.mu.Unlock()
-	go s.superviseManaged(m)
+	go s.supervise(m)
 }
 
-// pluginCallbackURL is the address a managed plugin calls monbooru on. It is
-// the listener, not server.base_url: base_url is the browser-facing address,
-// which behind a reverse proxy or an ingress answers as something else (or not
-// at all) from inside the container the child runs in. The listener always
-// resolves, because the child shares its host.
-func (s *Server) pluginCallbackURL() string {
-	s.cfgMu.RLock()
-	addr, base := s.cfg.Server.BindAddress, s.cfg.Server.BaseURL
-	s.cfgMu.RUnlock()
-
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return base
-	}
-	switch host {
-	case "", "0.0.0.0", "::", "[::]":
-		host = "127.0.0.1"
-	}
-	return "http://" + net.JoinHostPort(host, port)
-}
-
-// stopManaged asks a plugin to exit and ends its supervision, so a stopped
+// Stop asks a plugin to exit and ends its supervision, so a stopped
 // plugin stays stopped instead of being restarted by the crash handler.
-func (s *Server) stopManaged(name string) {
-	s.managedMu.Lock()
+func (s *Supervisor) Stop(name string) {
+	s.mu.Lock()
 	m := s.managed[name]
-	s.managedMu.Unlock()
+	s.mu.Unlock()
 	if m == nil {
 		return
 	}
@@ -139,22 +140,22 @@ func (s *Server) stopManaged(name string) {
 	m.terminate()
 }
 
-// stopAllManaged tears down every managed plugin, for server shutdown.
-func (s *Server) stopAllManaged() {
-	s.managedMu.Lock()
+// StopAll tears down every managed plugin, for server shutdown.
+func (s *Supervisor) StopAll() {
+	s.mu.Lock()
 	names := make([]string, 0, len(s.managed))
 	for name := range s.managed {
 		names = append(names, name)
 	}
-	s.managedMu.Unlock()
+	s.mu.Unlock()
 	for _, name := range names {
-		s.stopManaged(name)
+		s.Stop(name)
 	}
 }
 
-// superviseManaged runs one plugin until the operator stops it or the server
+// supervise runs one plugin until the operator stops it or the server
 // shuts down, restarting it with capped backoff after a crash.
-func (s *Server) superviseManaged(m *managedPlugin) {
+func (s *Supervisor) supervise(m *managedPlugin) {
 	defer func() {
 		m.mu.Lock()
 		m.supervising = false
@@ -187,7 +188,7 @@ func (s *Server) superviseManaged(m *managedPlugin) {
 		}
 		m.restarts++
 		stop := m.stop
-		delay := min(managedBackoffMin<<min(m.restarts-1, 6), managedBackoffMax)
+		delay := min(BackoffMin<<min(m.restarts-1, 6), managedBackoffMax)
 		m.mu.Unlock()
 		logx.Warnf("plugin %s: exited, restarting in %s", m.name, delay)
 		select {
@@ -203,7 +204,7 @@ func (s *Server) superviseManaged(m *managedPlugin) {
 			if stopped {
 				return
 			}
-		case <-s.done:
+		case <-s.Done:
 			return
 		}
 	}
@@ -237,7 +238,7 @@ func (m *managedPlugin) run() error {
 
 	// Drain before Wait: it closes the pipe out from under a live read.
 	scanner := bufio.NewScanner(out)
-	scanner.Buffer(nil, managedLogLineMax)
+	scanner.Buffer(nil, LogLineMax)
 	var last string
 	for scanner.Scan() {
 		last = scanner.Text()
@@ -291,11 +292,11 @@ func (m *managedPlugin) terminate() {
 	}
 }
 
-// managedState reports how a managed plugin's settings row should read.
-func (s *Server) managedState(name string) string {
-	s.managedMu.Lock()
+// State reports how a managed plugin's settings row should read.
+func (s *Supervisor) State(name string) string {
+	s.mu.Lock()
 	m := s.managed[name]
-	s.managedMu.Unlock()
+	s.mu.Unlock()
 	if m == nil {
 		return "stopped"
 	}

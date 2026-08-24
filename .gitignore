@@ -20,6 +20,8 @@ thumbnails/
 cover.out
 coverage.html
 coverage.out
+coverage-tagger.html
+coverage-tagger.out
 
 # IDE / editor
 .vscode/

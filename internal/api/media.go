@@ -55,12 +55,8 @@ func containedCanonical(w http.ResponseWriter, g Gallery, id int64) (canonPath, 
 // thumbnail file is absent (e.g. a video ingested before ffmpeg was
 // available, awaiting a rebuild-thumbnails pass).
 func (h *Handler) serveThumbnail(w http.ResponseWriter, r *http.Request) {
-	g, id, ok := h.galleryAndID(w, r)
+	g, id, ok := h.galleryAndExistingID(w, r)
 	if !ok {
-		return
-	}
-	if !imageExists(g, id) {
-		apiError(w, http.StatusNotFound, "not_found", "image not found")
 		return
 	}
 	thumbPath := filepath.Join(g.ThumbnailsPath, strconv.FormatInt(id, 10)+".jpg")

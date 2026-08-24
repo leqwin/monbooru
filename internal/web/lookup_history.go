@@ -274,7 +274,7 @@ func (s *Server) lookupJobOutcome(ctx context.Context, jobID int64) (string, boo
 	if jobID == 0 {
 		return "", true // nothing to ask about; an older monloader reported no id
 	}
-	resp, err := s.monloaderDo(ctx, http.MethodGet, "/api/v1/queue/"+strconv.FormatInt(jobID, 10), nil)
+	resp, err := s.monloader().Do(ctx, http.MethodGet, "/api/v1/queue/"+strconv.FormatInt(jobID, 10), nil)
 	if err != nil {
 		return "", false
 	}
@@ -323,12 +323,7 @@ func (s *Server) reconcileAllLookups() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	s.ctxMu.RLock()
-	ctxs := make([]*galleryCtx, 0, len(s.contexts))
-	for _, cx := range s.contexts {
-		ctxs = append(ctxs, cx)
-	}
-	s.ctxMu.RUnlock()
+	ctxs := s.allContexts()
 	for _, cx := range ctxs {
 		s.reconcileLookups(ctx, cx)
 	}

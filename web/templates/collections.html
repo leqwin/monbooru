@@ -139,10 +139,7 @@ document.getElementById('collection-rename-form').addEventListener('submit', fun
     flashId: 'collection-rename-error',
     failMsg: 'Rename failed.',
     catchMsg: 'Rename request failed.',
-    onOK: function() {
-      _pendingGalleryReload = true;
-      if (typeof refreshJobStatus === 'function') refreshJobStatus();
-    }
+    onOK: armGalleryReload
   });
 });
 
@@ -342,10 +339,7 @@ function confirmDissolveCollection(btn) {
       flashId: 'collection-flash',
       failMsg: 'Dissolve failed.',
       catchMsg: 'Dissolve request failed.',
-      onOK: function() {
-        _pendingGalleryReload = true;
-        if (typeof refreshJobStatus === 'function') refreshJobStatus();
-      }
+      onOK: armGalleryReload
     });
   }, 'The images and the files on disk are not deleted.', 'Dissolve');
 }
@@ -358,10 +352,7 @@ function confirmGenerateCBZ(btn) {
       flashId: 'collection-flash',
       failMsg: 'Generation failed.',
       catchMsg: 'Generation request failed.',
-      onOK: function() {
-        _pendingGalleryReload = true;
-        if (typeof refreshJobStatus === 'function') refreshJobStatus();
-      }
+      onOK: armGalleryReload
     });
   }, 'The collection itself is not modified; its images become the pages of a new manga item.', 'Generate cbz');
 }

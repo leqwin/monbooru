@@ -411,7 +411,10 @@ func (w *Watcher) ingestFile(path string) {
 // row.
 func (w *Watcher) renameIngested(id int64, path string) string {
 	w.claimSelfMove(path)
-	newPath, err := w.Naming.Apply(w.db, w.galleryPath, id, "", "")
+	// Background rather than the run context: the ingest that just read
+	// this file end to end is not cancellable either, so cutting the
+	// rename short at shutdown would only strand the file half-filed.
+	newPath, err := w.Naming.Apply(context.Background(), w.db, w.galleryPath, id, "", "")
 	if err != nil {
 		logx.Warnf("watcher: name %q: %v", path, err)
 		return path
@@ -421,6 +424,36 @@ func (w *Watcher) renameIngested(id int64, path string) string {
 	}
 	w.claimSelfMove(newPath)
 	return newPath
+}
+
+// promoteSurvivingCopy repoints id at one of its sha-identical copies when
+// the canonical file has gone but a copy is still on disk, reporting
+// whether it found one. Sync answers the same state the same way
+// (promoteAliasToCanonical); without this the image is hidden until a sync
+// runs, and Prune missing images would delete the row and its tags while
+// the bytes sit in the tree.
+func (w *Watcher) promoteSurvivingCopy(id int64, gonePath string) bool {
+	paths, err := db.QueryStrings(w.db.Read,
+		`SELECT path FROM image_paths WHERE image_id = ? AND is_canonical = 0`, id)
+	if err != nil {
+		logx.Warnf("watcher promote copy %d: list paths: %v", id, err)
+		return false
+	}
+	for _, p := range paths {
+		if _, statErr := os.Stat(p); statErr != nil {
+			continue
+		}
+		if err := repointCanonical(w.db.Write, id, p, FolderPath(w.galleryPath, p), gonePath); err != nil {
+			logx.Warnf("watcher promote copy %d: %v", id, err)
+			return false
+		}
+		logx.Infof("watcher: %q went, kept id=%d at %q", gonePath, id, p)
+		if w.OnChange != nil {
+			w.OnChange()
+		}
+		return true
+	}
+	return false
 }
 
 // markFileMissing flips is_missing=1 and rebalances the usage_count of
@@ -458,6 +491,10 @@ func (w *Watcher) markFileMissing(path string) {
 		if err2 != nil {
 			return
 		}
+	}
+
+	if w.promoteSurvivingCopy(imgID, path) {
+		return
 	}
 
 	tx, err := w.db.Write.Begin()

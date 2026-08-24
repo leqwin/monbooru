@@ -382,17 +382,23 @@ func (s *Service) ListTags(filter TagFilter) ([]models.Tag, int, error) {
 	return tagList, total, nil
 }
 
-// ConflictsCount reports how many tag names occupy more than one
-// category, for the /tags Conflicts filter badge and the Maintenance
-// diagnostic.
+// ConflictsCount reports how many tag rows carry a name that occupies
+// more than one category, for the /tags Conflicts filter badge and the
+// Maintenance diagnostic. Rows rather than names: the badge is the entry
+// point to the listing its own link opens, and that listing renders one
+// row per (name, category) - four colliding names across two categories
+// each is a badge of 8 and a header of 8.
 //
 // UNIQUE(name, category_id) makes COUNT(*) per name equal to the count
-// of distinct categories, and the row form is what keeps the scan inside
-// idx_tags_active_name: reading category_id would send every row back to
-// the table, which is an order of magnitude slower on a large catalog.
+// of distinct categories, and the name-only form is what keeps both the
+// grouping scan and the membership test inside idx_tags_active_name:
+// reading category_id would send every row back to the table, which is an
+// order of magnitude slower on a large catalog.
 func (s *Service) ConflictsCount() (int, error) {
 	var n int
-	err := s.db.Read.QueryRow(`SELECT COUNT(*) FROM (
+	// Rows, not names: the badge is the entry point to the listing its own
+	// link opens, and that listing renders one row per (name, category).
+	err := s.db.Read.QueryRow(`SELECT COUNT(*) FROM tags WHERE is_alias = 0 AND name IN (
 		SELECT name FROM tags WHERE is_alias = 0
 		GROUP BY name HAVING COUNT(*) >= 2)`).Scan(&n)
 	return n, err
@@ -499,22 +505,33 @@ func (s *Service) ListTagIDs(filter TagFilter) ([]int64, error) {
 // neighbour there (or id absent from the filtered set).
 func (s *Service) AdjacentTags(filter TagFilter, id int64) (prev, next *int64, err error) {
 	where, args := tagFilterWhere(filter)
-	ids, err := db.QueryIDs(s.db.Read,
-		`SELECT t.id FROM tags t WHERE `+where+` ORDER BY `+tagOrderBy(filter), args...)
+	// The listing has no key to seek on, so the scan is ordered and
+	// unbounded; walking it and stopping at the row after the match is
+	// what keeps a tag near the front of a 100k-tag catalog from paying
+	// for the whole of it.
+	var last int64
+	var seen, found bool
+	err = db.QueryIDsFunc(s.db.Read, func(cur int64) bool {
+		switch {
+		case found:
+			n := cur
+			next = &n
+			return false
+		case cur == id:
+			found = true
+			if seen {
+				p := last
+				prev = &p
+			}
+		}
+		last, seen = cur, true
+		return true
+	}, `SELECT t.id FROM tags t WHERE `+where+` ORDER BY `+tagOrderBy(filter), args...)
 	if err != nil {
 		return nil, nil, err
 	}
-	for i, cur := range ids {
-		if cur != id {
-			continue
-		}
-		if i > 0 {
-			prev = &ids[i-1]
-		}
-		if i+1 < len(ids) {
-			next = &ids[i+1]
-		}
-		break
+	if !found {
+		return nil, nil, nil
 	}
 	return prev, next, nil
 }
@@ -729,6 +746,8 @@ func (s *Service) UsageBreakdown(tagID int64) ([]AppliedByCount, []UsageMonth, e
 	if err := rows.Err(); err != nil {
 		return nil, nil, err
 	}
+	// Tie-break by label asc so two equivalent runs produce the same
+	// ordering, and the panel does not reshuffle between renders.
 	sort.Slice(applied, func(i, j int) bool {
 		if applied[i].Count != applied[j].Count {
 			return applied[i].Count > applied[j].Count

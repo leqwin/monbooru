@@ -733,16 +733,7 @@ func (s *Service) RemoveDerivativeEdge(a, b int64) error {
 // (...)`. Idempotent on an image with no edges. Depth-capped at
 // MaxVersionChainDepth on each side so a malformed cycle can't loop.
 func (s *Service) DissolveVersionChain(anyMember int64) error {
-	return s.inWriteTx(func(tx *sql.Tx) error {
-		members, err := collectVersionChainMembersTx(tx, anyMember)
-		if err != nil {
-			return err
-		}
-		if len(members) == 0 {
-			return nil
-		}
-		return deleteEdgesByEndpointsTx(tx, "version_edges", "parent_image_id", "child_image_id", members)
-	})
+	return s.dissolveEdges(anyMember, collectVersionChainMembersTx, "version_edges", "parent_image_id", "child_image_id")
 }
 
 // DissolveDerivativeTree drops every derivative_edge in the tree that
@@ -751,15 +742,26 @@ func (s *Service) DissolveVersionChain(anyMember int64) error {
 // DELETEs in one statement using `source_image_id IN (...) OR
 // derivative_image_id IN (...)`. Idempotent on an image with no edges.
 func (s *Service) DissolveDerivativeTree(anyMember int64) error {
+	return s.dissolveEdges(anyMember, collectDerivativeTreeMembersTx, "derivative_edges", "source_image_id", "derivative_image_id")
+}
+
+// dissolveEdges is the body the two Dissolve methods share: collect the
+// group anyMember belongs to, then drop every edge with a member on
+// either end. Nothing to do when anyMember sits on no edge.
+func (s *Service) dissolveEdges(
+	anyMember int64,
+	collect func(*sql.Tx, int64) ([]int64, error),
+	table, parentCol, childCol string,
+) error {
 	return s.inWriteTx(func(tx *sql.Tx) error {
-		members, err := collectDerivativeTreeMembersTx(tx, anyMember)
+		members, err := collect(tx, anyMember)
 		if err != nil {
 			return err
 		}
 		if len(members) == 0 {
 			return nil
 		}
-		return deleteEdgesByEndpointsTx(tx, "derivative_edges", "source_image_id", "derivative_image_id", members)
+		return deleteEdgesByEndpointsTx(tx, table, parentCol, childCol, members)
 	})
 }
 

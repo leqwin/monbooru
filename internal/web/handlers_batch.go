@@ -181,7 +181,7 @@ func (s *Server) runBulkDelete(targets []search.DeleteTarget) {
 	onDelete := s.onImagesDeleteCallback()
 	// image_paths cascades with the rows, so the chunk's other copies on
 	// disk are read inside the same transaction that removes them.
-	var chunkAliases map[int64][]string
+	var chunkAliases map[int64][]gallery.AliasCopy
 	affectedTags, processed, cancelled, err := s.tagSvc().ChunkedDeleteWithTagRecalc(
 		ctx, ids, "", nil,
 		func(tx *sql.Tx, chunk []int64, placeholders string, args []any) error {
@@ -326,12 +326,12 @@ func (s *Server) batchName(tmpl *gallery.NameTemplate, literal string, i, total 
 	if !tmpl.HasTokens() {
 		return literal, nil
 	}
-	facts, err := gallery.LoadNameFacts(s.db(), s.activeName, id)
+	facts, err := gallery.LoadNameFacts(s.jobs.Context(), s.db(), s.activeName, id, 0, tmpl)
 	if err != nil {
 		return "", err
 	}
 	facts.N, facts.NWidth = i+1, max(len(strconv.Itoa(total)), 2)
-	return tmpl.Render(facts), nil
+	return tmpl.Render(facts)
 }
 
 // batchRename kicks off a background `move` job that renames the selected
@@ -472,6 +472,7 @@ func (s *Server) runBatchTag(ids []int64, op string, catTags []catTag) {
 	total := len(ids)
 	applied := 0
 	reRated := 0
+	implied := 0
 
 	tagIDs := make([]int64, 0, len(resolved))
 	for _, t := range resolved {
@@ -492,11 +493,11 @@ func (s *Server) runBatchTag(ids []int64, op string, catTags []catTag) {
 		if err != nil {
 			return err
 		}
-		var n, replaced int
+		var n, replaced, kept int
 		if op == "add" {
 			n, replaced, err = s.tagSvc().BatchAddTagsTx(tx, chunk, tagIDs)
 		} else {
-			n, err = s.tagSvc().BatchRemoveTagsTx(tx, chunk, tagIDs)
+			n, kept, err = s.tagSvc().BatchRemoveTagsTx(tx, chunk, tagIDs)
 		}
 		if err != nil {
 			_ = tx.Rollback()
@@ -507,6 +508,7 @@ func (s *Server) runBatchTag(ids []int64, op string, catTags []catTag) {
 		}
 		applied += n
 		reRated += replaced
+		implied += kept
 		return nil
 	})
 	if err != nil {
@@ -522,6 +524,9 @@ func (s *Server) runBatchTag(ids []int64, op string, catTags []catTag) {
 	done := fmt.Sprintf("%s %d image(s) (%d row change(s)).", summary, processed, applied)
 	if reRated > 0 {
 		done += fmt.Sprintf(" Replaced the rating on %d image(s).", reRated)
+	}
+	if implied > 0 {
+		done += fmt.Sprintf(" Kept %d row(s) another tag on the image implies.", implied)
 	}
 	s.finishJob(nil, cancelled, fmt.Sprintf("%s cancelled (%d/%d processed)", label, processed, total), done)
 }
@@ -1058,10 +1063,6 @@ func (s *Server) unsourcedOnly(cx *galleryCtx, ids []int64) []int64 {
 // chunks and applies every hit, recording each hash's outcome. Returns how
 // many matched.
 func (s *Server) batchPTRLookup(ctx context.Context, cx *galleryCtx, ids []int64) (int, error) {
-	g, ok := s.apiResolver(cx.Name)
-	if !ok {
-		return 0, errors.New("no active gallery")
-	}
 	matched := 0
 	for start := 0; start < len(ids) && ctx.Err() == nil; start += ptrLookupChunk {
 		chunk := ids[start:min(start+ptrLookupChunk, len(ids))]
@@ -1089,7 +1090,7 @@ func (s *Server) batchPTRLookup(ctx context.Context, cx *galleryCtx, ids []int64
 		}
 		// A record failure is logged inside and does not abort the batch: the
 		// scope is bounded and the operator asked for all of it.
-		hits, _, _ := applyPTRResults(g, cx, byHash, results, cursor)
+		hits, _, _ := applyPTRResults(cx, byHash, results, cursor)
 		matched += hits
 	}
 	return matched, nil

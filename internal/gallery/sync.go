@@ -173,7 +173,7 @@ func Sync(ctx context.Context, database *db.DB, galleryPath, thumbnailsPath stri
 	if adopting && !naming.Empty() && len(ingested) > 0 {
 		logx.Infof("sync: first sync of this library, %d file(s) left where they are", len(ingested))
 	} else {
-		nameIngested(database, galleryPath, naming, ingested, foundPaths)
+		nameIngested(ctx, database, galleryPath, naming, ingested, foundPaths)
 	}
 
 	toMark, err := selectImagesToMarkMissing(database, foundPaths)
@@ -220,12 +220,12 @@ func Sync(ctx context.Context, database *db.DB, galleryPath, thumbnailsPath stri
 // to foundPaths, or the sweep would flag every file it just renamed as
 // gone. Rows the run only touched keep their names: a sync reconciles the
 // filesystem, it does not re-file the library.
-func nameIngested(database *db.DB, galleryPath string, naming Naming, ids []int64, foundPaths map[string]struct{}) {
+func nameIngested(ctx context.Context, database *db.DB, galleryPath string, naming Naming, ids []int64, foundPaths map[string]struct{}) {
 	if naming.Empty() {
 		return
 	}
 	for _, id := range ids {
-		newPath, err := naming.Apply(database, galleryPath, id, "", "")
+		newPath, err := naming.Apply(ctx, database, galleryPath, id, "", "")
 		if err != nil {
 			logx.Warnf("sync: name image %d: %v", id, err)
 			continue
@@ -669,25 +669,8 @@ func applyInPlaceEdit(database *db.DB, thumbnailsPath, path, newSHA, newMD5 stri
 	if err := lookup.DeleteForImage(tx, imageID); err != nil {
 		return fmt.Errorf("clear lookup history: %w", err)
 	}
-	// Replace the side-table metadata rather than keeping rows the old
-	// bytes carried: an edit can add a recipe, change it, or strip it.
-	if _, err := tx.Exec(`DELETE FROM sd_metadata WHERE image_id = ?`, imageID); err != nil {
-		return fmt.Errorf("clear sd_metadata: %w", err)
-	}
-	if _, err := tx.Exec(`DELETE FROM comfyui_metadata WHERE image_id = ?`, imageID); err != nil {
-		return fmt.Errorf("clear comfyui_metadata: %w", err)
-	}
-	if sdMeta != nil {
-		sdMeta.ImageID = imageID
-		if err := insertSDMeta(tx, sdMeta); err != nil {
-			return fmt.Errorf("insert sd_metadata: %w", err)
-		}
-	}
-	if comfyMeta != nil {
-		comfyMeta.ImageID = imageID
-		if err := insertComfyMeta(tx, comfyMeta); err != nil {
-			return fmt.Errorf("insert comfyui_metadata: %w", err)
-		}
+	if err := ReplaceGenerationMetadata(context.Background(), tx, imageID, sdMeta, comfyMeta); err != nil {
+		return err
 	}
 
 	if err := tx.Commit(); err != nil {

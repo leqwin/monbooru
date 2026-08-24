@@ -1,13 +1,10 @@
-package web
+package galleryio
 
 import (
 	"database/sql"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/monbooru/monbooru/internal/gallery"
 	"github.com/monbooru/monbooru/internal/logx"
@@ -15,130 +12,16 @@ import (
 	"github.com/monbooru/monbooru/internal/tags"
 )
 
-// batchTransfer copies every image in the resolved scope into another gallery:
-// each file is re-ingested there (fresh thumbnail + metadata + phash, SHA-
-// deduped into any existing target row) and its tags, sources, commentary,
-// annotations, note and favorite ride along. Relations and collections do not.
-// With remove_after set, each confirmed copy deletes the source image. Runs as
-// a transfer job so the global jobs lane serializes it and the target gallery's
-// watcher stays suppressed against the file copy.
-func (s *Server) batchTransfer(w http.ResponseWriter, r *http.Request) {
-	if !parseFormOK(w, r) {
-		return
-	}
-	dstCx, removeAfter, ok := s.transferTarget(w, r)
-	if !ok {
-		return
-	}
-	s.startScopedJob(w, r, "batch-transfer", models.JobTypeTransfer, func(ids []int64) {
-		s.runBatchTransfer(ids, dstCx, removeAfter)
-	})
-}
-
-// transferImage copies the one image at {id} into the target gallery, mirroring
-// moveImage's single-image job shape so the watcher-suppression pattern is
-// reused. Without remove_after the operator stays on the source image; with it
-// the source is gone, so the redirect returns to the gallery.
-func (s *Server) transferImage(w http.ResponseWriter, r *http.Request) {
-	if !parseFormOK(w, r) {
-		return
-	}
-	id, ok := pathInt64(w, r, "id")
-	if !ok {
-		return
-	}
-	dstCx, removeAfter, ok := s.transferTarget(w, r)
-	if !ok {
-		return
-	}
-	if !s.startJob(w, models.JobTypeTransfer) {
-		return
-	}
-	srcCx := s.Active()
-	if err := s.transferOneImage(srcCx, dstCx, id, removeAfter); err != nil {
-		s.jobs.Fail(err.Error())
-		flashStatus(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	dstCx.InvalidateCaches()
-	if removeAfter {
-		srcCx.InvalidateCaches()
-	}
-	msg := fmt.Sprintf("Transferred image to %s.", dstCx.Name)
-	s.jobs.Complete(msg)
-
-	dest := fmt.Sprintf("/images/%d", id)
-	if removeAfter {
-		dest = "/"
-	}
-	if isHTMXRequest(r) {
-		setFlashHeader(w, msg, "ok", nil)
-		w.Header().Set("HX-Redirect", dest)
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-	http.Redirect(w, r, dest, http.StatusSeeOther)
-}
-
-// transferTarget parses and validates the target gallery + remove_after fields
-// shared by the batch and single-image handlers. The target must be a different,
-// live gallery.
-func (s *Server) transferTarget(w http.ResponseWriter, r *http.Request) (*galleryCtx, bool, bool) {
-	target := strings.TrimSpace(r.FormValue("target"))
-	msg := ""
-	switch target {
-	case "":
-		msg = "Pick a target gallery."
-	case s.activeName:
-		msg = "The target must be a different gallery."
-	}
-	if msg == "" {
-		if dst := s.Get(target); dst == nil || dst.DB == nil {
-			msg = "Unknown target gallery."
-		} else if dst.Degraded {
-			msg = "The target gallery is unavailable."
-		} else {
-			return dst, r.FormValue("remove_after") != "", true
-		}
-	}
-	flashStatus(w, http.StatusBadRequest, msg)
-	return nil, false, false
-}
-
-// runBatchTransfer processes targets one image at a time with per-image error
-// isolation, mirroring runBatchMove: a single unreadable file can't strand the
-// rest.
-func (s *Server) runBatchTransfer(ids []int64, dstCx *galleryCtx, removeAfter bool) {
-	srcCx := s.Active()
-	total := len(ids)
-	transferred, failed, cancelled := s.perImageLoop(ids, "transfer", "transferring", func(_ int, id int64) error {
-		return s.transferOneImage(srcCx, dstCx, id, removeAfter)
-	})
-
-	if transferred > 0 {
-		dstCx.InvalidateCaches()
-		if removeAfter {
-			srcCx.InvalidateCaches()
-		}
-	}
-	if cancelled {
-		s.jobs.Complete(fmt.Sprintf("transfer cancelled (%d/%d done)", transferred, total))
-		return
-	}
-	summary := fmt.Sprintf("Transferred %d image(s) to %s.", transferred, dstCx.Name)
-	if failed > 0 {
-		summary = fmt.Sprintf("Transferred %d image(s) to %s, %d failed.", transferred, dstCx.Name, failed)
-	}
-	s.jobs.Complete(summary)
-}
-
-// transferOneImage copies one source image into the target gallery, mirroring
+// TransferOneImage copies one source image into the target gallery, mirroring
 // applyMergeRecords per image: dedup on sha against the target first (merge tags
 // into the existing row when present), otherwise copy the file and ingest a
 // fresh row with its full provenance. Tags keep their source / auto-tagger
 // attribution. With removeAfter the source image is deleted once the copy
 // succeeds.
-func (s *Server) transferOneImage(srcCx, dstCx *galleryCtx, id int64, removeAfter bool) error {
+// onDelete is the relations-graph cleanup gallery.DeleteImage takes, passed
+// in for the same reason it is there: internal/relations imports the domain,
+// so nothing below it can name the service.
+func TransferOneImage(srcCx, dstCx gallery.Handle, id int64, removeAfter bool, maxFileSizeMB int, onDelete func(*sql.Tx, int64) error) error {
 	var sha, canonPath, folderPath, origin, note, originalSource string
 	var isFav, isMissing int
 	if err := srcCx.DB.Read.QueryRow(
@@ -150,11 +33,11 @@ func (s *Server) transferOneImage(srcCx, dstCx *galleryCtx, id int64, removeAfte
 		return fmt.Errorf("file missing from disk")
 	}
 
-	groups, err := s.transferTagGroups(srcCx, dstCx, id)
+	groups, err := transferTagGroups(srcCx, dstCx, id)
 	if err != nil {
 		return err
 	}
-	generalID := lookupCategoryID(dstCx.DB, "general")
+	generalID := LookupCategoryID(dstCx.DB, "general")
 
 	var dstID int64
 	var dstMissing int
@@ -169,7 +52,7 @@ func (s *Server) transferOneImage(srcCx, dstCx *galleryCtx, id int64, removeAfte
 			if err := os.MkdirAll(filepath.Dir(dstCanon), 0o755); err != nil {
 				return fmt.Errorf("mkdir dest: %w", err)
 			}
-			if err := copyFileContents(canonPath, dstCanon); err != nil {
+			if err := gallery.CopyFileContents(canonPath, dstCanon); err != nil {
 				return fmt.Errorf("restore file: %w", err)
 			}
 			if _, err := dstCx.DB.Write.Exec(`UPDATE images SET is_missing = 0 WHERE id = ?`, dstID); err != nil {
@@ -184,7 +67,7 @@ func (s *Server) transferOneImage(srcCx, dstCx *galleryCtx, id int64, removeAfte
 		}
 	case sql.ErrNoRows:
 		rel := filepath.ToSlash(filepath.Join(folderPath, filepath.Base(canonPath)))
-		safeBase, err := safeArchiveDest(dstCx.GalleryPath, rel)
+		safeBase, err := SafeArchiveDest(dstCx.GalleryPath, rel)
 		if err != nil {
 			return err
 		}
@@ -192,7 +75,7 @@ func (s *Server) transferOneImage(srcCx, dstCx *galleryCtx, id int64, removeAfte
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return fmt.Errorf("mkdir dest: %w", err)
 		}
-		if err := copyFileContents(canonPath, dst); err != nil {
+		if err := gallery.CopyFileContents(canonPath, dst); err != nil {
 			return fmt.Errorf("copy file: %w", err)
 		}
 		if _, err := gallery.DetectFileType(dst); err != nil {
@@ -218,7 +101,7 @@ func (s *Server) transferOneImage(srcCx, dstCx *galleryCtx, id int64, removeAfte
 
 	if removeAfter {
 		if _, err := gallery.DeleteImage(srcCx.DB, srcCx.GalleryPath, srcCx.ThumbnailsPath, id,
-			tags.RemoveAllTagsFromImageTx, s.onImageDeleteCallback()); err != nil {
+			tags.RemoveAllTagsFromImageTx, onDelete); err != nil {
 			return fmt.Errorf("remove source: %w", err)
 		}
 	}
@@ -241,7 +124,7 @@ type transferTagGroup struct {
 // tag keeps its category instead of collapsing into general; built-in
 // categories are seeded in every gallery. The rating tag rides along like any
 // other.
-func (s *Server) transferTagGroups(srcCx, dstCx *galleryCtx, id int64) ([]transferTagGroup, error) {
+func transferTagGroups(srcCx, dstCx gallery.Handle, id int64) ([]transferTagGroup, error) {
 	rows, err := srcCx.DB.Read.Query(
 		`SELECT t.name, tc.name, tc.color, tc.is_builtin, it.is_auto, it.tagger_name, it.confidence
 		 FROM image_tags it
@@ -266,7 +149,7 @@ func (s *Server) transferTagGroups(srcCx, dstCx *galleryCtx, id int64) ([]transf
 		if err := rows.Scan(&name, &cat, &color, &builtin, &isAuto, &taggerName, &conf); err != nil {
 			return nil, err
 		}
-		if builtin == 0 && lookupCategoryID(dstCx.DB, cat) == 0 {
+		if builtin == 0 && LookupCategoryID(dstCx.DB, cat) == 0 {
 			if _, err := dstCx.TagSvc.CreateCategory(cat, color); err != nil {
 				logx.Warnf("transfer: create category %q: %v", cat, err)
 			}
@@ -293,7 +176,7 @@ func (s *Server) transferTagGroups(srcCx, dstCx *galleryCtx, id int64) ([]transf
 // onto the target row, then fills an empty note / original source and raises the
 // favorite flag so a row that already lived in the target keeps the note,
 // original source and favorite it curated.
-func transferProvenance(srcCx, dstCx *galleryCtx, srcID, dstID int64, note, originalSource string, isFav int) error {
+func transferProvenance(srcCx, dstCx gallery.Handle, srcID, dstID int64, note, originalSource string, isFav int) error {
 	sources, err := gallery.SourcesForImage(srcCx.DB, srcID)
 	if err != nil {
 		return err
@@ -374,24 +257,4 @@ func transferProvenance(srcCx, dstCx *galleryCtx, srcID, dstID int64, note, orig
 		return err
 	}
 	return nil
-}
-
-// copyFileContents streams src to a new file at dst. A plain copy (not a rename)
-// so a transfer across gallery roots on different filesystems works.
-func copyFileContents(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = in.Close() }()
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
-		_ = os.Remove(dst)
-		return err
-	}
-	return out.Close()
 }

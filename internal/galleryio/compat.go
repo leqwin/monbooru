@@ -1,11 +1,12 @@
-package web
+package galleryio
 
 import (
 	"archive/zip"
 	"maps"
 	"slices"
 
-	"github.com/monbooru/monbooru/internal/web/compatibility"
+	"github.com/monbooru/monbooru/internal/gallery"
+	"github.com/monbooru/monbooru/internal/galleryio/compatibility"
 )
 
 // Importing the compatibility package here runs its providers' init()
@@ -15,14 +16,14 @@ func detectCompatFormat(files []*zip.File) string {
 }
 
 // replaceFromCompatArchive routes a foreign-format zip through the native
-// light-replacer path. format is propagated to applyLightReplace so the
+// light-replacer path. format is propagated to ApplyLightReplace so the
 // detail page credits the originating app instead of the generic "import".
 func replaceFromCompatArchive(files []*zip.File, format, dbPath, thumbsPath, galleryPath string, maxFileSizeMB int) error {
 	result, err := compatibility.Translate(files, format)
 	if err != nil {
 		return err
 	}
-	return applyLightReplace(
+	return ApplyLightReplace(
 		toLightManifest(result.Manifest),
 		translatedFilesFromCompat(result.Files),
 		dbPath, thumbsPath, galleryPath, format, maxFileSizeMB,
@@ -31,10 +32,10 @@ func replaceFromCompatArchive(files []*zip.File, format, dbPath, thumbsPath, gal
 
 // mergeFromCompatArchive routes a foreign-format zip through the zip-merge
 // path: tags onto existing SHAs, ingest-and-tag for new SHAs.
-func mergeFromCompatArchive(cx *galleryCtx, files []*zip.File, format string, maxFileSizeMB int) error {
+func mergeFromCompatArchive(cx gallery.Handle, files []*zip.File, format string, maxFileSizeMB int) (MergeResult, error) {
 	result, err := compatibility.Translate(files, format)
 	if err != nil {
-		return err
+		return MergeResult{}, err
 	}
 	records := make([]mergeRecord, 0, len(result.Manifest.Images))
 	for _, m := range result.Manifest.Images {
@@ -48,17 +49,16 @@ func mergeFromCompatArchive(cx *galleryCtx, files []*zip.File, format string, ma
 		}
 		records = append(records, rec)
 	}
-	applyMergeRecords(cx, records, format, maxFileSizeMB)
-	return nil
+	return applyMergeRecords(cx, records, format, maxFileSizeMB), nil
 }
 
-func toLightManifest(m compatibility.Manifest) lightManifest {
-	out := lightManifest{
-		Version: lightManifestVersion,
-		Images:  make([]lightManifestImage, 0, len(m.Images)),
+func toLightManifest(m compatibility.Manifest) LightManifest {
+	out := LightManifest{
+		Version: LightManifestVersion,
+		Images:  make([]LightManifestImage, 0, len(m.Images)),
 	}
 	for _, img := range m.Images {
-		out.Images = append(out.Images, lightManifestImage{
+		out.Images = append(out.Images, LightManifestImage{
 			SHA256: img.SHA256,
 			Path:   img.Path,
 			Tags:   img.Tags,

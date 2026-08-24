@@ -6,6 +6,7 @@ import (
 	"math"
 	"sort"
 
+	"github.com/monbooru/monbooru/internal/counts"
 	"github.com/monbooru/monbooru/internal/db"
 )
 
@@ -101,7 +102,7 @@ func SimilarityScore(shared, seedNorm, candNorm float64) float64 {
 // its own.
 func LoadSimilaritySeed(database *db.DB, imageID int64) (SimilaritySeed, error) {
 	seed := SimilaritySeed{ImageID: imageID}
-	n, ok := database.VisibleCount()
+	n, ok := counts.VisibleCount(database)
 	if !ok {
 		return seed, errVisibleCount
 	}
@@ -158,7 +159,7 @@ type SimilarityCorpusImage struct {
 // counted set comes back empty are dropped: with nothing to share
 // they can neither seed a match nor be one.
 func LoadSimilarityCorpus(database *db.DB, minTagCount int) ([]SimilarityCorpusImage, error) {
-	n, ok := database.VisibleCount()
+	n, ok := counts.VisibleCount(database)
 	if !ok {
 		return nil, errVisibleCount
 	}
@@ -307,7 +308,7 @@ type OverlapSeed struct {
 // carries counts for nobody.
 func LoadOverlapSeed(database *db.DB, imageID int64) (OverlapSeed, error) {
 	seed := OverlapSeed{ImageID: imageID}
-	n, ok := database.VisibleCount()
+	n, ok := counts.VisibleCount(database)
 	if !ok {
 		return seed, errVisibleCount
 	}
@@ -461,6 +462,8 @@ func SharedTags(database *db.DB, a, b int64, limit int) ([]SharedTag, int, error
 	if err != nil {
 		return nil, 0, err
 	}
+	// Tie-break by name asc so two equivalent runs produce the same
+	// ordering, and the panel does not reshuffle between renders.
 	sort.Slice(shared, func(i, j int) bool {
 		if shared[i].Weight != shared[j].Weight {
 			return shared[i].Weight > shared[j].Weight

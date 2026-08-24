@@ -380,6 +380,7 @@ func (s *Server) runOrphanSweep(ctx context.Context, cx *galleryCtx) (removed, p
 		if e.IsDir() {
 			continue
 		}
+		processed++
 		name := e.Name()
 		var idStr string
 		switch {
@@ -396,7 +397,6 @@ func (s *Server) runOrphanSweep(ctx context.Context, cx *galleryCtx) (removed, p
 		if parseErr != nil {
 			continue
 		}
-		processed++
 		if _, ok := known[id]; ok {
 			continue
 		}

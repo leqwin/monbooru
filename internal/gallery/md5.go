@@ -51,6 +51,30 @@ func BackfillMD5s(ctx context.Context, database *db.DB, progress MD5BackfillProg
 		return 0, 0, err
 	}
 
+	// A file that vanished or turned unreadable between the id scan and
+	// the read leaves the row empty for the next run.
+	return BackfillWalk(ctx, ids, progress, "md5", "MD5…", func(id int64) error {
+		_, err := ComputeAndStoreMD5(ctx, database, id)
+		return err
+	})
+}
+
+// BackfillWalk is the row loop the backfill jobs share: per-row
+// cancellation, a progress call before each row and one at the end, and a
+// per-row failure that logs and moves on rather than ending the run. The
+// contract rather than the line count is why it lives in one place - the
+// settings page reads these counts and the job bar reads the progress, so
+// the two jobs must not drift on either.
+//
+// label names the job in the debug line; doneMsg is what the closing
+// progress call carries.
+func BackfillWalk(
+	ctx context.Context,
+	ids []int64,
+	progress func(processed, total int, message string),
+	label, doneMsg string,
+	op func(id int64) error,
+) (processed, updated int, err error) {
 	total := len(ids)
 	for _, id := range ids {
 		if ctx.Err() != nil {
@@ -59,18 +83,15 @@ func BackfillMD5s(ctx context.Context, database *db.DB, progress MD5BackfillProg
 		if progress != nil {
 			progress(processed, total, "")
 		}
-		if _, err := ComputeAndStoreMD5(ctx, database, id); err != nil {
-			// A file that vanished or turned unreadable between the id
-			// scan and the read leaves the row empty for the next run.
-			logx.Debugf("md5 backfill image %d: %v", id, err)
-			processed++
+		processed++
+		if err := op(id); err != nil {
+			logx.Debugf("%s backfill image %d: %v", label, id, err)
 			continue
 		}
-		processed++
 		updated++
 	}
 	if progress != nil {
-		progress(processed, total, "MD5…")
+		progress(processed, total, doneMsg)
 	}
 	return processed, updated, nil
 }

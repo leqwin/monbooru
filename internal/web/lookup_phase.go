@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/monbooru/monbooru/internal/api"
 	"github.com/monbooru/monbooru/internal/db"
 	"github.com/monbooru/monbooru/internal/gallery"
 	"github.com/monbooru/monbooru/internal/logx"
@@ -61,10 +60,6 @@ func (s *Server) runPTRLookupPhase(ctx context.Context, cx *galleryCtx) (checked
 	}
 	lookup.PTRCursor.Store(cursor)
 
-	g, ok := s.apiResolver(cx.Name)
-	if !ok {
-		return 0, 0, errors.New("no gallery")
-	}
 	for {
 		if ctx.Err() != nil {
 			return checked, matched, nil
@@ -92,7 +87,7 @@ func (s *Server) runPTRLookupPhase(ctx context.Context, cx *galleryCtx) (checked
 		for _, c := range batch {
 			byHash[c.sha256] = c.id
 		}
-		hits, recorded, aerr := applyPTRResults(g, cx, byHash, results, cursor)
+		hits, recorded, aerr := applyPTRResults(cx, byHash, results, cursor)
 		matched += hits
 		checked += recorded
 		if aerr != nil {
@@ -116,12 +111,12 @@ func (s *Server) runPTRLookupPhase(ctx context.Context, cx *galleryCtx) (checked
 // left unrecorded so the next pass retries it, which is why recorded - not the
 // batch length - is what tells a caller paging through the backlog that the
 // page moved. Returns the first record failure, having tried the rest.
-func applyPTRResults(g api.Gallery, cx *galleryCtx, byHash map[string]int64, results map[string][]string, cursor uint64) (matched, recorded int, err error) {
+func applyPTRResults(cx *galleryCtx, byHash map[string]int64, results map[string][]string, cursor uint64) (matched, recorded int, err error) {
 	for sha, id := range byHash {
 		tags, hit := results[sha]
 		result := lookup.ResultMiss
 		if hit {
-			if aerr := api.ApplyPTRTags(g, id, tags); aerr != nil {
+			if aerr := gallery.ApplyPTRTags(cx.DB, cx.TagSvc, id, tags); aerr != nil {
 				logx.Warnf("ptr apply for image %d: %v", id, aerr)
 				continue
 			}
@@ -143,7 +138,7 @@ func applyPTRResults(g api.Gallery, cx *galleryCtx, byHash map[string]int64, res
 // ptrIndexCursor reads monloader's applied-update position once per run, so
 // the due gate sees a fresh value even on a box nobody has a page open on.
 func (s *Server) ptrIndexCursor(ctx context.Context) (uint64, error) {
-	resp, err := s.monloaderDo(ctx, http.MethodGet, "/api/v1/ptr/status", nil)
+	resp, err := s.monloader().Do(ctx, http.MethodGet, "/api/v1/ptr/status", nil)
 	if err != nil {
 		return 0, err
 	}

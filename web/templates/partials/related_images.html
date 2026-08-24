@@ -8,13 +8,7 @@
        class="related-mini-card" title="Image {{.ID}}">
       <img src="/thumbnails/{{$.ActiveGallery}}/{{.ID}}.jpg" alt="image {{.ID}}" loading="lazy"
            onerror="this.parentElement.innerHTML='<span class=thumb-fail title=&quot;preview unavailable&quot;>?</span>'">
-      {{if eq .FileType "cbz"}}
-        {{if .PageCount}}
-        <span class="manga-pill">{{deref .PageCount}} pages</span>
-        {{else}}
-        <span class="manga-pill">manga</span>
-        {{end}}
-      {{end}}
+      {{template "manga_pill" .}}
     </a>
     {{end}}
   </div>

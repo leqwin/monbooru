@@ -17,6 +17,7 @@
   {{template "partials/detail_sidebar.html" .}}
 </div>
 {{end}}
+{{with .TagCount}}<span id="footer-count-tags" hx-swap-oob="true">{{.}} tags</span>{{end}}
 {{if .DangerZone}}
 {{template "partials/detail_danger_zone.html" (dict "ImageID" .ImageID "ImageTags" .ImageTags "HasUserTags" .HasUserTags "HasStaleTags" .HasStaleTags "ImageTaggers" .ImageTaggers "ImageSources" .ImageSources "CanTransfer" .CanTransfer "CSRFToken" .CSRFToken "BackQuery" .BackQuery "BackSort" .BackSort "BackOrder" .BackOrder "BackPage" .BackPage "BackSeed" .BackSeed "Ref" .Ref "CurrentFolder" .CurrentFolder "Filename" .Filename "OOB" true)}}
 {{end}}

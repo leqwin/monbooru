@@ -2065,9 +2065,11 @@ function submitPageJump() {
 }
 
 // Sidebar toggle: a drawer over the grid at narrow viewports, a persisted
-// collapse of the layout column above them.
+// collapse of the layout column above them. The topbar button carries the
+// narrow job and the layout's left rail the wide one, so only one of the two
+// is ever on screen; the b key clicks the button either way.
 document.addEventListener('click', function(e) {
-  if (!e.target.id || e.target.id !== 'sidebar-toggle') return;
+  if (!e.target.matches || !e.target.matches('#sidebar-toggle, #sidebar-rail')) return;
   if (window.matchMedia('(max-width: 768px)').matches) {
     const sidebar = document.getElementById('sidebar');
     if (sidebar) sidebar.classList.toggle('open');
@@ -2467,6 +2469,16 @@ var _lastWatcherNotices = -1;
 // swap, leaving the view stale. Force a full reload instead - only for the
 // delete case; other job completions still use the incremental swap.
 var _pendingGalleryReload = false;
+
+// armGalleryReload is the onOK every page-level job dialog passes: the job
+// has started, so the next completion reloads rather than swapping, and the
+// status widget picks the job up now instead of on its next poll. The
+// typeof guard stays because refreshJobStatus is defined in a template that
+// is not on every page.
+function armGalleryReload() {
+  _pendingGalleryReload = true;
+  if (typeof refreshJobStatus === 'function') refreshJobStatus();
+}
 
 document.body.addEventListener('htmx:afterSettle', function(e) {
   var el = e.detail.elt;

@@ -273,14 +273,12 @@ func buildSpec(baseURL string) map[string]any {
 		},
 		"paths": map[string]any{
 			"/": map[string]any{
-				"get": map[string]any{
-					"summary":     "API info",
-					"operationId": "apiInfo",
-					"responses": map[string]any{
+				"get": op("API info", "apiInfo",
+					nil,
+					map[string]any{
 						"200": resp("API metadata", "#/components/schemas/APIInfo"),
 						"503": resp("API disabled (no token configured)", "#/components/schemas/Error"),
-					},
-				},
+					}),
 			},
 			"/images": map[string]any{
 				"post": map[string]any{
@@ -366,15 +364,12 @@ func buildSpec(baseURL string) map[string]any {
 				},
 			},
 			"/images/{id}": map[string]any{
-				"get": map[string]any{
-					"summary":     "Get image metadata",
-					"operationId": "getImage",
-					"parameters":  []map[string]any{pathParam("id", "Image ID"), galleryParam()},
-					"responses": map[string]any{
+				"get": op("Get image metadata", "getImage",
+					[]map[string]any{pathParam("id", "Image ID"), galleryParam()},
+					map[string]any{
 						"200": resp("Image metadata", "#/components/schemas/Image"),
 						"404": resp("Not found", "#/components/schemas/Error"),
-					},
-				},
+					}),
 				"patch": map[string]any{
 					"summary":     "Edit image fields",
 					"operationId": "patchImage",
@@ -470,15 +465,12 @@ func buildSpec(baseURL string) map[string]any {
 				},
 			},
 			"/images/{id}/tags": map[string]any{
-				"get": map[string]any{
-					"summary":     "List image tags",
-					"operationId": "listImageTags",
-					"parameters":  []map[string]any{pathParam("id", "Image ID"), galleryParam()},
-					"responses": map[string]any{
+				"get": op("List image tags", "listImageTags",
+					[]map[string]any{pathParam("id", "Image ID"), galleryParam()},
+					map[string]any{
 						"200": resp("Image tag list", "#/components/schemas/TagArray"),
 						"404": resp("Not found", "#/components/schemas/Error"),
-					},
-				},
+					}),
 				"post": map[string]any{
 					"summary":     "Add tags to image",
 					"operationId": "addImageTags",
@@ -541,15 +533,12 @@ func buildSpec(baseURL string) map[string]any {
 				},
 			},
 			"/images/{id}/file": map[string]any{
-				"get": map[string]any{
-					"summary":     "Download original image/video bytes",
-					"operationId": "getImageFile",
-					"parameters":  []map[string]any{pathParam("id", "Image ID"), galleryParam()},
-					"responses": map[string]any{
+				"get": op("Download original image/video bytes", "getImageFile",
+					[]map[string]any{pathParam("id", "Image ID"), galleryParam()},
+					map[string]any{
 						"200": map[string]any{"description": "Original file bytes", "content": binaryContent("application/octet-stream")},
 						"404": resp("Not found", "#/components/schemas/Error"),
-					},
-				},
+					}),
 				"post": map[string]any{
 					"summary":     "Replace the image's file in place",
 					"description": "The file-carrying sibling of enrich: the uploaded bytes replace the existing row's file while the row and everything attached to it survive. Content-derived state (sha256, dimensions, size, type, embedded metadata, thumbnail, phash) is re-derived, annotation boxes scale to the new dimensions, and the accompanying metadata fields land through the same merge as a push. The driving origin is marked exact (similarity reset, md5 refreshed). An upload whose sha256 matches the stored file applies the metadata only and answers replaced=false. Image and animated rows only.",
@@ -586,50 +575,38 @@ func buildSpec(baseURL string) map[string]any {
 				},
 			},
 			"/images/{id}/thumbnail": map[string]any{
-				"get": map[string]any{
-					"summary":     "Download the static thumbnail",
-					"operationId": "getImageThumbnail",
-					"parameters":  []map[string]any{pathParam("id", "Image ID"), galleryParam()},
-					"responses": map[string]any{
+				"get": op("Download the static thumbnail", "getImageThumbnail",
+					[]map[string]any{pathParam("id", "Image ID"), galleryParam()},
+					map[string]any{
 						"200": map[string]any{"description": "JPEG thumbnail", "content": binaryContent("image/jpeg")},
 						"404": resp("Image or thumbnail not found", "#/components/schemas/Error"),
-					},
-				},
+					}),
 			},
 			"/images/{id}/page/{n}": map[string]any{
-				"get": map[string]any{
-					"summary":     "Download a manga page (cbz rows)",
-					"operationId": "getMangaPage",
-					"parameters":  []map[string]any{pathParam("id", "Image ID"), pathParam("n", "1-based page number"), galleryParam()},
-					"responses": map[string]any{
+				"get": op("Download a manga page (cbz rows)", "getMangaPage",
+					[]map[string]any{pathParam("id", "Image ID"), pathParam("n", "1-based page number"), galleryParam()},
+					map[string]any{
 						"200": map[string]any{"description": "Page bytes (lazily extracted from the archive)", "content": binaryContent("application/octet-stream")},
 						"400": resp("Invalid page number", "#/components/schemas/Error"),
 						"404": resp("Not a manga row, or page out of range", "#/components/schemas/Error"),
-					},
-				},
+					}),
 			},
 			"/images/{id}/page/{n}/thumb": map[string]any{
-				"get": map[string]any{
-					"summary":     "Download a manga page thumbnail (cbz rows)",
-					"operationId": "getMangaPageThumb",
-					"parameters":  []map[string]any{pathParam("id", "Image ID"), pathParam("n", "1-based page number"), galleryParam()},
-					"responses": map[string]any{
+				"get": op("Download a manga page thumbnail (cbz rows)", "getMangaPageThumb",
+					[]map[string]any{pathParam("id", "Image ID"), pathParam("n", "1-based page number"), galleryParam()},
+					map[string]any{
 						"200": map[string]any{"description": "Page thumbnail (JPEG)", "content": binaryContent("image/jpeg")},
 						"400": resp("Invalid page number", "#/components/schemas/Error"),
 						"404": resp("Not a manga row, or page out of range", "#/components/schemas/Error"),
-					},
-				},
+					}),
 			},
 			"/images/{id}/relations": map[string]any{
-				"get": map[string]any{
-					"summary":     "Get declared relations for an image",
-					"operationId": "getImageRelations",
-					"parameters":  []map[string]any{pathParam("id", "Image ID"), galleryParam()},
-					"responses": map[string]any{
+				"get": op("Get declared relations for an image", "getImageRelations",
+					[]map[string]any{pathParam("id", "Image ID"), galleryParam()},
+					map[string]any{
 						"200": resp("Declared relations", "#/components/schemas/ImageRelations"),
 						"404": resp("Image not found", "#/components/schemas/Error"),
-					},
-				},
+					}),
 			},
 			"/relations": map[string]any{
 				"post": map[string]any{
@@ -730,15 +707,12 @@ func buildSpec(baseURL string) map[string]any {
 						"409": resp("A tag with the new name already exists in the target category", "#/components/schemas/Error"),
 					},
 				},
-				"delete": map[string]any{
-					"summary":     "Delete a tag",
-					"operationId": "deleteTag",
-					"parameters":  []map[string]any{pathParam("id", "Tag ID"), galleryParam()},
-					"responses": map[string]any{
+				"delete": op("Delete a tag", "deleteTag",
+					[]map[string]any{pathParam("id", "Tag ID"), galleryParam()},
+					map[string]any{
 						"204": map[string]any{"description": "Deleted (rating-category rows are usage-stripped; the catalog row stays)"},
 						"404": resp("Tag not found", "#/components/schemas/Error"),
-					},
-				},
+					}),
 			},
 			"/tags/aliases": map[string]any{
 				"post": map[string]any{
@@ -782,15 +756,12 @@ func buildSpec(baseURL string) map[string]any {
 				},
 			},
 			"/tags/{id}/implications": map[string]any{
-				"get": map[string]any{
-					"summary":     "List a tag's implications",
-					"operationId": "listImplications",
-					"parameters":  []map[string]any{pathParam("id", "Parent tag ID"), galleryParam()},
-					"responses": map[string]any{
+				"get": op("List a tag's implications", "listImplications",
+					[]map[string]any{pathParam("id", "Parent tag ID"), galleryParam()},
+					map[string]any{
 						"200": map[string]any{"description": "Direct implications", "content": map[string]any{"application/json": map[string]any{"schema": map[string]any{"type": "array", "items": map[string]any{"$ref": "#/components/schemas/Implication"}}}}},
 						"404": resp("Parent tag not found", "#/components/schemas/Error"),
-					},
-				},
+					}),
 				"post": map[string]any{
 					"summary":     "Declare an implication",
 					"operationId": "addImplication",
@@ -825,14 +796,11 @@ func buildSpec(baseURL string) map[string]any {
 				},
 			},
 			"/categories": map[string]any{
-				"get": map[string]any{
-					"summary":     "List tag categories",
-					"operationId": "listCategories",
-					"parameters":  []map[string]any{galleryParam()},
-					"responses": map[string]any{
+				"get": op("List tag categories", "listCategories",
+					[]map[string]any{galleryParam()},
+					map[string]any{
 						"200": map[string]any{"description": "Categories", "content": map[string]any{"application/json": map[string]any{"schema": map[string]any{"type": "array", "items": map[string]any{"$ref": "#/components/schemas/Category"}}}}},
-					},
-				},
+					}),
 				"post": map[string]any{
 					"summary":     "Create a category",
 					"operationId": "createCategory",
@@ -890,16 +858,26 @@ func buildSpec(baseURL string) map[string]any {
 				},
 			},
 			"/galleries": map[string]any{
-				"get": map[string]any{
-					"summary":     "List configured galleries",
-					"operationId": "listGalleries",
-					"responses": map[string]any{
+				"get": op("List configured galleries", "listGalleries",
+					nil,
+					map[string]any{
 						"200": map[string]any{"description": "Galleries with counts and the active flag", "content": map[string]any{"application/json": map[string]any{"schema": map[string]any{"type": "array", "items": map[string]any{"$ref": "#/components/schemas/Gallery"}}}}},
-					},
-				},
+					}),
 			},
 		},
 	}
+}
+
+// op builds one path operation. Every entry in the paths map above is the
+// same four fields in the same order; spelling them out 33 times is how a
+// mis-keyed one hides. Operations carrying a requestBody keep their
+// literal, since the body is the bulk of those.
+func op(summary, id string, params []map[string]any, responses map[string]any) map[string]any {
+	m := map[string]any{"summary": summary, "operationId": id, "responses": responses}
+	if len(params) > 0 {
+		m["parameters"] = params
+	}
+	return m
 }
 
 func resp(desc, ref string) map[string]any {
@@ -1207,6 +1185,14 @@ var docsTemplate = template.Must(template.New("api-docs").Parse(`<!DOCTYPE html>
  .hdr { position:sticky; top:0; background:#0d0d0d; padding:4px 0; }
 </style>
 </head>
+{{define "proptable"}}<table>
+ <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+ <tbody>
+ {{range .}}
+  <tr><td><code>{{.Name}}</code></td><td>{{.Type}}{{if .Nullable}} · nullable{{end}}</td><td>{{.Description}}</td></tr>
+ {{end}}
+ </tbody>
+</table>{{end}}
 <body>
  <p class="muted"><a href="/">← Back</a></p>
  <h1>{{.Title}}</h1>
@@ -1250,14 +1236,7 @@ var docsTemplate = template.Must(template.New("api-docs").Parse(`<!DOCTYPE html>
    <p class="muted">Content-Type: <code>{{.ContentType}}</code>{{if .Ref}} - schema <a href="#schema-{{.RefAnchor}}"><code>{{.Ref}}</code></a>{{end}}</p>
    {{if .Required}}<p class="muted">Required: {{range .Required}}<code>{{.}}</code> {{end}}</p>{{end}}
    {{if .Properties}}
-   <table>
-    <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
-    <tbody>
-    {{range .Properties}}
-     <tr><td><code>{{.Name}}</code></td><td>{{.Type}}{{if .Nullable}} · nullable{{end}}</td><td>{{.Description}}</td></tr>
-    {{end}}
-    </tbody>
-   </table>
+   {{template "proptable" .Properties}}
    {{end}}
   {{end}}
   {{end}}
@@ -1280,14 +1259,7 @@ var docsTemplate = template.Must(template.New("api-docs").Parse(`<!DOCTYPE html>
  {{range .Schemas}}
   <h3 id="schema-{{.Anchor}}" style="color:#c8c8c8; font-size:14px; text-transform:none; letter-spacing:0; margin-top:14px">{{.Name}}</h3>
   {{if .Properties}}
-  <table>
-   <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
-   <tbody>
-   {{range .Properties}}
-    <tr><td><code>{{.Name}}</code></td><td>{{.Type}}{{if .Nullable}} · nullable{{end}}</td><td>{{.Description}}</td></tr>
-   {{end}}
-   </tbody>
-  </table>
+  {{template "proptable" .Properties}}
   {{else}}
   <p class="muted">(no fields)</p>
   {{end}}

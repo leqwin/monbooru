@@ -80,11 +80,13 @@ CREATE TABLE IF NOT EXISTS images (
     origin         TEXT    NOT NULL DEFAULT 'ingest',
     source         TEXT    NOT NULL DEFAULT '',
     url            TEXT    NOT NULL DEFAULT '',
-    -- Operator's freeform note; never written by an import.
+    -- Operator's freeform note. The full-JSON export carries it; the
+    -- merge importer leaves it alone.
     note           TEXT    NOT NULL DEFAULT '',
     -- Operator's image-level original source (where the artist first posted
     -- it), one URL; distinct from the per-origin image_sources.original a
-    -- booru pull fills. Never written by an import.
+    -- booru pull fills. Carried by the full-JSON export since v8; the merge
+    -- importer leaves it alone.
     original_source TEXT   NOT NULL DEFAULT '',
     -- Video duration in seconds (REAL so short clips and sub-second
     -- precision survive). NULL for non-video rows and for video rows

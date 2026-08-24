@@ -1603,7 +1603,7 @@ a.btn-sm:hover { text-decoration: none; }
 }
 #search-suggest .suggest-list { max-height: 60vh; }
 /* Filename-template chips and the preview slot they feed. */
-.tok-chips { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 6px; max-width: 360px; }
+.tok-chips { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 6px; }
 .tok-chip {
   background: var(--bg-input);
   border: 1px solid var(--border);
@@ -1614,20 +1614,14 @@ a.btn-sm:hover { text-decoration: none; }
 .tok-chip:hover { border-color: var(--fg-dim); }
 .name-preview {
   margin-top: 6px;
-  max-width: 360px;
   border-left: 2px solid var(--border);
   padding-left: 8px;
   font-size: 12px;
   color: var(--fg-dim);
 }
 .name-preview-cap { display: block; font-size: 10px; color: var(--fg-dim); }
-.name-preview-row { display: block; white-space: nowrap; overflow-x: auto; }
+.name-preview-row { display: block; overflow-wrap: anywhere; }
 .name-preview-field { color: var(--fg-dim); }
-
-#settings-page .name-preview-row { white-space: normal; overflow-wrap: anywhere; }
-#settings-page .tok-chips,
-#settings-page .name-preview,
-#settings-page .name-preview-err { max-width: none; }
 
 .dest-row { display: flex; align-items: flex-end; gap: 6px; flex-wrap: wrap; }
 .dest-row .dest-part { flex: 1 1 190px; min-width: 0; }
@@ -1638,7 +1632,7 @@ a.btn-sm:hover { text-decoration: none; }
 .dest-hints > .field-hint { flex: 1 1 190px; }
 .name-preview-arrow { color: var(--fg-dim); }
 .name-preview-to { color: var(--success); }
-.name-preview-err { margin-top: 6px; max-width: 360px; font-size: 12px; color: var(--error); }
+.name-preview-err { margin-top: 6px; font-size: 12px; color: var(--error); }
 
 .suggest-dropdown {
   position: relative;
@@ -2471,8 +2465,11 @@ details[open] > .relations-card-summary::before { content: "▼"; }
 
 @media (min-width: 769px) {
   #main-layout.sidebar-collapsed #sidebar { display: none; }
+  #sidebar-toggle { display: none; }
+  /* The rail sits on the column's edge and carries the rule for it. */
+  #sidebar { border-right: 0; }
 }
-@media (max-width: 879px) {
+@media (max-width: 839px) {
   #topbar { flex-wrap: wrap; height: auto; padding: 4px 16px 0; gap: 0 16px; }
   #nav { flex-basis: 100%; order: 3; margin-left: 0; justify-content: flex-start; column-gap: 0; }
   #nav a { padding-left: 8px; padding-right: 8px; }
@@ -2489,6 +2486,28 @@ details[open] > .relations-card-summary::before { content: "▼"; }
   border: 1px solid var(--border);
   padding: 4px 8px;
   cursor: pointer;
+}
+#sidebar-rail {
+  flex: 0 0 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-surface);
+  border: 0;
+  border-right: 1px solid var(--border);
+  padding: 0;
+  color: var(--fg-dim);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+#sidebar-rail::before { content: ""; }
+#main-layout.sidebar-collapsed #sidebar-rail::before { content: ">"; }
+#sidebar-rail:hover { background: var(--border); border-color: var(--border); color: var(--fg); }
+#sidebar-rail:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+@media (max-width: 768px) {
+  #sidebar-rail { display: none; }
 }
 
 .cat-actions { display: inline-flex; gap: 6px; flex-wrap: wrap; align-items: center; }
@@ -2856,11 +2875,19 @@ body.reader-body #gallery-status { display: none; }
 .ptr-lookup-answer { margin: 8px 0 4px; }
 .ptr-lookup-head { display: flex; flex-wrap: wrap; gap: 4px 14px; justify-content: space-between; align-items: baseline; }
 .ptr-lookup-anywhere { display: flex; align-items: center; gap: 6px; }
-.ptr-lookup-anywhere:has(input:disabled) { color: var(--fg-dim); }
 .ptr-lookup-note { margin: 10px 0 6px; }
-.ptr-lookup-back { margin-right: auto; }
+/* The dropdown is an overlay with no ground of its own, so a note there has
+   to carry the list's surface or it prints over the body under the field. */
+#ptr-lookup-suggest .ptr-lookup-note {
+  margin: 0;
+  padding: 3px 8px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+}
+.ptr-lookup-back { margin-bottom: 2px; }
 #ptr-lookup-result > .suggest-list { position: static; max-height: 320px; }
 .ptr-contrib-dialog { max-width: 640px; width: min(640px, 92vw); max-height: 85vh; overflow-y: auto; }
+.ptr-contrib-dialog .dialog-actions { flex-wrap: wrap; }
 .ptr-contrib-summary { margin: 10px 0 0; color: var(--fg-dim); }
 .ptr-hunk-wrap { margin: 10px 0; }
 .ptr-hunk-scroll { max-height: 250px; overflow-y: auto; border: 1px solid var(--border); }

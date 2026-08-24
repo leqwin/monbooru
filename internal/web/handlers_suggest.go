@@ -47,11 +47,6 @@ func (s *Server) renderSearchSuggest(w http.ResponseWriter, rows []suggestItem) 
 	s.renderSuggestList(w, `data-tag-name`, `onclick="applySearchSuggest(this.dataset.tagName)"`, rows)
 }
 
-// foldersSuggest returns up to 10 existing folder paths whose name or leading
-// segments match the typed prefix. Drives the autocomplete dropdown on the
-// move dialogs. Root (empty folder_path) is excluded from suggestions because it
-// maps to an empty input anyway.
-//
 // suggestLabels runs a single-text-column suggest query and collects its
 // non-blank values, owning the cursor. A row that will not scan is skipped
 // rather than dropping the whole list: an autocomplete showing most of its
@@ -80,6 +75,11 @@ func (s *Server) suggestLabels(q db.Querier, logLabel, query string, args ...any
 	return out
 }
 
+// foldersSuggest returns up to 10 existing folder paths whose name or leading
+// segments match the typed prefix. Drives the autocomplete dropdown on the
+// move dialogs. Root (empty folder_path) is excluded from suggestions because
+// it maps to an empty input anyway.
+//
 // The half-open range form `folder_path >= prefix AND folder_path < prefix||X`
 // (where X is one codepoint past the prefix's last char) lets SQLite seek to
 // the first match and stop at the boundary - a `LIKE ?||'%'` form forces a

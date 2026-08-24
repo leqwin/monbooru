@@ -51,7 +51,7 @@ func scanImplications(rows *sql.Rows, withImpliedCols bool) ([]models.Implicatio
 // ListImplications returns every direct implication whose parent is
 // parentID, with display fields joined for the /tags dialog.
 func (s *Service) ListImplications(parentID int64) ([]models.Implication, error) {
-	rows, err := s.db.Read.Query(
+	return s.implicationsQuery(
 		`SELECT ti.parent_tag_id, ti.implied_tag_id,
 		        p.name, pc.name, pc.color,
 		        i.name, ic.name, ic.color,
@@ -62,19 +62,25 @@ func (s *Service) ListImplications(parentID int64) ([]models.Implication, error)
 		 JOIN tags i ON i.id = ti.implied_tag_id
 		 JOIN tag_categories ic ON ic.id = i.category_id
 		 WHERE ti.parent_tag_id = ?
-		 ORDER BY i.name`, parentID,
-	)
+		 ORDER BY i.name`, parentID, true)
+}
+
+// implicationsQuery runs one edge listing and owns its cursor. full says
+// whether the row set carries the implied side's display fields too,
+// which is the only thing the two listings differ in beyond their SQL.
+func (s *Service) implicationsQuery(query string, arg int64, full bool) ([]models.Implication, error) {
+	rows, err := s.db.Read.Query(query, arg)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
-	return scanImplications(rows, true)
+	return scanImplications(rows, full)
 }
 
 // ImpliedBy returns the direct edges whose implied side is tagID, with
 // parent display fields joined for the detail page's reverse view.
 func (s *Service) ImpliedBy(tagID int64) ([]models.Implication, error) {
-	rows, err := s.db.Read.Query(
+	return s.implicationsQuery(
 		`SELECT ti.parent_tag_id, ti.implied_tag_id,
 		        p.name, pc.name, pc.color,
 		        ti.created_at, ti.origin, ti.stale
@@ -82,13 +88,7 @@ func (s *Service) ImpliedBy(tagID int64) ([]models.Implication, error) {
 		 JOIN tags p ON p.id = ti.parent_tag_id
 		 JOIN tag_categories pc ON pc.id = p.category_id
 		 WHERE ti.implied_tag_id = ?
-		 ORDER BY p.name`, tagID,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	return scanImplications(rows, false)
+		 ORDER BY p.name`, tagID, false)
 }
 
 // SyncImplicationStaleness mirrors SyncAliasStaleness for a parent's
@@ -367,6 +367,33 @@ func applyImpliedClosureTx(tx *sql.Tx, imageID int64, implied []int64, ratingCat
 		}
 	}
 	return nil
+}
+
+// impliedByParentOnImage reports whether the (imageID, tagID) row is an
+// implication fan-out that a parent still on the image justifies. Removing
+// such a row directly breaks the operator's own declaration - the image
+// keeps the parent, loses the child, and drops out of searches for a tag
+// its own tags imply - so the operator-facing removal paths refuse it.
+func impliedByParentOnImage(tx *sql.Tx, imageID, tagID int64) (bool, error) {
+	var isImplied int
+	switch err := tx.QueryRow(
+		`SELECT is_implied FROM image_tags WHERE image_id = ? AND tag_id = ?`, imageID, tagID,
+	).Scan(&isImplied); {
+	case err == sql.ErrNoRows:
+		return false, nil
+	case err != nil:
+		return false, err
+	}
+	if isImplied != 1 {
+		return false, nil
+	}
+	// An orphan - is_implied = 1 with no parent left on the image - stays
+	// removable: refusing it would trap a row nothing justifies.
+	parents, err := implicationParentsOnImageExcluding(tx, imageID, tagID, 0)
+	if err != nil {
+		return false, err
+	}
+	return len(parents) > 0, nil
 }
 
 // implicationParentsOnImageExcluding returns the tag ids on the image

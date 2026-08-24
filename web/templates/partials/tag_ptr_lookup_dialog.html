@@ -20,7 +20,7 @@
         <label class="ptr-lookup-anywhere">
           {{/* Focus goes back to the input so the widened search's answer is
                not dropped as a swap landing on an unfocused field. */}}
-          <input type="checkbox" id="ptr-lookup-anywhere" onchange="document.getElementById('ptr-lookup-as').focus()"{{if not .Qualified}} disabled title="a category:name spelling is needed to match anywhere"{{end}}>
+          <input type="checkbox" id="ptr-lookup-anywhere" onchange="document.getElementById('ptr-lookup-as').focus()">
           match anywhere in the name <span class="field-hint">(slower)</span>
         </label>
       </div>

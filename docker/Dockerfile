@@ -1,5 +1,5 @@
 # Stage 1: build the binary.
-FROM golang:1.25-trixie AS build
+FROM golang:1.26-trixie AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -27,16 +27,21 @@ RUN echo 'monbooru:x:1000:1000:monbooru:/home/monbooru:/sbin/nologin' >> /idsrc/
 # ONNX Runtime shared library for the autotagger. onnxruntime_go v1.19.0
 # requests ORT API version 21, which requires ORT 1.21.x.
 ARG ORT_VERSION=1.21.0
+ARG ORT_SHA256_X64=7485c7e7aac6501b27e353dcbe068e45c61ab51fbaf598d13970dfae669d20bf
+ARG ORT_SHA256_AARCH64=4508084bde1232ee1ab4b6fad2155be0ea2ccab1c1aae9910ddb3fb68a60805e
 RUN ARCH=$(dpkg --print-architecture) && \
     case "$ARCH" in \
-      amd64) ONNX_ARCH="x64" ;; \
-      arm64) ONNX_ARCH="aarch64" ;; \
+      amd64) ONNX_ARCH="x64";     ORT_SHA="${ORT_SHA256_X64}" ;; \
+      arm64) ONNX_ARCH="aarch64"; ORT_SHA="${ORT_SHA256_AARCH64}" ;; \
       *) echo "Unsupported arch: $ARCH" && exit 1 ;; \
     esac && \
     curl -fsSL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-${ONNX_ARCH}-${ORT_VERSION}.tgz" \
-      | tar -xz -C /tmp && \
+      -o /tmp/ort.tgz && \
+    echo "${ORT_SHA}  /tmp/ort.tgz" | sha256sum -c - && \
+    tar -xzf /tmp/ort.tgz -C /tmp && \
     mkdir -p /opt/ort && \
-    cp /tmp/onnxruntime-linux-${ONNX_ARCH}-${ORT_VERSION}/lib/libonnxruntime.so.${ORT_VERSION} /opt/ort/libonnxruntime.so
+    cp /tmp/onnxruntime-linux-${ONNX_ARCH}-${ORT_VERSION}/lib/libonnxruntime.so.${ORT_VERSION} /opt/ort/libonnxruntime.so && \
+    rm -f /tmp/ort.tgz
 
 # ffmpeg + ffprobe. BtbN's builds bundle their codecs statically but link
 # glibc dynamically; the distroless cc base provides it.

@@ -244,7 +244,7 @@ func (s *Server) extractMangaPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if filed {
-		if _, err := naming.Apply(cx.DB, cx.GalleryPath, pageID, "", ""); err != nil {
+		if _, err := naming.Apply(r.Context(), cx.DB, cx.GalleryPath, pageID, "", ""); err != nil {
 			logx.Warnf("extract page %d of image %d: file: %v", n, img.ID, err)
 		}
 	}

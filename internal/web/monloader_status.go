@@ -1,12 +1,10 @@
 package web
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -14,53 +12,14 @@ import (
 	"time"
 
 	"github.com/monbooru/monbooru/internal/lookup"
+	"github.com/monbooru/monbooru/internal/monloader"
 )
 
-// monloaderClient is the outbound HTTP client for the companion monloader,
-// and it is only ever pointed at the configured instance (SPECIFICATIONS.md
-// 14.5). Per-call deadlines belong to the request contexts (probes 4-5 s,
-// contribution previews 8 s, sends 10 s); the client timeout is only a
-// backstop for the callers that pass an unbounded context, and must stay
-// above the largest per-call deadline or it aborts a send monloader may
-// still commit.
-var monloaderClient = &http.Client{Timeout: 15 * time.Second}
-
-// errMonloaderUnconfigured is what every outbound call answers before any
-// I/O when no link is set up.
-var errMonloaderUnconfigured = errors.New("monloader is not configured")
-
-// monloaderDo issues one authed request to a monloader API path and returns
-// the live response for the caller to map. The token read happens under
-// cfgMu; the Do call must not, so a slow monloader can't block a settings
-// write. A nil body sends no payload and no content type.
-func (s *Server) monloaderDo(ctx context.Context, method, path string, body []byte) (*http.Response, error) {
-	base := strings.TrimRight(s.monloaderAPIBase(), "/")
-	s.cfgMu.RLock()
-	token := s.cfg.Monloader.APIToken
-	s.cfgMu.RUnlock()
-	if base == "" || token == "" {
-		return nil, errMonloaderUnconfigured
-	}
-	var payload io.Reader
-	if body != nil {
-		payload = bytes.NewReader(body)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, base+path, payload)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	return monloaderClient.Do(req)
-}
-
-// monloaderPost sends one JSON body to a monloader API path.
-func (s *Server) monloaderPost(ctx context.Context, path string, payload map[string]any) (*http.Response, error) {
-	body, _ := json.Marshal(payload)
-	return s.monloaderDo(ctx, http.MethodPost, path, body)
-}
+// peerHTTPClient probes a peer's /health while pairing - a monloader whose
+// address is being approved, or a plugin's. The outbound monloader API calls
+// go through internal/monloader instead; this one only ever issues the
+// unauthed probe, so it keeps a short timeout of its own.
+var peerHTTPClient = &http.Client{Timeout: 5 * time.Second}
 
 // enqueueMonloader posts one enqueue payload and maps the reply: any
 // non-2xx is a per-request refusal the caller can skip a row over.
@@ -68,7 +27,7 @@ func (s *Server) monloaderPost(ctx context.Context, path string, payload map[str
 // returned job id is what lets a caller resolve an attempt whose callback
 // never arrives; it is zero against a monloader that reports none.
 func (s *Server) enqueueMonloader(ctx context.Context, path string, payload map[string]any, onConflict error) (int64, error) {
-	resp, err := s.monloaderPost(ctx, path, payload)
+	resp, err := s.monloader().Post(ctx, path, payload)
 	if err != nil {
 		return 0, err
 	}
@@ -127,7 +86,7 @@ var errPTRBatchUnsupported = errors.New("monloader is too old for batch PTR look
 // peerStatusError is a non-2xx reply to one request (a bad url, a malformed
 // hash, an endpoint the peer does not implement) - the request was refused,
 // not a sign the peer is down, so a batch can skip the row instead of
-// aborting. It names the peer: the same client calls monloader and every
+// aborting. It names the peer: monbooru talks to monloader and to every
 // third-party plugin, and a message about a plugin that says "monloader"
 // sends the operator looking in the wrong place.
 type peerStatusError struct{ peer, status string }
@@ -168,7 +127,7 @@ type ptrLookupImage struct {
 // lane a queued lookup would take. Returns the tags per matched hash (misses
 // are absent) and its index cursor at answer time.
 func (s *Server) ptrBatchLookup(ctx context.Context, gallery string, scheduled bool, images []ptrLookupImage) (map[string][]string, uint64, error) {
-	resp, err := s.monloaderPost(ctx, "/api/v1/ptr/lookup", map[string]any{
+	resp, err := s.monloader().Post(ctx, "/api/v1/ptr/lookup", map[string]any{
 		"images": images, "gallery": gallery, "scheduled": scheduled,
 	})
 	if err != nil {
@@ -245,7 +204,7 @@ func (s *Server) ptrSpellingSearch(ctx context.Context, q, mode string, limit in
 	if mode != "" {
 		v.Set("mode", mode)
 	}
-	resp, err := s.monloaderDo(ctx, http.MethodGet, "/api/v1/ptr/tags/search?"+v.Encode(), nil)
+	resp, err := s.monloader().Do(ctx, http.MethodGet, "/api/v1/ptr/tags/search?"+v.Encode(), nil)
 	if err != nil {
 		return nil, false, err
 	}
@@ -321,7 +280,7 @@ func (s *Server) checkMonloader(ctx context.Context) (status, version string, pt
 	if base == "" {
 		return "", "", false, false, false, 0, false
 	}
-	version, up := probePeer(ctx, monloaderClient, base)
+	version, up := probePeer(ctx, peerHTTPClient, base)
 	if !up {
 		return "down", "", false, false, false, 0, false
 	}
@@ -329,13 +288,13 @@ func (s *Server) checkMonloader(ctx context.Context) (status, version string, pt
 	tok := s.cfg.Monloader.APIToken
 	s.cfgMu.RUnlock()
 	if tok != "" {
-		if qresp, qerr := s.monloaderDo(ctx, http.MethodGet, "/api/v1/queue?limit=1", nil); qerr == nil {
+		if qresp, qerr := s.monloader().Do(ctx, http.MethodGet, "/api/v1/queue?limit=1", nil); qerr == nil {
 			defer func() { _ = qresp.Body.Close() }()
 			if qresp.StatusCode == http.StatusUnauthorized || qresp.StatusCode == http.StatusForbidden {
 				return "rejected", version, false, false, false, 0, false
 			}
 		}
-		if presp, perr := s.monloaderDo(ctx, http.MethodGet, "/api/v1/ptr/status", nil); perr == nil {
+		if presp, perr := s.monloader().Do(ctx, http.MethodGet, "/api/v1/ptr/status", nil); perr == nil {
 			var p struct {
 				Enabled  bool `json:"enabled"`
 				Progress struct {
@@ -382,7 +341,7 @@ func (s *Server) monloaderReachable(ctx context.Context, base string) bool {
 	if strings.TrimRight(base, "/") == "" {
 		return false
 	}
-	_, up := probePeer(ctx, monloaderClient, base)
+	_, up := probePeer(ctx, peerHTTPClient, base)
 	return up
 }
 
@@ -471,4 +430,19 @@ func (s *Server) monloaderStatusHandler(w http.ResponseWriter, r *http.Request) 
 		"MonloaderURL":     s.monloaderWebBase(),
 		"CSRFToken":        s.csrfToken(sessionFromContext(r.Context())),
 	})
+}
+
+// monloader is the outbound client, rebuilt per call from the live config so
+// a re-pair, a pause or an address change lands without a restart. Base
+// answers "" while the link is paused or unset, which is what makes an
+// unconfigured call fail before any I/O.
+func (s *Server) monloader() *monloader.Client {
+	return &monloader.Client{
+		Base: s.monloaderAPIBase,
+		Token: func() string {
+			s.cfgMu.RLock()
+			defer s.cfgMu.RUnlock()
+			return s.cfg.Monloader.APIToken
+		},
+	}
 }

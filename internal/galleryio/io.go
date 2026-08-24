@@ -1,31 +1,27 @@
-package web
+package galleryio
 
 import (
 	"archive/zip"
-	"cmp"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
-	"mime/multipart"
-	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 
-	"github.com/monbooru/monbooru/internal/config"
 	"github.com/monbooru/monbooru/internal/db"
 	"github.com/monbooru/monbooru/internal/gallery"
 	"github.com/monbooru/monbooru/internal/logx"
 	"github.com/monbooru/monbooru/internal/tags"
 )
 
-// safeArchiveDest joins a relative archive path under root and returns the
+// SafeArchiveDest joins a relative archive path under root and returns the
 // resolved absolute destination, rejecting paths that escape root through
 // `..` segments or absolute roots. Routes through gallery.PathInside so a
 // legal name like "foo..bar.ext" isn't caught by a `..` substring check.
-func safeArchiveDest(root, rel string) (string, error) {
+func SafeArchiveDest(root, rel string) (string, error) {
 	if filepath.IsAbs(rel) {
 		return "", fmt.Errorf("absolute archive entry path")
 	}
@@ -43,7 +39,7 @@ func safeArchiveDest(root, rel string) (string, error) {
 	return dst, nil
 }
 
-// galleryExportVersion is the full-export JSON document's `"version"`
+// ExportVersion is the full-export JSON document's `"version"`
 // field. v2 carries manga_metadata + images.page_count + images.series;
 // v3 adds image_collections, image_sources, image_annotations and
 // images.note; v4 adds image_annotations.manual (operator-drawn boxes);
@@ -51,71 +47,78 @@ func safeArchiveDest(root, rel string) (string, error) {
 // not-related); v6 adds image_sources.similarity; v7 adds
 // image_sources.original; v8 adds images.original_source; v9 adds images.md5
 // and image_sources.md5_match / parent_url / upgrade_kept / post_width /
-// post_height / post_size / post_ext. Older imports down to
-// galleryExportMinSupported still round-trip (the new columns default, the
+// post_height / post_size / post_ext; v10 adds images.phash /
+// last_read_page / scheduled_lookup / scheduled_lookup_ptr / upload_batch,
+// image_tags.stale, image_paths.mtime_unix / mtime_nsec, tags.stale,
+// tag_implications.stale and the image_lookups /
+// collection_find_relations tables. Older imports down to
+// ExportMinSupported still round-trip (the new columns default, the
 // new tables stay empty or, for image_collections, derive from
-// images.series).
-const galleryExportVersion = 9
+// images.series and, for the scheduled-lookup opt-ins, from the schema
+// default the pre-v10 library was running under).
+const ExportVersion = 10
 
-// galleryExportMinSupported is the oldest full-export version this
+// ExportMinSupported is the oldest full-export version this
 // server reads; anything below is rejected.
-const galleryExportMinSupported = 1
+const ExportMinSupported = 1
 
-// lightManifestVersion is the on-disk version of the light tags.json
+// LightManifestVersion is the on-disk version of the light tags.json
 // manifest. The light format carries only sha256 / path / tags per
 // row, so it doesn't track full-export schema bumps.
-const lightManifestVersion = 1
+const LightManifestVersion = 1
 
-// decodeGalleryExport reads a full-export JSON document and rejects any
+// DecodeExport reads a full-export JSON document and rejects any
 // version outside the supported range. The caller owns opening/closing
 // the reader.
-func decodeGalleryExport(r io.Reader) (galleryExport, error) {
-	var exp galleryExport
+func DecodeExport(r io.Reader) (Export, error) {
+	var exp Export
 	if err := json.NewDecoder(r).Decode(&exp); err != nil {
 		return exp, fmt.Errorf("decode export: %w", err)
 	}
-	if exp.Version < galleryExportMinSupported || exp.Version > galleryExportVersion {
-		return exp, fmt.Errorf("unsupported export version %d (supported: %d..%d)", exp.Version, galleryExportMinSupported, galleryExportVersion)
+	if exp.Version < ExportMinSupported || exp.Version > ExportVersion {
+		return exp, fmt.Errorf("unsupported export version %d (supported: %d..%d)", exp.Version, ExportMinSupported, ExportVersion)
 	}
 	return exp, nil
 }
 
-// galleryExport is the root JSON document. Field order mirrors schema.sql so a
+// Export is the root JSON document. Field order mirrors schema.sql so a
 // human opening the file reads the schema top-down.
-type galleryExport struct {
+type Export struct {
 	Version          int                  `json:"version"`
 	GalleryName      string               `json:"gallery_name"`
 	GalleryPath      string               `json:"gallery_path"`
-	TagCategories    []tagCategoryRow     `json:"tag_categories"`
-	Tags             []tagRow             `json:"tags"`
-	TagImplications  []tagImplicationRow  `json:"tag_implications"`
-	Images           []imageRow           `json:"images"`
-	ImageCollections []imageCollectionRow `json:"image_collections,omitempty"`
-	ImageSources     []imageSourceRow     `json:"image_sources,omitempty"`
-	ImageAnnotations []imageAnnotationRow `json:"image_annotations,omitempty"`
-	ImagePaths       []imagePathRow       `json:"image_paths"`
-	ImageTags        []imageTagRow        `json:"image_tags"`
-	SDMetadata       []sdMetadataRow      `json:"sd_metadata"`
-	ComfyUIMetadata  []comfyMetadataRow   `json:"comfyui_metadata"`
-	MangaMetadata    []mangaMetadataRow   `json:"manga_metadata,omitempty"`
-	DupGroups        []dupGroupRow        `json:"dup_groups,omitempty"`
-	DupGroupMembers  []dupGroupMemberRow  `json:"dup_group_members,omitempty"`
-	AltGroups        []altGroupRow        `json:"alt_groups,omitempty"`
-	AltGroupMembers  []altGroupMemberRow  `json:"alt_group_members,omitempty"`
-	VersionEdges     []versionEdgeRow     `json:"version_edges,omitempty"`
-	DerivativeEdges  []derivativeEdgeRow  `json:"derivative_edges,omitempty"`
-	NotRelatedPairs  []notRelatedPairRow  `json:"not_related_pairs,omitempty"`
-	SavedSearches    []savedSearchRow     `json:"saved_searches"`
+	TagCategories    []TagCategoryRow     `json:"tag_categories"`
+	Tags             []TagRow             `json:"tags"`
+	TagImplications  []TagImplicationRow  `json:"tag_implications"`
+	Images           []ImageRow           `json:"images"`
+	ImageCollections []ImageCollectionRow `json:"image_collections,omitempty"`
+	FindRelations    []FindRelationsRow   `json:"collection_find_relations,omitempty"`
+	ImageSources     []ImageSourceRow     `json:"image_sources,omitempty"`
+	ImageAnnotations []ImageAnnotationRow `json:"image_annotations,omitempty"`
+	ImagePaths       []ImagePathRow       `json:"image_paths"`
+	ImageTags        []ImageTagRow        `json:"image_tags"`
+	SDMetadata       []SDMetadataRow      `json:"sd_metadata"`
+	ComfyUIMetadata  []ComfyMetadataRow   `json:"comfyui_metadata"`
+	MangaMetadata    []MangaMetadataRow   `json:"manga_metadata,omitempty"`
+	DupGroups        []DupGroupRow        `json:"dup_groups,omitempty"`
+	DupGroupMembers  []DupGroupMemberRow  `json:"dup_group_members,omitempty"`
+	AltGroups        []AltGroupRow        `json:"alt_groups,omitempty"`
+	AltGroupMembers  []AltGroupMemberRow  `json:"alt_group_members,omitempty"`
+	VersionEdges     []VersionEdgeRow     `json:"version_edges,omitempty"`
+	DerivativeEdges  []DerivativeEdgeRow  `json:"derivative_edges,omitempty"`
+	NotRelatedPairs  []NotRelatedPairRow  `json:"not_related_pairs,omitempty"`
+	SavedSearches    []SavedSearchRow     `json:"saved_searches"`
+	ImageLookups     []ImageLookupRow     `json:"image_lookups,omitempty"`
 }
 
-type tagCategoryRow struct {
+type TagCategoryRow struct {
 	ID        int64  `json:"id"`
 	Name      string `json:"name"`
 	Color     string `json:"color"`
 	IsBuiltin int    `json:"is_builtin"`
 }
 
-type tagRow struct {
+type TagRow struct {
 	ID             int64          `json:"id"`
 	Name           string         `json:"name"`
 	CategoryID     int64          `json:"category_id"`
@@ -125,9 +128,10 @@ type tagRow struct {
 	CreatedAt      string         `json:"created_at"`
 	Origin         string         `json:"origin"`
 	LastUsedAt     sql.NullString `json:"last_used_at"`
+	Stale          int            `json:"stale,omitempty"`
 }
 
-type imageRow struct {
+type ImageRow struct {
 	ID              int64           `json:"id"`
 	SHA256          string          `json:"sha256"`
 	MD5             string          `json:"md5,omitempty"`
@@ -151,16 +155,42 @@ type imageRow struct {
 	SeriesOrder     sql.NullInt64   `json:"collection_order,omitempty"`
 	Note            string          `json:"note,omitempty"`
 	OriginalSource  string          `json:"original_source,omitempty"`
+	Phash           sql.NullInt64   `json:"phash,omitempty"`
+	LastReadPage    sql.NullInt64   `json:"last_read_page,omitempty"`
+	UploadBatch     sql.NullInt64   `json:"upload_batch,omitempty"`
 	IngestedAt      string          `json:"ingested_at"`
+	// The two scheduled-lookup opt-ins default to 1 in the schema, so a
+	// pre-v10 document decoding to 0 would silently opt every imported
+	// image out; loadExportIntoDB restores the default for those.
+	ScheduledLookup    int `json:"scheduled_lookup"`
+	ScheduledLookupPTR int `json:"scheduled_lookup_ptr"`
 }
 
-type imageCollectionRow struct {
+// FindRelationsRow is one opted-in collection label; absence is the
+// default, so the table only ever holds the operator's opt-ins.
+type FindRelationsRow struct {
+	Name string `json:"name"`
+}
+
+type ImageLookupRow struct {
+	ImageID    int64          `json:"image_id"`
+	Backend    string         `json:"backend"`
+	Attempts   int            `json:"attempts"`
+	QueuedAt   sql.NullString `json:"queued_at"`
+	JobID      sql.NullInt64  `json:"job_id"`
+	LastAt     sql.NullString `json:"last_at"`
+	LastResult string         `json:"last_result"`
+	NextDueAt  sql.NullString `json:"next_due_at"`
+	PTRCursor  sql.NullInt64  `json:"ptr_cursor"`
+}
+
+type ImageCollectionRow struct {
 	ImageID  int64         `json:"image_id"`
 	Name     string        `json:"name"`
 	Position sql.NullInt64 `json:"position"`
 }
 
-type imageSourceRow struct {
+type ImageSourceRow struct {
 	ImageID     int64   `json:"image_id"`
 	Site        string  `json:"site"`
 	PostID      string  `json:"post_id"`
@@ -179,7 +209,7 @@ type imageSourceRow struct {
 	FetchedAt   string  `json:"fetched_at"`
 }
 
-type imageAnnotationRow struct {
+type ImageAnnotationRow struct {
 	ImageID   int64  `json:"image_id"`
 	Site      string `json:"site"`
 	PostID    string `json:"post_id"`
@@ -192,14 +222,16 @@ type imageAnnotationRow struct {
 	FetchedAt string `json:"fetched_at"`
 }
 
-type imagePathRow struct {
+type ImagePathRow struct {
 	ID          int64  `json:"id"`
 	ImageID     int64  `json:"image_id"`
 	Path        string `json:"path"`
 	IsCanonical int    `json:"is_canonical"`
+	MtimeUnix   int64  `json:"mtime_unix,omitempty"`
+	MtimeNsec   int64  `json:"mtime_nsec,omitempty"`
 }
 
-type imageTagRow struct {
+type ImageTagRow struct {
 	ImageID    int64           `json:"image_id"`
 	TagID      int64           `json:"tag_id"`
 	IsAuto     int             `json:"is_auto"`
@@ -207,16 +239,18 @@ type imageTagRow struct {
 	Confidence sql.NullFloat64 `json:"confidence"`
 	TaggerName sql.NullString  `json:"tagger_name"`
 	CreatedAt  string          `json:"created_at"`
+	Stale      int             `json:"stale,omitempty"`
 }
 
-type tagImplicationRow struct {
+type TagImplicationRow struct {
 	ParentTagID  int64  `json:"parent_tag_id"`
 	ImpliedTagID int64  `json:"implied_tag_id"`
 	CreatedAt    string `json:"created_at"`
 	Origin       string `json:"origin"`
+	Stale        int    `json:"stale,omitempty"`
 }
 
-type sdMetadataRow struct {
+type SDMetadataRow struct {
 	ImageID        int64           `json:"image_id"`
 	Prompt         sql.NullString  `json:"prompt"`
 	NegativePrompt sql.NullString  `json:"negative_prompt"`
@@ -229,7 +263,7 @@ type sdMetadataRow struct {
 	GenerationHash sql.NullString  `json:"generation_hash"`
 }
 
-type comfyMetadataRow struct {
+type ComfyMetadataRow struct {
 	ImageID         int64           `json:"image_id"`
 	Prompt          sql.NullString  `json:"prompt"`
 	ModelCheckpoint sql.NullString  `json:"model_checkpoint"`
@@ -241,7 +275,7 @@ type comfyMetadataRow struct {
 	GenerationHash  sql.NullString  `json:"generation_hash"`
 }
 
-type mangaMetadataRow struct {
+type MangaMetadataRow struct {
 	ImageID         int64           `json:"image_id"`
 	Title           sql.NullString  `json:"title"`
 	Series          sql.NullString  `json:"series"`
@@ -273,7 +307,7 @@ type mangaMetadataRow struct {
 	RawXML          sql.NullString  `json:"raw_xml"`
 }
 
-type savedSearchRow struct {
+type SavedSearchRow struct {
 	ID        int64  `json:"id"`
 	Name      string `json:"name"`
 	Query     string `json:"query"`
@@ -283,42 +317,42 @@ type savedSearchRow struct {
 	CreatedAt string `json:"created_at"`
 }
 
-type dupGroupRow struct {
+type DupGroupRow struct {
 	ID              int64  `json:"id"`
 	OriginalImageID int64  `json:"original_image_id"`
 	CreatedAt       string `json:"created_at"`
 }
 
-type dupGroupMemberRow struct {
+type DupGroupMemberRow struct {
 	ImageID   int64  `json:"image_id"`
 	GroupID   int64  `json:"group_id"`
 	CreatedAt string `json:"created_at"`
 }
 
-type altGroupRow struct {
+type AltGroupRow struct {
 	ID        int64  `json:"id"`
 	CreatedAt string `json:"created_at"`
 }
 
-type altGroupMemberRow struct {
+type AltGroupMemberRow struct {
 	ImageID   int64  `json:"image_id"`
 	GroupID   int64  `json:"group_id"`
 	CreatedAt string `json:"created_at"`
 }
 
-type versionEdgeRow struct {
+type VersionEdgeRow struct {
 	ChildImageID  int64  `json:"child_image_id"`
 	ParentImageID int64  `json:"parent_image_id"`
 	CreatedAt     string `json:"created_at"`
 }
 
-type derivativeEdgeRow struct {
+type DerivativeEdgeRow struct {
 	DerivativeImageID int64  `json:"derivative_image_id"`
 	SourceImageID     int64  `json:"source_image_id"`
 	CreatedAt         string `json:"created_at"`
 }
 
-type notRelatedPairRow struct {
+type NotRelatedPairRow struct {
 	AImageID  int64  `json:"a_image_id"`
 	BImageID  int64  `json:"b_image_id"`
 	CreatedAt string `json:"created_at"`
@@ -327,11 +361,7 @@ type notRelatedPairRow struct {
 // ExportGalleryDB produces a clean, WAL-consolidated SQLite snapshot via
 // VACUUM INTO and streams it to w. Safe to call while the source gallery is
 // being read/written; VACUUM INTO sees a consistent point-in-time view.
-func (s *Server) ExportGalleryDB(name string, w io.Writer) error {
-	cx := s.Get(name)
-	if cx == nil {
-		return fmt.Errorf("unknown gallery %q", name)
-	}
+func ExportGalleryDB(cx gallery.Handle, w io.Writer) error {
 	tmp, err := os.CreateTemp(filepath.Dir(cx.DBPath), "export-*.db")
 	if err != nil {
 		return fmt.Errorf("create temp: %w", err)
@@ -355,92 +385,75 @@ func (s *Server) ExportGalleryDB(name string, w io.Writer) error {
 // ExportGalleryJSON streams every table of the gallery as a single JSON
 // document. Streams array-by-array so memory stays proportional to the
 // largest single table (image_tags on a big library).
-func (s *Server) ExportGalleryJSON(name string, w io.Writer) error {
-	cx := s.Get(name)
-	if cx == nil {
-		return fmt.Errorf("unknown gallery %q", name)
-	}
+func ExportGalleryJSON(cx gallery.Handle, w io.Writer) error {
 
 	bw := newJSONWriter(w)
 	bw.objStart()
-	bw.field("version", galleryExportVersion)
+	bw.field("version", ExportVersion)
 	bw.field("gallery_name", cx.Name)
 	bw.field("gallery_path", cx.GalleryPath)
 
 	streamRows(bw, "tag_categories", cx.DB,
 		`SELECT id, name, color, is_builtin FROM tag_categories ORDER BY id`,
-		func(rows *sql.Rows) (any, error) {
-			var r tagCategoryRow
-			err := rows.Scan(&r.ID, &r.Name, &r.Color, &r.IsBuiltin)
-			return r, err
-		})
+		scanRow(func(r *TagCategoryRow) []any { return []any{&r.ID, &r.Name, &r.Color, &r.IsBuiltin} }))
 	streamRows(bw, "tags", cx.DB,
-		`SELECT id, name, category_id, usage_count, is_alias, canonical_tag_id, created_at, origin, last_used_at FROM tags ORDER BY id`,
-		func(rows *sql.Rows) (any, error) {
-			var r tagRow
-			err := rows.Scan(&r.ID, &r.Name, &r.CategoryID, &r.UsageCount, &r.IsAlias, &r.CanonicalTagID, &r.CreatedAt, &r.Origin, &r.LastUsedAt)
-			return r, err
-		})
+		`SELECT id, name, category_id, usage_count, is_alias, canonical_tag_id, created_at, origin, last_used_at, stale FROM tags ORDER BY id`,
+		scanRow(func(r *TagRow) []any {
+			return []any{&r.ID, &r.Name, &r.CategoryID, &r.UsageCount, &r.IsAlias, &r.CanonicalTagID, &r.CreatedAt, &r.Origin, &r.LastUsedAt, &r.Stale}
+		}))
 	streamRows(bw, "tag_implications", cx.DB,
-		`SELECT parent_tag_id, implied_tag_id, created_at, origin FROM tag_implications ORDER BY parent_tag_id, implied_tag_id`,
-		func(rows *sql.Rows) (any, error) {
-			var r tagImplicationRow
-			err := rows.Scan(&r.ParentTagID, &r.ImpliedTagID, &r.CreatedAt, &r.Origin)
-			return r, err
-		})
+		`SELECT parent_tag_id, implied_tag_id, created_at, origin, stale FROM tag_implications ORDER BY parent_tag_id, implied_tag_id`,
+		scanRow(func(r *TagImplicationRow) []any {
+			return []any{&r.ParentTagID, &r.ImpliedTagID, &r.CreatedAt, &r.Origin, &r.Stale}
+		}))
 	streamRows(bw, "images", cx.DB,
 		`SELECT id, sha256, md5, canonical_path, folder_path, file_type, width, height,
-		        file_size, is_missing, is_favorited, is_inbox, auto_tagged_at, source_type, origin, source, url, page_count, duration_seconds, series, series_order, note, original_source, ingested_at
+		        file_size, is_missing, is_favorited, is_inbox, auto_tagged_at, source_type, origin, source, url, page_count, duration_seconds, series, series_order, note, original_source,
+		        phash, last_read_page, upload_batch, scheduled_lookup, scheduled_lookup_ptr, ingested_at
 		 FROM images ORDER BY id`,
 		func(rows *sql.Rows) (any, error) {
-			var r imageRow
+			var r ImageRow
 			err := rows.Scan(&r.ID, &r.SHA256, &r.MD5, &r.CanonicalPath, &r.FolderPath, &r.FileType,
 				&r.Width, &r.Height, &r.FileSize, &r.IsMissing, &r.IsFavorited, &r.IsInbox,
-				&r.AutoTaggedAt, &r.SourceType, &r.Origin, &r.Source, &r.URL, &r.PageCount, &r.DurationSeconds, &r.Series, &r.SeriesOrder, &r.Note, &r.OriginalSource, &r.IngestedAt)
+				&r.AutoTaggedAt, &r.SourceType, &r.Origin, &r.Source, &r.URL, &r.PageCount, &r.DurationSeconds, &r.Series, &r.SeriesOrder, &r.Note, &r.OriginalSource,
+				&r.Phash, &r.LastReadPage, &r.UploadBatch, &r.ScheduledLookup, &r.ScheduledLookupPTR, &r.IngestedAt)
 			return r, err
 		})
 	streamRows(bw, "image_collections", cx.DB,
 		`SELECT image_id, name, position FROM image_collections ORDER BY image_id, name`,
-		func(rows *sql.Rows) (any, error) {
-			var r imageCollectionRow
-			err := rows.Scan(&r.ImageID, &r.Name, &r.Position)
-			return r, err
-		})
+		scanRow(func(r *ImageCollectionRow) []any { return []any{&r.ImageID, &r.Name, &r.Position} }))
+	streamRows(bw, "collection_find_relations", cx.DB,
+		`SELECT name FROM collection_find_relations ORDER BY name`,
+		scanRow(func(r *FindRelationsRow) []any { return []any{&r.Name} }))
 	streamRows(bw, "image_sources", cx.DB,
 		`SELECT image_id, site, post_id, url, md5, commentary, original, similarity,
 		        md5_match, parent_url, upgrade_kept, post_width, post_height, post_size, post_ext, fetched_at
 		 FROM image_sources ORDER BY rowid`,
 		func(rows *sql.Rows) (any, error) {
-			var r imageSourceRow
+			var r ImageSourceRow
 			err := rows.Scan(&r.ImageID, &r.Site, &r.PostID, &r.URL, &r.MD5, &r.Commentary, &r.Original, &r.Similarity,
 				&r.MD5Match, &r.ParentURL, &r.UpgradeKept, &r.PostWidth, &r.PostHeight, &r.PostSize, &r.PostExt, &r.FetchedAt)
 			return r, err
 		})
 	streamRows(bw, "image_annotations", cx.DB,
 		`SELECT image_id, site, post_id, x, y, w, h, body, manual, fetched_at FROM image_annotations ORDER BY id`,
-		func(rows *sql.Rows) (any, error) {
-			var r imageAnnotationRow
-			err := rows.Scan(&r.ImageID, &r.Site, &r.PostID, &r.X, &r.Y, &r.W, &r.H, &r.Body, &r.Manual, &r.FetchedAt)
-			return r, err
-		})
+		scanRow(func(r *ImageAnnotationRow) []any {
+			return []any{&r.ImageID, &r.Site, &r.PostID, &r.X, &r.Y, &r.W, &r.H, &r.Body, &r.Manual, &r.FetchedAt}
+		}))
 	streamRows(bw, "image_paths", cx.DB,
-		`SELECT id, image_id, path, is_canonical FROM image_paths ORDER BY id`,
-		func(rows *sql.Rows) (any, error) {
-			var r imagePathRow
-			err := rows.Scan(&r.ID, &r.ImageID, &r.Path, &r.IsCanonical)
-			return r, err
-		})
+		`SELECT id, image_id, path, is_canonical, mtime_unix, mtime_nsec FROM image_paths ORDER BY id`,
+		scanRow(func(r *ImagePathRow) []any {
+			return []any{&r.ID, &r.ImageID, &r.Path, &r.IsCanonical, &r.MtimeUnix, &r.MtimeNsec}
+		}))
 	streamRows(bw, "image_tags", cx.DB,
-		`SELECT image_id, tag_id, is_auto, is_implied, confidence, tagger_name, created_at FROM image_tags`,
-		func(rows *sql.Rows) (any, error) {
-			var r imageTagRow
-			err := rows.Scan(&r.ImageID, &r.TagID, &r.IsAuto, &r.IsImplied, &r.Confidence, &r.TaggerName, &r.CreatedAt)
-			return r, err
-		})
+		`SELECT image_id, tag_id, is_auto, is_implied, confidence, tagger_name, created_at, stale FROM image_tags`,
+		scanRow(func(r *ImageTagRow) []any {
+			return []any{&r.ImageID, &r.TagID, &r.IsAuto, &r.IsImplied, &r.Confidence, &r.TaggerName, &r.CreatedAt, &r.Stale}
+		}))
 	streamRows(bw, "sd_metadata", cx.DB,
 		`SELECT image_id, prompt, negative_prompt, model, seed, sampler, steps, cfg_scale, raw_params, generation_hash FROM sd_metadata`,
 		func(rows *sql.Rows) (any, error) {
-			var r sdMetadataRow
+			var r SDMetadataRow
 			err := rows.Scan(&r.ImageID, &r.Prompt, &r.NegativePrompt, &r.Model, &r.Seed,
 				&r.Sampler, &r.Steps, &r.CFGScale, &r.RawParams, &r.GenerationHash)
 			return r, err
@@ -448,7 +461,7 @@ func (s *Server) ExportGalleryJSON(name string, w io.Writer) error {
 	streamRows(bw, "comfyui_metadata", cx.DB,
 		`SELECT image_id, prompt, model_checkpoint, seed, sampler, steps, cfg_scale, raw_workflow, generation_hash FROM comfyui_metadata`,
 		func(rows *sql.Rows) (any, error) {
-			var r comfyMetadataRow
+			var r ComfyMetadataRow
 			err := rows.Scan(&r.ImageID, &r.Prompt, &r.ModelCheckpoint, &r.Seed,
 				&r.Sampler, &r.Steps, &r.CFGScale, &r.RawWorkflow, &r.GenerationHash)
 			return r, err
@@ -459,7 +472,7 @@ func (s *Server) ExportGalleryJSON(name string, w io.Writer) error {
 		        imprint, genre, web, language_iso, format, manga, age_rating, community_rating, xml_page_count, raw_xml
 		 FROM manga_metadata`,
 		func(rows *sql.Rows) (any, error) {
-			var r mangaMetadataRow
+			var r MangaMetadataRow
 			err := rows.Scan(&r.ImageID, &r.Title, &r.Series, &r.Number, &r.Volume, &r.Count, &r.Summary, &r.Notes,
 				&r.Year, &r.Month, &r.Day, &r.Writer, &r.Penciller, &r.Inker, &r.Colorist, &r.Letterer, &r.CoverArtist,
 				&r.Editor, &r.Publisher, &r.Imprint, &r.Genre, &r.Web, &r.LanguageISO, &r.Format, &r.Manga, &r.AgeRating,
@@ -468,60 +481,36 @@ func (s *Server) ExportGalleryJSON(name string, w io.Writer) error {
 		})
 	streamRows(bw, "dup_groups", cx.DB,
 		`SELECT id, original_image_id, created_at FROM dup_groups ORDER BY id`,
-		func(rows *sql.Rows) (any, error) {
-			var r dupGroupRow
-			err := rows.Scan(&r.ID, &r.OriginalImageID, &r.CreatedAt)
-			return r, err
-		})
+		scanRow(func(r *DupGroupRow) []any { return []any{&r.ID, &r.OriginalImageID, &r.CreatedAt} }))
 	streamRows(bw, "dup_group_members", cx.DB,
 		`SELECT image_id, group_id, created_at FROM dup_group_members ORDER BY image_id`,
-		func(rows *sql.Rows) (any, error) {
-			var r dupGroupMemberRow
-			err := rows.Scan(&r.ImageID, &r.GroupID, &r.CreatedAt)
-			return r, err
-		})
+		scanRow(func(r *DupGroupMemberRow) []any { return []any{&r.ImageID, &r.GroupID, &r.CreatedAt} }))
 	streamRows(bw, "alt_groups", cx.DB,
 		`SELECT id, created_at FROM alt_groups ORDER BY id`,
-		func(rows *sql.Rows) (any, error) {
-			var r altGroupRow
-			err := rows.Scan(&r.ID, &r.CreatedAt)
-			return r, err
-		})
+		scanRow(func(r *AltGroupRow) []any { return []any{&r.ID, &r.CreatedAt} }))
 	streamRows(bw, "alt_group_members", cx.DB,
 		`SELECT image_id, group_id, created_at FROM alt_group_members ORDER BY image_id`,
-		func(rows *sql.Rows) (any, error) {
-			var r altGroupMemberRow
-			err := rows.Scan(&r.ImageID, &r.GroupID, &r.CreatedAt)
-			return r, err
-		})
+		scanRow(func(r *AltGroupMemberRow) []any { return []any{&r.ImageID, &r.GroupID, &r.CreatedAt} }))
 	streamRows(bw, "version_edges", cx.DB,
 		`SELECT child_image_id, parent_image_id, created_at FROM version_edges ORDER BY child_image_id`,
-		func(rows *sql.Rows) (any, error) {
-			var r versionEdgeRow
-			err := rows.Scan(&r.ChildImageID, &r.ParentImageID, &r.CreatedAt)
-			return r, err
-		})
+		scanRow(func(r *VersionEdgeRow) []any { return []any{&r.ChildImageID, &r.ParentImageID, &r.CreatedAt} }))
 	streamRows(bw, "derivative_edges", cx.DB,
 		`SELECT derivative_image_id, source_image_id, created_at FROM derivative_edges ORDER BY derivative_image_id`,
-		func(rows *sql.Rows) (any, error) {
-			var r derivativeEdgeRow
-			err := rows.Scan(&r.DerivativeImageID, &r.SourceImageID, &r.CreatedAt)
-			return r, err
-		})
+		scanRow(func(r *DerivativeEdgeRow) []any { return []any{&r.DerivativeImageID, &r.SourceImageID, &r.CreatedAt} }))
 	streamRows(bw, "not_related_pairs", cx.DB,
 		`SELECT a_image_id, b_image_id, created_at FROM not_related_pairs ORDER BY a_image_id, b_image_id`,
-		func(rows *sql.Rows) (any, error) {
-			var r notRelatedPairRow
-			err := rows.Scan(&r.AImageID, &r.BImageID, &r.CreatedAt)
-			return r, err
-		})
+		scanRow(func(r *NotRelatedPairRow) []any { return []any{&r.AImageID, &r.BImageID, &r.CreatedAt} }))
 	streamRows(bw, "saved_searches", cx.DB,
 		`SELECT id, name, query, sort, sort_order, seed, created_at FROM saved_searches ORDER BY id`,
-		func(rows *sql.Rows) (any, error) {
-			var r savedSearchRow
-			err := rows.Scan(&r.ID, &r.Name, &r.Query, &r.Sort, &r.Order, &r.Seed, &r.CreatedAt)
-			return r, err
-		})
+		scanRow(func(r *SavedSearchRow) []any {
+			return []any{&r.ID, &r.Name, &r.Query, &r.Sort, &r.Order, &r.Seed, &r.CreatedAt}
+		}))
+	streamRows(bw, "image_lookups", cx.DB,
+		`SELECT image_id, backend, attempts, queued_at, job_id, last_at, last_result, next_due_at, ptr_cursor
+		 FROM image_lookups ORDER BY image_id, backend`,
+		scanRow(func(r *ImageLookupRow) []any {
+			return []any{&r.ImageID, &r.Backend, &r.Attempts, &r.QueuedAt, &r.JobID, &r.LastAt, &r.LastResult, &r.NextDueAt, &r.PTRCursor}
+		}))
 	bw.objEnd()
 	return bw.err
 }
@@ -530,11 +519,7 @@ func (s *Server) ExportGalleryJSON(name string, w io.Writer) error {
 // source file under the gallery root into a ZIP archive. The inner DB/JSON
 // file is at the root; images live under `gallery/<relative_path>` so an
 // import restores them into the same subfolder layout.
-func (s *Server) ExportGalleryArchive(name, format string, w io.Writer) error {
-	cx := s.Get(name)
-	if cx == nil {
-		return fmt.Errorf("unknown gallery %q", name)
-	}
+func ExportGalleryArchive(cx gallery.Handle, format string, w io.Writer) error {
 	zw := zip.NewWriter(w)
 	defer func() { _ = zw.Close() }()
 
@@ -555,11 +540,11 @@ func (s *Server) ExportGalleryArchive(name, format string, w io.Writer) error {
 	}
 	switch format {
 	case "db":
-		if err := s.ExportGalleryDB(name, inner); err != nil {
+		if err := ExportGalleryDB(cx, inner); err != nil {
 			return err
 		}
 	case "json":
-		if err := s.ExportGalleryJSON(name, inner); err != nil {
+		if err := ExportGalleryJSON(cx, inner); err != nil {
 			return err
 		}
 	}
@@ -613,112 +598,11 @@ func writeGalleryFilesToZip(zw *zip.Writer, galleryPath string) error {
 	})
 }
 
-// ImportGallery replaces the target gallery's database (and optionally its
-// source files) with the contents of the uploaded archive/file. Destructive;
-// the caller's UI is responsible for confirming intent.
-//
-// format is one of "db", "json", "zip". For "zip" the inner format is detected
-// from the archive. importOver is rejected when the target is the active or
-// default gallery (mirrors RemoveGallery's guard).
-func (s *Server) ImportGallery(name, format string, upload io.Reader) error {
-	if s.jobs.IsRunning() {
-		return errJobRunning
-	}
-
-	s.ctxMu.Lock()
-	cx, ok := s.contexts[name]
-	if !ok {
-		s.ctxMu.Unlock()
-		return fmt.Errorf("unknown gallery %q", name)
-	}
-	if name == s.activeName {
-		s.ctxMu.Unlock()
-		return fmt.Errorf("cannot import over the active gallery; switch to another first")
-	}
-	s.cfgMu.RLock()
-	isDefault := name == s.cfg.DefaultGallery
-	s.cfgMu.RUnlock()
-	if isDefault {
-		s.ctxMu.Unlock()
-		return fmt.Errorf("cannot import over the default gallery; set another as default first")
-	}
-
-	galleryPath := cx.GalleryPath
-	dbPath := cx.DBPath
-	thumbsPath := cx.ThumbnailsPath
-	dataDir := filepath.Dir(dbPath)
-
-	// Buffer the upload to a temp file on the same filesystem as the data
-	// directory so the later rename is atomic. The upload may be a multi-GB
-	// zip; we cannot keep it in RAM.
-	tmp, err := os.CreateTemp(dataDir, "import-*.upload")
-	if err != nil {
-		s.ctxMu.Unlock()
-		return fmt.Errorf("create temp: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() { _ = os.Remove(tmpPath) }()
-	if _, err := io.Copy(tmp, upload); err != nil {
-		_ = tmp.Close()
-		s.ctxMu.Unlock()
-		return fmt.Errorf("buffer upload: %w", err)
-	}
-	_ = tmp.Close()
-
-	// Close the target DB and stop its watcher before touching on-disk state.
-	cx.close()
-
-	applyErr := applyImport(format, tmpPath, dbPath, thumbsPath, galleryPath, s.maxFileSizeMB())
-
-	// Reopen regardless so we leave the gallery usable even after a failed import.
-	newCx, openErr := openGalleryCtx(config.Gallery{
-		Name: name, GalleryPath: galleryPath, DBPath: dbPath, ThumbnailsPath: thumbsPath,
-	})
-	if openErr != nil {
-		s.ctxMu.Unlock()
-		if applyErr != nil {
-			return fmt.Errorf("import failed: %w (reopen also failed: %v)", applyErr, openErr)
-		}
-		return fmt.Errorf("reopen gallery: %w", openErr)
-	}
-	s.contexts[name] = newCx
-	watch, maxMB := s.watcherSettings()
-	newCx.startWatcher(watch, maxMB, s.ingestNaming(newCx.Name), s.jobs)
-	s.ctxMu.Unlock()
-
-	go newCx.warmCaches()
-
-	if applyErr != nil {
-		return applyErr
-	}
-	logx.Infof("gallery: imported %q (format=%s)", name, format)
-
-	// Make the imported gallery active before queuing the rebuild-thumbs job.
-	// Otherwise the job-manager lock the rebuild takes would keep SwitchGallery
-	// blocked for the duration of the rebuild, leaving the user pinned to
-	// whatever gallery they had active at Import time. Failures here are
-	// non-fatal: the import already succeeded and a failed switch just leaves
-	// the previous gallery active.
-	if err := s.SwitchGallery(name); err != nil {
-		logx.Infof("gallery %q: post-import switch skipped: %v", name, err)
-	}
-
-	// Import wiped the thumbnails directory as part of the swap, so the newly
-	// installed DB now references images that have no thumbnail on disk.
-	// Queue a rebuild so the user doesn't have to reach for Maintenance →
-	// Rebuild thumbnails manually. Non-fatal: import already succeeded; a
-	// concurrent job or empty gallery just skips the kickoff.
-	if err := s.startRebuildThumbsJob(newCx); err != nil {
-		logx.Infof("gallery %q: skipped post-import rebuild: %v", name, err)
-	}
-	return nil
-}
-
-// applyImport runs the destructive file-system work outside ctxMu so the
+// ApplyImport runs the destructive file-system work outside ctxMu so the
 // caller can defer lock release around it. Kept as a package function so the
 // early-return error paths are linear. maxFileSizeMB caps each archive
 // entry's decompressed size; <= 0 disables the cap.
-func applyImport(format, tmpPath, dbPath, thumbsPath, galleryPath string, maxFileSizeMB int) error {
+func ApplyImport(format, tmpPath, dbPath, thumbsPath, galleryPath string, maxFileSizeMB int) error {
 	switch format {
 	case "db":
 		return replaceDBFromFile(tmpPath, dbPath, thumbsPath, galleryPath)
@@ -951,7 +835,7 @@ func replaceDBFromJSON(srcPath, dbPath, thumbsPath, galleryPath string) error {
 		return fmt.Errorf("open json: %w", err)
 	}
 	defer func() { _ = f.Close() }()
-	exp, err := decodeGalleryExport(f)
+	exp, err := DecodeExport(f)
 	if err != nil {
 		return err
 	}
@@ -1091,7 +975,7 @@ func replaceFromArchive(srcPath, dbPath, thumbsPath, galleryPath string, maxFile
 	}
 	for _, f := range galleryFiles {
 		rel := strings.TrimPrefix(f.Name, "gallery/")
-		dst, err := safeArchiveDest(galleryPath, rel)
+		dst, err := SafeArchiveDest(galleryPath, rel)
 		if err != nil {
 			return fmt.Errorf("rejecting archive entry %q: %w", f.Name, err)
 		}
@@ -1370,6 +1254,18 @@ func validateSQLiteFile(path string) error {
 	return nil
 }
 
+// scanRow is insertAll's mirror on the read side: one row type, one field
+// list, and the Scan / return dance the export's streamRows calls would
+// otherwise each spell out. Having both sides read the same way is what
+// makes a column-list drift between them visible.
+func scanRow[T any](fields func(*T) []any) func(*sql.Rows) (any, error) {
+	return func(rows *sql.Rows) (any, error) {
+		var r T
+		err := rows.Scan(fields(&r)...)
+		return r, err
+	}
+}
+
 // insertAll writes one row per element, mapping each to its argument list.
 // label names the table and the first argument names the row, which is what
 // an import failure has to carry: a constraint violation is only actionable
@@ -1387,7 +1283,7 @@ func insertAll[T any](tx *sql.Tx, label, query string, rows []T, args func(T) []
 // loadExportIntoDB reinserts every table from the export document into a
 // freshly-bootstrapped DB. The bootstrap seeds built-in tag_categories; we
 // overwrite their rows so any customized colors round-trip.
-func loadExportIntoDB(database *db.DB, exp galleryExport) error {
+func loadExportIntoDB(database *db.DB, exp Export) error {
 	tx, err := database.Write.Begin()
 	if err != nil {
 		return err
@@ -1451,31 +1347,40 @@ func loadExportIntoDB(database *db.DB, exp galleryExport) error {
 		}
 	}
 	if err := insertAll(tx, "tag",
-		`INSERT INTO tags (id, name, category_id, usage_count, is_alias, canonical_tag_id, created_at, origin, last_used_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		exp.Tags, func(r tagRow) []any {
-			return []any{r.ID, r.Name, r.CategoryID, r.UsageCount, r.IsAlias, r.CanonicalTagID, r.CreatedAt, r.Origin, r.LastUsedAt}
+		`INSERT INTO tags (id, name, category_id, usage_count, is_alias, canonical_tag_id, created_at, origin, last_used_at, stale)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		exp.Tags, func(r TagRow) []any {
+			return []any{r.ID, r.Name, r.CategoryID, r.UsageCount, r.IsAlias, r.CanonicalTagID, r.CreatedAt, r.Origin, r.LastUsedAt, r.Stale}
 		}); err != nil {
 		return err
 	}
 	for _, r := range exp.TagImplications {
 		if _, err := tx.Exec(
-			`INSERT INTO tag_implications (parent_tag_id, implied_tag_id, created_at, origin) VALUES (?, ?, ?, ?)`,
-			r.ParentTagID, r.ImpliedTagID, r.CreatedAt, r.Origin,
+			`INSERT INTO tag_implications (parent_tag_id, implied_tag_id, created_at, origin, stale) VALUES (?, ?, ?, ?, ?)`,
+			r.ParentTagID, r.ImpliedTagID, r.CreatedAt, r.Origin, r.Stale,
 		); err != nil {
 			return fmt.Errorf("insert tag_implication (%d→%d): %w", r.ParentTagID, r.ImpliedTagID, err)
 		}
 	}
-	for _, r := range exp.Images {
-		if _, err := tx.Exec(
-			`INSERT INTO images (id, sha256, md5, canonical_path, folder_path, file_type, width, height,
-			                    file_size, is_missing, is_favorited, is_inbox, auto_tagged_at, source_type, origin, source, url, page_count, duration_seconds, series, series_order, note, original_source, ingested_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			r.ID, r.SHA256, r.MD5, r.CanonicalPath, r.FolderPath, r.FileType, r.Width, r.Height,
-			r.FileSize, r.IsMissing, r.IsFavorited, r.IsInbox, r.AutoTaggedAt, r.SourceType, r.Origin, r.Source, r.URL, r.PageCount, r.DurationSeconds, r.Series, r.SeriesOrder, r.Note, r.OriginalSource, r.IngestedAt,
-		); err != nil {
-			return fmt.Errorf("insert image %d: %w", r.ID, err)
-		}
+	// A pre-v10 document carries no scheduled-lookup opt-in, and the
+	// schema default is on; reading the absent field as 0 would opt every
+	// imported image out of the ladder.
+	preV10 := exp.Version < 10
+	if err := insertAll(tx, "image",
+		`INSERT INTO images (id, sha256, md5, canonical_path, folder_path, file_type, width, height,
+		                    file_size, is_missing, is_favorited, is_inbox, auto_tagged_at, source_type, origin, source, url, page_count, duration_seconds, series, series_order, note, original_source,
+		                    phash, last_read_page, upload_batch, scheduled_lookup, scheduled_lookup_ptr, ingested_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		exp.Images, func(r ImageRow) []any {
+			scheduled, scheduledPTR := r.ScheduledLookup, r.ScheduledLookupPTR
+			if preV10 {
+				scheduled, scheduledPTR = 1, 1
+			}
+			return []any{r.ID, r.SHA256, r.MD5, r.CanonicalPath, r.FolderPath, r.FileType, r.Width, r.Height,
+				r.FileSize, r.IsMissing, r.IsFavorited, r.IsInbox, r.AutoTaggedAt, r.SourceType, r.Origin, r.Source, r.URL, r.PageCount, r.DurationSeconds, r.Series, r.SeriesOrder, r.Note, r.OriginalSource,
+				r.Phash, r.LastReadPage, r.UploadBatch, scheduled, scheduledPTR, r.IngestedAt}
+		}); err != nil {
+		return err
 	}
 	if exp.Version < 3 {
 		// Pre-v3 exports carry no image_collections table; the memberships
@@ -1495,6 +1400,11 @@ func loadExportIntoDB(database *db.DB, exp galleryExport) error {
 			return fmt.Errorf("insert image_collection (%d,%q): %w", r.ImageID, r.Name, err)
 		}
 	}
+	if err := insertAll(tx, "collection_find_relations",
+		`INSERT OR IGNORE INTO collection_find_relations (name) VALUES (?)`,
+		exp.FindRelations, func(r FindRelationsRow) []any { return []any{r.Name} }); err != nil {
+		return err
+	}
 	for _, r := range exp.ImageSources {
 		if _, err := tx.Exec(
 			`INSERT OR IGNORE INTO image_sources (image_id, site, post_id, url, md5, commentary, original, similarity,
@@ -1509,15 +1419,15 @@ func loadExportIntoDB(database *db.DB, exp galleryExport) error {
 	if err := insertAll(tx, "image_annotation (image)",
 		`INSERT INTO image_annotations (image_id, site, post_id, x, y, w, h, body, manual, fetched_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		exp.ImageAnnotations, func(r imageAnnotationRow) []any {
+		exp.ImageAnnotations, func(r ImageAnnotationRow) []any {
 			return []any{r.ImageID, r.Site, r.PostID, r.X, r.Y, r.W, r.H, r.Body, r.Manual, r.FetchedAt}
 		}); err != nil {
 		return err
 	}
 	if err := insertAll(tx, "image_path",
-		`INSERT INTO image_paths (id, image_id, path, is_canonical) VALUES (?, ?, ?, ?)`,
-		exp.ImagePaths, func(r imagePathRow) []any {
-			return []any{r.ID, r.ImageID, r.Path, r.IsCanonical}
+		`INSERT INTO image_paths (id, image_id, path, is_canonical, mtime_unix, mtime_nsec) VALUES (?, ?, ?, ?, ?, ?)`,
+		exp.ImagePaths, func(r ImagePathRow) []any {
+			return []any{r.ID, r.ImageID, r.Path, r.IsCanonical, r.MtimeUnix, r.MtimeNsec}
 		}); err != nil {
 		return err
 	}
@@ -1530,9 +1440,9 @@ func loadExportIntoDB(database *db.DB, exp galleryExport) error {
 			tname = r.TaggerName.String
 		}
 		if _, err := tx.Exec(
-			`INSERT INTO image_tags (image_id, tag_id, is_auto, is_implied, confidence, tagger_name, created_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			r.ImageID, r.TagID, r.IsAuto, r.IsImplied, conf, tname, r.CreatedAt,
+			`INSERT INTO image_tags (image_id, tag_id, is_auto, is_implied, confidence, tagger_name, created_at, stale)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			r.ImageID, r.TagID, r.IsAuto, r.IsImplied, conf, tname, r.CreatedAt, r.Stale,
 		); err != nil {
 			return fmt.Errorf("insert image_tag (%d,%d): %w", r.ImageID, r.TagID, err)
 		}
@@ -1550,7 +1460,7 @@ func loadExportIntoDB(database *db.DB, exp galleryExport) error {
 	if err := insertAll(tx, "sd_metadata",
 		`INSERT INTO sd_metadata (image_id, prompt, negative_prompt, model, seed, sampler, steps, cfg_scale, raw_params, generation_hash)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		exp.SDMetadata, func(r sdMetadataRow) []any {
+		exp.SDMetadata, func(r SDMetadataRow) []any {
 			return []any{r.ImageID, r.Prompt, r.NegativePrompt, r.Model,
 				r.Seed, r.Sampler, r.Steps,
 				r.CFGScale, r.RawParams, r.GenerationHash}
@@ -1560,7 +1470,7 @@ func loadExportIntoDB(database *db.DB, exp galleryExport) error {
 	if err := insertAll(tx, "comfyui_metadata",
 		`INSERT INTO comfyui_metadata (image_id, prompt, model_checkpoint, seed, sampler, steps, cfg_scale, raw_workflow, generation_hash)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		exp.ComfyUIMetadata, func(r comfyMetadataRow) []any {
+		exp.ComfyUIMetadata, func(r ComfyMetadataRow) []any {
 			return []any{r.ImageID, r.Prompt, r.ModelCheckpoint,
 				r.Seed, r.Sampler, r.Steps,
 				r.CFGScale, r.RawWorkflow, r.GenerationHash}
@@ -1572,7 +1482,7 @@ func loadExportIntoDB(database *db.DB, exp galleryExport) error {
 		     year, month, day, writer, penciller, inker, colorist, letterer, cover_artist, editor, publisher,
 		     imprint, genre, web, language_iso, format, manga, age_rating, community_rating, xml_page_count, raw_xml)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		exp.MangaMetadata, func(r mangaMetadataRow) []any {
+		exp.MangaMetadata, func(r MangaMetadataRow) []any {
 			return []any{r.ImageID, r.Title, r.Series, r.Number, r.Volume,
 				r.Count, r.Summary, r.Notes,
 				r.Year, r.Month, r.Day,
@@ -1586,42 +1496,42 @@ func loadExportIntoDB(database *db.DB, exp galleryExport) error {
 	}
 	if err := insertAll(tx, "dup_group",
 		`INSERT INTO dup_groups (id, original_image_id, created_at) VALUES (?, ?, ?)`,
-		exp.DupGroups, func(r dupGroupRow) []any {
+		exp.DupGroups, func(r DupGroupRow) []any {
 			return []any{r.ID, r.OriginalImageID, r.CreatedAt}
 		}); err != nil {
 		return err
 	}
 	if err := insertAll(tx, "dup_group_member",
 		`INSERT INTO dup_group_members (image_id, group_id, created_at) VALUES (?, ?, ?)`,
-		exp.DupGroupMembers, func(r dupGroupMemberRow) []any {
+		exp.DupGroupMembers, func(r DupGroupMemberRow) []any {
 			return []any{r.ImageID, r.GroupID, r.CreatedAt}
 		}); err != nil {
 		return err
 	}
 	if err := insertAll(tx, "alt_group",
 		`INSERT INTO alt_groups (id, created_at) VALUES (?, ?)`,
-		exp.AltGroups, func(r altGroupRow) []any {
+		exp.AltGroups, func(r AltGroupRow) []any {
 			return []any{r.ID, r.CreatedAt}
 		}); err != nil {
 		return err
 	}
 	if err := insertAll(tx, "alt_group_member",
 		`INSERT INTO alt_group_members (image_id, group_id, created_at) VALUES (?, ?, ?)`,
-		exp.AltGroupMembers, func(r altGroupMemberRow) []any {
+		exp.AltGroupMembers, func(r AltGroupMemberRow) []any {
 			return []any{r.ImageID, r.GroupID, r.CreatedAt}
 		}); err != nil {
 		return err
 	}
 	if err := insertAll(tx, "version_edge",
 		`INSERT INTO version_edges (child_image_id, parent_image_id, created_at) VALUES (?, ?, ?)`,
-		exp.VersionEdges, func(r versionEdgeRow) []any {
+		exp.VersionEdges, func(r VersionEdgeRow) []any {
 			return []any{r.ChildImageID, r.ParentImageID, r.CreatedAt}
 		}); err != nil {
 		return err
 	}
 	if err := insertAll(tx, "derivative_edge",
 		`INSERT INTO derivative_edges (derivative_image_id, source_image_id, created_at) VALUES (?, ?, ?)`,
-		exp.DerivativeEdges, func(r derivativeEdgeRow) []any {
+		exp.DerivativeEdges, func(r DerivativeEdgeRow) []any {
 			return []any{r.DerivativeImageID, r.SourceImageID, r.CreatedAt}
 		}); err != nil {
 		return err
@@ -1636,8 +1546,16 @@ func loadExportIntoDB(database *db.DB, exp galleryExport) error {
 	}
 	if err := insertAll(tx, "saved_search",
 		`INSERT INTO saved_searches (id, name, query, sort, sort_order, seed, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		exp.SavedSearches, func(r savedSearchRow) []any {
+		exp.SavedSearches, func(r SavedSearchRow) []any {
 			return []any{r.ID, r.Name, r.Query, r.Sort, r.Order, r.Seed, r.CreatedAt}
+		}); err != nil {
+		return err
+	}
+	if err := insertAll(tx, "image_lookup",
+		`INSERT INTO image_lookups (image_id, backend, attempts, queued_at, job_id, last_at, last_result, next_due_at, ptr_cursor)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		exp.ImageLookups, func(r ImageLookupRow) []any {
+			return []any{r.ImageID, r.Backend, r.Attempts, r.QueuedAt, r.JobID, r.LastAt, r.LastResult, r.NextDueAt, r.PTRCursor}
 		}); err != nil {
 		return err
 	}
@@ -1753,161 +1671,7 @@ func streamRows(j *jsonWriter, key string, database *db.DB, query string, scan f
 	}
 }
 
-// settingsGalleryExport serves GET /settings/galleries/{name}/export?format=&with_images=.
-// Plain GET so the browser saves the response as a file without HTMX wiring.
-func (s *Server) settingsGalleryExport(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
-	withImages := r.URL.Query().Get("with_images") == "true"
-
-	if s.Get(name) == nil {
-		http.Error(w, "unknown gallery", http.StatusNotFound)
-		return
-	}
-	switch format {
-	case "db", "json", "light":
-	default:
-		http.Error(w, "format must be db, json, or light", http.StatusBadRequest)
-		return
-	}
-
-	filename, contentType := exportFilename(name, format, withImages)
-	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
-
-	var err error
-	switch {
-	case format == "light" && withImages:
-		err = s.ExportGalleryLight(name, w)
-	case format == "light":
-		err = s.ExportGalleryLightManifest(name, w)
-	case withImages:
-		err = s.ExportGalleryArchive(name, format, w)
-	case format == "db":
-		err = s.ExportGalleryDB(name, w)
-	case format == "json":
-		err = s.ExportGalleryJSON(name, w)
-	}
-	if err != nil {
-		logx.Warnf("gallery export %q: %v", name, err)
-	}
-}
-
-func exportFilename(name, format string, withImages bool) (string, string) {
-	if format == "light" && withImages {
-		return name + "-light.zip", "application/zip"
-	}
-	if format == "light" {
-		return name + "-light.json", "application/json"
-	}
-	if withImages {
-		return name + ".zip", "application/zip"
-	}
-	switch format {
-	case "db":
-		return name + ".db", "application/vnd.sqlite3"
-	case "json":
-		return name + ".json", "application/json"
-	}
-	return name, "application/octet-stream"
-}
-
-// settingsGalleryImport serves POST /settings/galleries/{name}/import.
-// Expects a multipart form with `mode`, `confirm_name` (replace only),
-// and `file`. The handler reads parts in order with MultipartReader so
-// the type-to-confirm gate runs before the (possibly multi-GB) file
-// part is consumed; this requires the dialog template to put mode and
-// confirm_name fields ahead of the file input. CSRF is validated by
-// the middleware off the X-CSRF-Token header so it never triggers
-// implicit form parsing on this route.
-func (s *Server) settingsGalleryImport(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-
-	const maxImport = 16 << 30 // 16 GiB cap; protects against runaway uploads on a LAN setup.
-	r.Body = http.MaxBytesReader(w, r.Body, maxImport)
-
-	mr, err := r.MultipartReader()
-	if err != nil {
-		writeInlineFlash(w, "err", "expected multipart/form-data")
-		return
-	}
-
-	const maxFieldBytes = 1 << 20 // 1 MiB per form field; values are short
-	fields := map[string]string{}
-	var filePart *multipart.Part
-	var fileFilename string
-	for {
-		part, err := mr.NextPart()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			writeInlineFlash(w, "err", "malformed upload")
-			return
-		}
-		if part.FileName() == "" {
-			body, readErr := io.ReadAll(io.LimitReader(part, maxFieldBytes))
-			_ = part.Close()
-			if readErr != nil {
-				writeInlineFlash(w, "err", "malformed upload")
-				return
-			}
-			fields[part.FormName()] = strings.TrimSpace(string(body))
-			continue
-		}
-		filePart = part
-		fileFilename = part.FileName()
-		break
-	}
-	if filePart == nil {
-		writeInlineFlash(w, "err", "missing file")
-		return
-	}
-	defer func() { _ = filePart.Close() }()
-
-	mode := fields["mode"]
-	mode = cmp.Or(mode, "replace")
-	if mode != "replace" && mode != "merge" {
-		writeInlineFlash(w, "err", "mode must be replace or merge")
-		return
-	}
-	if mode == "replace" {
-		if fields["confirm_name"] != name {
-			writeInlineFlash(w, "err", "type-to-confirm name does not match")
-			return
-		}
-	}
-	format := formatFromExt(fileFilename)
-	if format == "" {
-		writeInlineFlash(w, "err", "file must be .db, .json, or .zip")
-		return
-	}
-
-	if mode == "merge" {
-		if err := s.MergeGallery(name, format, filePart); err != nil {
-			writeInlineFlash(w, "err", err.Error())
-			return
-		}
-		// Mirror the replace path (ImportGallery → SwitchGallery): a merge
-		// brings new images into the target gallery, so the user expects to
-		// land on it. No-op if the target is already active.
-		if err := s.SwitchGallery(name); err != nil {
-			logx.Infof("gallery %q: post-merge switch skipped: %v", name, err)
-		}
-		writeInlineFlash(w, "ok", "Gallery "+name+" merged.")
-		return
-	}
-	if err := s.ImportGallery(name, format, filePart); err != nil {
-		writeInlineFlash(w, "err", err.Error())
-		return
-	}
-	// Write the success flash into #flash-galleries; the dialog's
-	// after-request hook detects the flash-ok, closes the modal, and
-	// triggers a reload so the newly-active gallery badge shows.
-	writeInlineFlash(w, "ok", "Gallery "+name+" imported. Rebuilding thumbnails in the background.")
-}
-
-func formatFromExt(filename string) string {
+func FormatFromExt(filename string) string {
 	switch strings.ToLower(filepath.Ext(filename)) {
 	case ".db", ".sqlite":
 		return "db"

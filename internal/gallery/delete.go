@@ -84,27 +84,39 @@ func DeleteImage(database *db.DB, galleryPath, thumbnailsPath string, id int64, 
 	return result, nil
 }
 
+// AliasCopy is one non-canonical copy of an image and the size the row's
+// bytes have. Sha-dedup folded them onto one row, so every copy is the
+// same length; a path whose file was replaced while nothing was watching
+// is not, and that is what the size tells apart.
+type AliasCopy struct {
+	Path string
+	Size int64
+}
+
 // AliasPathsFor reads each id's non-canonical copies on disk. Callers read
 // them before the rows go: image_paths cascades with images.
-func AliasPathsFor(q db.Querier, ids []int64) (map[int64][]string, error) {
+func AliasPathsFor(q db.Querier, ids []int64) (map[int64][]AliasCopy, error) {
 	placeholders, args := db.InPlaceholders(ids)
 	if placeholders == "" {
 		return nil, nil
 	}
 	rows, err := q.Query(
-		`SELECT image_id, path FROM image_paths WHERE is_canonical = 0 AND image_id IN (`+placeholders+`)`, args...)
+		`SELECT ip.image_id, ip.path, i.file_size
+		   FROM image_paths ip
+		   JOIN images i ON i.id = ip.image_id
+		  WHERE ip.is_canonical = 0 AND ip.image_id IN (`+placeholders+`)`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
-	out := map[int64][]string{}
+	out := map[int64][]AliasCopy{}
 	for rows.Next() {
 		var id int64
-		var path string
-		if err := rows.Scan(&id, &path); err != nil {
+		var c AliasCopy
+		if err := rows.Scan(&id, &c.Path, &c.Size); err != nil {
 			return nil, err
 		}
-		out[id] = append(out[id], path)
+		out[id] = append(out[id], c)
 	}
 	return out, rows.Err()
 }
@@ -113,9 +125,21 @@ func AliasPathsFor(q db.Querier, ids []int64) (map[int64][]string, error) {
 // go with the image: once the row is gone nothing in the database names
 // them, the duplicates walker cannot surface them, and the next sync
 // ingests one as a new image with none of the tagging that was on it.
-func UnlinkAliasFiles(galleryPath string, id int64, paths []string) {
-	for _, p := range paths {
-		UnlinkImageFile(galleryPath, p, id)
+//
+// A copy whose file is no longer the row's length is left where it is.
+// With the watcher off, an overwrite at a recorded path survives until a
+// sync, and pruneStaleAliasPaths only drops rows whose file is gone - so
+// without the check the delete takes a file belonging to some other,
+// untracked image, and unlike the duplicates walker nothing showed the
+// operator the second path.
+func UnlinkAliasFiles(galleryPath string, id int64, copies []AliasCopy) {
+	for _, c := range copies {
+		if info, err := os.Stat(c.Path); err == nil && info.Size() != c.Size {
+			logx.Warnf("delete image %d: %q holds %d bytes, not the row's %d - left alone",
+				id, c.Path, info.Size(), c.Size)
+			continue
+		}
+		UnlinkImageFile(galleryPath, c.Path, id)
 	}
 }
 

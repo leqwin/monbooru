@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/monbooru/monbooru/internal/config"
+	"github.com/monbooru/monbooru/internal/galleryio"
 	"github.com/monbooru/monbooru/internal/logx"
 )
 
@@ -390,7 +391,7 @@ func (s *Server) settingsGalleriesPost(w http.ResponseWriter, r *http.Request) {
 		writeInlineFlash(w, "ok", "Gallery "+name+" added and now active.")
 		return
 	}
-	format := formatFromExt(fh.Filename)
+	format := galleryio.FormatFromExt(fh.Filename)
 	if format == "" {
 		writeInlineFlash(w, "err", "Gallery created. Import failed: file must be .db, .json, or .zip.")
 		return

@@ -301,6 +301,13 @@ func (s *Server) renderTagListWithSidebar(w http.ResponseWriter, r *http.Request
 		}
 	}
 	back := parseBackContext(r)
+	// The footer's tally is a per-render snapshot everywhere else; here
+	// the swap that lands the tag can move it, so it rides along. The
+	// callers invalidate before rendering, so this reads post-write.
+	tagCount := 0
+	if cx := s.Active(); cx != nil {
+		tagCount, _ = cx.TagCount()
+	}
 	var canonicalPath string
 	_ = s.db().Read.QueryRow(`SELECT canonical_path FROM images WHERE id = ?`, id).Scan(&canonicalPath)
 	filename := ""
@@ -332,6 +339,7 @@ func (s *Server) renderTagListWithSidebar(w http.ResponseWriter, r *http.Request
 		"ClearInput":       clearInput,
 		"CurrentFolder":    folderPath,
 		"Filename":         filename,
+		"TagCount":         tagCount,
 	})
 }
 
@@ -521,11 +529,8 @@ func joinLabeled(label, sep string, items []string) string {
 }
 
 func (s *Server) changeTagCategory(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathInt64(w, r, "id")
+	id, ok := idAndForm(w, r)
 	if !ok {
-		return
-	}
-	if !parseFormOK(w, r) {
 		return
 	}
 	catIDStr := r.FormValue("category_id")

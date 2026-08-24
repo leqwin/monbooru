@@ -513,10 +513,7 @@ func versionActionMap(self int64, rels *relations.ImageRelations) map[int64]stri
 // recomputePhashPost recomputes phash for the named image. Hooked from
 // the detail-page [backfill] chip when images.phash is NULL.
 func (s *Server) recomputePhashPost(w http.ResponseWriter, r *http.Request) {
-	if !parseFormOK(w, r) {
-		return
-	}
-	id, ok := pathInt64(w, r, "id")
+	id, ok := idAndForm(w, r)
 	if !ok {
 		return
 	}
@@ -536,6 +533,21 @@ func (s *Server) recomputePhashPost(w http.ResponseWriter, r *http.Request) {
 	hxDone(w, r, "phash recomputed.", "", "/images/"+strconv.FormatInt(id, 10))
 }
 
+// relationsForm parses the form and resolves the active gallery's
+// relations service, writing the 400 / 503 and reporting false. Every
+// mutating relations POST opens this way and has no other early exit.
+func (s *Server) relationsForm(w http.ResponseWriter, r *http.Request) (*galleryCtx, bool) {
+	if !parseFormOK(w, r) {
+		return nil, false
+	}
+	cx := s.Active()
+	if cx == nil || cx.RelationsSvc == nil {
+		http.Error(w, "no gallery", http.StatusServiceUnavailable)
+		return nil, false
+	}
+	return cx, true
+}
+
 // addRelationPost installs a relation between two images. Form fields:
 //   - type: duplicate | alternate | version | derivative | not_related
 //   - a, b: image ids (integers); `a` defaults to "this image"
@@ -544,12 +556,8 @@ func (s *Server) recomputePhashPost(w http.ResponseWriter, r *http.Request) {
 //     left-to-right convention regardless of which input slot the
 //     swap arrow ended on
 func (s *Server) addRelationPost(w http.ResponseWriter, r *http.Request) {
-	if !parseFormOK(w, r) {
-		return
-	}
-	cx := s.Active()
-	if cx == nil || cx.RelationsSvc == nil {
-		http.Error(w, "no gallery", http.StatusServiceUnavailable)
+	cx, ok := s.relationsForm(w, r)
+	if !ok {
 		return
 	}
 	a, b, ok := parseRelationPair(w, r)
@@ -655,12 +663,8 @@ var relationRemoveOps = map[string]relationRemoveOp{
 }
 
 func (s *Server) removeRelationPost(w http.ResponseWriter, r *http.Request) {
-	if !parseFormOK(w, r) {
-		return
-	}
-	cx := s.Active()
-	if cx == nil || cx.RelationsSvc == nil {
-		http.Error(w, "no gallery", http.StatusServiceUnavailable)
+	cx, ok := s.relationsForm(w, r)
+	if !ok {
 		return
 	}
 	relType := r.FormValue("type")
@@ -914,12 +918,8 @@ func (s *Server) copyTagsToOriginalPreview(w http.ResponseWriter, r *http.Reques
 //   - a, b: image ids in their current direction (parent/child or
 //     source/derivative). After commit, b -> a.
 func (s *Server) reverseRelationPost(w http.ResponseWriter, r *http.Request) {
-	if !parseFormOK(w, r) {
-		return
-	}
-	cx := s.Active()
-	if cx == nil || cx.RelationsSvc == nil {
-		http.Error(w, "no gallery", http.StatusServiceUnavailable)
+	cx, ok := s.relationsForm(w, r)
+	if !ok {
 		return
 	}
 	a, b, ok := parseRelationPair(w, r)
@@ -957,12 +957,8 @@ func (s *Server) reverseRelationPost(w http.ResponseWriter, r *http.Request) {
 // browse page so the freshly merged group renders without a manual
 // reload.
 func (s *Server) mergeGroupsPost(w http.ResponseWriter, r *http.Request) {
-	if !parseFormOK(w, r) {
-		return
-	}
-	cx := s.Active()
-	if cx == nil || cx.RelationsSvc == nil {
-		http.Error(w, "no gallery", http.StatusServiceUnavailable)
+	cx, ok := s.relationsForm(w, r)
+	if !ok {
 		return
 	}
 	kind := r.URL.Query().Get("kind")
@@ -1023,12 +1019,8 @@ func (s *Server) mergeGroupsPost(w http.ResponseWriter, r *http.Request) {
 // flash so the operator can retry. On success the response carries
 // HX-Redirect back to the same tab so the toolbar repaints.
 func (s *Server) dissolveGroupsPost(w http.ResponseWriter, r *http.Request) {
-	if !parseFormOK(w, r) {
-		return
-	}
-	cx := s.Active()
-	if cx == nil || cx.RelationsSvc == nil {
-		http.Error(w, "no gallery", http.StatusServiceUnavailable)
+	cx, ok := s.relationsForm(w, r)
+	if !ok {
 		return
 	}
 	kind := r.URL.Query().Get("kind")
@@ -1124,12 +1116,8 @@ func parsePairValue(raw string) (int64, int64, bool) {
 // copyTagsToOriginalPost runs CopyTagsFromDuplicatesToOriginal for a
 // duplicate group. Wired to the per-card button on the Relations page.
 func (s *Server) copyTagsToOriginalPost(w http.ResponseWriter, r *http.Request) {
-	if !parseFormOK(w, r) {
-		return
-	}
-	cx := s.Active()
-	if cx == nil || cx.RelationsSvc == nil {
-		http.Error(w, "no gallery", http.StatusServiceUnavailable)
+	cx, ok := s.relationsForm(w, r)
+	if !ok {
 		return
 	}
 	gid, ok := pathInt64(w, r, "id")

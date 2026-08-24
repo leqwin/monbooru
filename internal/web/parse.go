@@ -55,3 +55,30 @@ func formInt64(w http.ResponseWriter, r *http.Request, name string) (int64, bool
 	}
 	return v, true
 }
+
+// idAndForm resolves the {id} path value and parses the form, writing the
+// refusal and reporting false when either fails. The id goes first, so a
+// request that is wrong about both answers 404 rather than a form error -
+// no route reads the form to decide what the id means.
+func idAndForm(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	id, ok := pathInt64(w, r, "id")
+	if !ok {
+		return 0, false
+	}
+	if !parseFormOK(w, r) {
+		return 0, false
+	}
+	return id, true
+}
+
+// taggerNameAndForm is idAndForm for the per-tagger settings routes.
+func taggerNameAndForm(w http.ResponseWriter, r *http.Request) (string, bool) {
+	name, ok := pathTaggerName(w, r)
+	if !ok {
+		return "", false
+	}
+	if !parseFormOK(w, r) {
+		return "", false
+	}
+	return name, true
+}

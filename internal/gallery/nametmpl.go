@@ -1,6 +1,7 @@
 package gallery
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -192,6 +193,23 @@ func parseNameToken(inner string, sc Scope) (namePart, error) {
 // numbers a plain string itself so a whole run cannot collide on one name.
 func (t *NameTemplate) HasTokens() bool { return t != nil && t.tokens }
 
+// readsMD5 reports whether any of the templates names a file by {md5}.
+// The column is filled lazily, so a row that predates it carries none
+// until something asks for it.
+func readsMD5(tmpls []*NameTemplate) bool {
+	for _, t := range tmpls {
+		if t == nil {
+			continue
+		}
+		for _, p := range t.parts {
+			if p.tok == tokMD5 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // NameFacts is everything a template can substitute: the row's own
 // columns, the batch position, and the origin a push carried.
 type NameFacts struct {
@@ -199,8 +217,11 @@ type NameFacts struct {
 	// Ext is lower-cased, which is what makes {name}.{ext} the way to
 	// normalise a shouting extension. Base keeps the on-disk spelling,
 	// since that is the name a rename actually starts from.
-	Ext        string
-	Base       string
+	Ext  string
+	Base string
+	// Folder is the row's directory relative to the gallery root,
+	// "/"-separated and empty when the file sits at the root.
+	Folder     string
 	Type       string
 	Gallery    string
 	ID         int64
@@ -217,16 +238,24 @@ type NameFacts struct {
 	NWidth     int
 }
 
-// LoadNameFacts reads the row's half of a render. Source, PostID and the
-// batch position are the caller's to fill.
-func LoadNameFacts(database *db.DB, galleryName string, id int64) (NameFacts, error) {
+// LoadNameFacts reads the row's half of a render for tmpls. Source,
+// PostID and the batch position are the caller's to fill. A template
+// naming the file by {md5} hashes what the row has not got yet, so it
+// names the same digest a booru would rather than rendering empty.
+//
+// That hash reads the whole file, so it rides the caller's ctx, and
+// md5Cap bounds it: a row whose file is larger renders {md5} empty and
+// leaves the digest to the backfill job, the way the detail page's md5
+// cell does. 0 means no bound, which is what every caller acting on a
+// file it already read passes.
+func LoadNameFacts(ctx context.Context, database *db.DB, galleryName string, id int64, md5Cap int64, tmpls ...*NameTemplate) (NameFacts, error) {
 	f := NameFacts{ID: id, Gallery: galleryName}
 	var canonical, ingestedAt string
-	if err := database.Read.QueryRow(
-		`SELECT canonical_path, file_type, sha256, md5, origin, file_size,
+	if err := database.Read.QueryRowContext(ctx,
+		`SELECT canonical_path, folder_path, file_type, sha256, md5, origin, file_size,
 		        COALESCE(width, 0), COALESCE(height, 0), ingested_at
 		 FROM images WHERE id = ?`, id,
-	).Scan(&canonical, &f.Type, &f.SHA256, &f.MD5, &f.Origin, &f.Size, &f.Width, &f.Height, &ingestedAt); err != nil {
+	).Scan(&canonical, &f.Folder, &f.Type, &f.SHA256, &f.MD5, &f.Origin, &f.Size, &f.Width, &f.Height, &ingestedAt); err != nil {
 		return f, fmt.Errorf("name facts for image %d: %w", id, err)
 	}
 	ext := filepath.Ext(canonical)
@@ -234,15 +263,25 @@ func LoadNameFacts(database *db.DB, galleryName string, id int64) (NameFacts, er
 	f.Name = strings.TrimSuffix(f.Base, ext)
 	f.Ext = strings.ToLower(strings.TrimPrefix(ext, "."))
 	f.IngestedAt, _ = time.Parse(time.RFC3339, ingestedAt)
+	if f.MD5 == "" && readsMD5(tmpls) && (md5Cap <= 0 || f.Size <= md5Cap) {
+		sum, err := ComputeAndStoreMD5(ctx, database, id)
+		if err != nil {
+			return f, fmt.Errorf("md5 for image %d: %w", id, err)
+		}
+		f.MD5 = sum
+	}
 	return f, nil
 }
 
 // Render substitutes f into the template. A column the row does not carry
 // renders empty and the separators around it close up, so a template
 // written for a push still reads right on a file that arrived without one.
-// A path renders empty as the gallery root; a filename falls back to the
-// id, which is the one value every row has.
-func (t *NameTemplate) Render(f NameFacts) string {
+// A file arriving now has to be called something, so a template that named
+// nothing at all falls back to the gallery root or to the id. A rename or
+// move acts on a name and a folder the file already has, so there the same
+// render is a refusal: filing a whole scope under its ids, or flattening it
+// into the root, is not a guess worth making.
+func (t *NameTemplate) Render(f NameFacts) (string, error) {
 	var b strings.Builder
 	for _, p := range t.parts {
 		if p.tok == tokLiteral {
@@ -252,10 +291,16 @@ func (t *NameTemplate) Render(f NameFacts) string {
 		b.WriteString(SanitizeFilename(p.value(f)))
 	}
 	out := tidyNamePath(b.String())
-	if out == "" && !t.scope.Folder() {
-		return strconv.FormatInt(f.ID, 10)
+	switch {
+	case out != "":
+		return out, nil
+	case !t.scope.source():
+		return "", fmt.Errorf("the template names nothing for image %d", f.ID)
+	case t.scope.Folder():
+		return "", nil
+	default:
+		return strconv.FormatInt(f.ID, 10), nil
 	}
-	return out
 }
 
 func (p namePart) value(f NameFacts) string {
@@ -334,18 +379,18 @@ func tidyNamePath(s string) string {
 	return strings.Join(kept, "/")
 }
 
+// tidyNameSegment collapses a separator doubled by a token that rendered
+// nothing. Only a repeat of the same one: "a - b" is three separators the
+// template asked for, and eating the hyphen there would be rewriting a
+// name that renders exactly as it was written.
 func tidyNameSegment(s string) string {
 	var b strings.Builder
-	prevSep := false
+	var prev rune
 	for _, r := range s {
-		if r == '-' || r == '_' || r == ' ' {
-			if !prevSep {
-				b.WriteRune(r)
-				prevSep = true
-			}
+		if r == prev && (r == '-' || r == '_' || r == ' ') {
 			continue
 		}
-		prevSep = false
+		prev = r
 		b.WriteRune(r)
 	}
 	return strings.Trim(b.String(), "-_ ")
@@ -399,22 +444,28 @@ func (n Naming) Empty() bool { return n.Folder == nil && n.Name == nil }
 // and {hash} available at all. site and postID carry the origin only a
 // push knows; every other caller passes empty strings. The final path
 // comes back so a caller tracking paths on disk can follow the file.
-func (n Naming) Apply(database *db.DB, galleryPath string, id int64, site, postID string) (string, error) {
+func (n Naming) Apply(ctx context.Context, database *db.DB, galleryPath string, id int64, site, postID string) (string, error) {
 	if n.Empty() {
 		return "", nil
 	}
-	facts, err := LoadNameFacts(database, n.Gallery, id)
+	facts, err := LoadNameFacts(ctx, database, n.Gallery, id, 0, n.Folder, n.Name)
 	if err != nil {
 		return "", err
 	}
 	facts.Source, facts.PostID = site, postID
 	var folder, name *string
 	if n.Folder != nil {
-		rendered := n.Folder.Render(facts)
+		rendered, renderErr := n.Folder.Render(facts)
+		if renderErr != nil {
+			return "", renderErr
+		}
 		folder = &rendered
 	}
 	if n.Name != nil {
-		rendered := n.Name.Render(facts)
+		rendered, renderErr := n.Name.Render(facts)
+		if renderErr != nil {
+			return "", renderErr
+		}
 		name = &rendered
 	}
 	res, err := PlaceImage(database, galleryPath, id, folder, name)
@@ -471,15 +522,15 @@ func ParseBatchRenameTemplate(s string) (*NameTemplate, error) {
 // FolderFor renders one row's destination folder, empty when the naming
 // names none. Apply is the whole answer for a caller filing a single row;
 // this is for the one that hangs a subfolder of its own under the result.
-func (n Naming) FolderFor(database *db.DB, id int64) (string, error) {
+func (n Naming) FolderFor(ctx context.Context, database *db.DB, id int64) (string, error) {
 	if n.Folder == nil {
 		return "", nil
 	}
-	facts, err := LoadNameFacts(database, n.Gallery, id)
+	facts, err := LoadNameFacts(ctx, database, n.Gallery, id, 0, n.Folder)
 	if err != nil {
 		return "", err
 	}
-	return n.Folder.Render(facts), nil
+	return n.Folder.Render(facts)
 }
 
 // parseSetting compiles a stored setting, reporting a hand-edited value

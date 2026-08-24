@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/monbooru/monbooru/internal/fsx"
 	"github.com/monbooru/monbooru/internal/logx"
 	"github.com/monbooru/monbooru/internal/metadata"
 	"github.com/monbooru/monbooru/internal/models"
@@ -55,7 +56,7 @@ func WriteCollectionCBZ(ctx context.Context, dstPath string, members []CBZMember
 	if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
 		return 0, 0, fmt.Errorf("create output dir: %w", err)
 	}
-	err = writeAtomic(dstPath, ".cbz-generate-*", func(tmp *os.File) error {
+	err = fsx.WriteAtomic(dstPath, ".cbz-generate-*", func(tmp *os.File) error {
 		zw := zip.NewWriter(tmp)
 		for _, m := range members {
 			if ctx != nil && ctx.Err() != nil {

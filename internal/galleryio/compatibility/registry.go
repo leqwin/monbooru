@@ -14,8 +14,8 @@
 //	}
 //
 // Adding a new application is one new file (a Detect predicate plus a
-// Translate function) - nothing under internal/web's gallery_io.go or
-// gallery_merge.go has to change.
+// Translate function) - nothing under internal/galleryio's io.go or
+// merge.go has to change.
 package compatibility
 
 import (

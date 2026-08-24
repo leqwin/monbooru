@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 
 	"github.com/monbooru/monbooru/internal/config"
+	"github.com/monbooru/monbooru/internal/counts"
 	"github.com/monbooru/monbooru/internal/db"
 	"github.com/monbooru/monbooru/internal/gallery"
 	"github.com/monbooru/monbooru/internal/jobs"
@@ -22,14 +23,13 @@ import (
 // galleryCtx holds everything per-gallery: paths, DB, tag service, degraded
 // flag, and watcher bookkeeping.
 type galleryCtx struct {
-	Name           string
-	GalleryPath    string
-	DBPath         string
-	ThumbnailsPath string
-	DB             *db.DB
-	TagSvc         *tags.Service
-	RelationsSvc   *relations.Service
-	Degraded       bool
+	// The five fields both transports describe identically. Embedded so a
+	// reader still writes cx.DB / cx.GalleryPath, and so the API resolver
+	// hands the same value across instead of rebuilding it field by field.
+	gallery.Handle
+
+	RelationsSvc *relations.Service
+	Degraded     bool
 
 	// GeneralCategoryID is the resolved id of the built-in `general`
 	// tag_categories row. parseTagInput hits this every detail-page tag
@@ -120,7 +120,7 @@ func (cx *galleryCtx) InvalidateCaches() {
 	cx.folderTreeUnder.Store(nil)
 	cx.sourceLabelCountsUnder.Store(nil)
 	if cx.DB != nil {
-		cx.DB.InvalidateCachedCounts()
+		counts.Invalidate(cx.DB)
 	}
 	// The adjacency cache holds sorted match-id snapshots that pre-date
 	// any membership-changing write (delete, move, inbox/favourite
@@ -356,12 +356,14 @@ func openGalleryCtx(g config.Gallery) (*galleryCtx, error) {
 	tree := relations.NewBKTree()
 	relations.DefaultRegistry.Register(database, tree)
 	return &galleryCtx{
-		Name:              g.Name,
-		GalleryPath:       g.GalleryPath,
-		DBPath:            g.DBPath,
-		ThumbnailsPath:    g.ThumbnailsPath,
-		DB:                database,
-		TagSvc:            tags.New(database),
+		Handle: gallery.Handle{
+			Name:           g.Name,
+			GalleryPath:    g.GalleryPath,
+			ThumbnailsPath: g.ThumbnailsPath,
+			DBPath:         g.DBPath,
+			DB:             database,
+			TagSvc:         tags.New(database),
+		},
 		RelationsSvc:      relations.New(database),
 		Degraded:          degraded,
 		GeneralCategoryID: generalID,
@@ -389,6 +391,7 @@ func (cx *galleryCtx) close() {
 	cx.stopMangaReclaim()
 	if cx.DB != nil {
 		relations.DefaultRegistry.Unregister(cx.DB)
+		counts.Release(cx.DB)
 		_ = cx.DB.Close()
 	}
 }

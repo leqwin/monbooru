@@ -122,7 +122,7 @@ func (s *Server) runMangaCollection(ctx context.Context, cx *galleryCtx, img *mo
 		// a clock would scatter them otherwise.
 		if filed && naming.Folder != nil {
 			if filedDir == "" {
-				rendered, folderErr := naming.FolderFor(cx.DB, pageID)
+				rendered, folderErr := naming.FolderFor(ctx, cx.DB, pageID)
 				if folderErr != nil {
 					return done, fmt.Errorf("page %d/%d destination: %w", n, total, folderErr)
 				}
@@ -221,7 +221,7 @@ func (s *Server) runCollectionCBZ(ctx context.Context, cx *galleryCtx, name, wri
 	if isDup && archive.CanonicalPath != dst {
 		gallery.DropDuplicateCopy(cx.DB, archive.ID, dst, "generate cbz")
 		res.Existing = filepath.Base(archive.CanonicalPath)
-	} else if _, err := naming.Apply(cx.DB, cx.GalleryPath, archive.ID, "", ""); err != nil {
+	} else if _, err := naming.Apply(ctx, cx.DB, cx.GalleryPath, archive.ID, "", ""); err != nil {
 		logx.Warnf("generate cbz %q: file: %v", res.Filename, err)
 	}
 	cx.InvalidateCaches()
@@ -272,7 +272,7 @@ func (s *Server) extractMangaPageToGallery(cx *galleryCtx, img *models.Image, n 
 		return 0, false, err
 	}
 	dstPath := gallery.UniqueDestPath(destDir, fmt.Sprintf("%s%04d", prefix, n)+filepath.Ext(pagePath))
-	if err := copyFileContents(pagePath, dstPath); err != nil {
+	if err := gallery.CopyFileContents(pagePath, dstPath); err != nil {
 		return 0, false, fmt.Errorf("copy page: %w", err)
 	}
 	if _, err := gallery.DetectFileType(dstPath); err != nil {

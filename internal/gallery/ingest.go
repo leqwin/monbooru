@@ -2,6 +2,7 @@ package gallery
 
 import (
 	"cmp"
+	"context"
 	"database/sql"
 	"fmt"
 	"image"
@@ -316,13 +317,13 @@ func ingestWithHash(database *db.DB, galleryPath, thumbnailsPath, path, hash, su
 
 	if sdMeta != nil {
 		sdMeta.ImageID = imgID
-		if err := insertSDMeta(tx, sdMeta); err != nil {
+		if err := insertSDMeta(context.Background(), tx, sdMeta); err != nil {
 			return nil, false, fmt.Errorf("inserting sd_metadata: %w", err)
 		}
 	}
 	if comfyMeta != nil {
 		comfyMeta.ImageID = imgID
-		if err := insertComfyMeta(tx, comfyMeta); err != nil {
+		if err := insertComfyMeta(context.Background(), tx, comfyMeta); err != nil {
 			return nil, false, fmt.Errorf("inserting comfyui_metadata: %w", err)
 		}
 	}
@@ -397,8 +398,34 @@ func extractGenerationMeta(path, fileType string) (*models.SDMetadata, *models.C
 	return sd, comfy, models.SourceTypeNone
 }
 
-func insertSDMeta(tx *sql.Tx, sd *models.SDMetadata) error {
-	_, err := tx.Exec(
+// ReplaceGenerationMetadata swaps the sd / comfyui side-table rows for
+// imageID. An edit, a replace or a re-extract can add a recipe, change it,
+// or strip one, so the old rows go whether or not new ones arrive - which
+// also makes the inserts' OR IGNORE moot here, on a single-writer DB.
+func ReplaceGenerationMetadata(ctx context.Context, tx *sql.Tx, imageID int64, sd *models.SDMetadata, comfy *models.ComfyUIMetadata) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sd_metadata WHERE image_id = ?`, imageID); err != nil {
+		return fmt.Errorf("clear sd_metadata: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM comfyui_metadata WHERE image_id = ?`, imageID); err != nil {
+		return fmt.Errorf("clear comfyui_metadata: %w", err)
+	}
+	if sd != nil {
+		sd.ImageID = imageID
+		if err := insertSDMeta(ctx, tx, sd); err != nil {
+			return fmt.Errorf("insert sd_metadata: %w", err)
+		}
+	}
+	if comfy != nil {
+		comfy.ImageID = imageID
+		if err := insertComfyMeta(ctx, tx, comfy); err != nil {
+			return fmt.Errorf("insert comfyui_metadata: %w", err)
+		}
+	}
+	return nil
+}
+
+func insertSDMeta(ctx context.Context, tx *sql.Tx, sd *models.SDMetadata) error {
+	_, err := tx.ExecContext(ctx,
 		`INSERT OR IGNORE INTO sd_metadata (image_id, prompt, negative_prompt, model, seed, sampler, steps, cfg_scale, raw_params, generation_hash)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sd.ImageID, sd.Prompt, sd.NegativePrompt, sd.Model, sd.Seed, sd.Sampler, sd.Steps, sd.CFGScale, sd.RawParams, sd.GenerationHash,
@@ -406,8 +433,8 @@ func insertSDMeta(tx *sql.Tx, sd *models.SDMetadata) error {
 	return err
 }
 
-func insertComfyMeta(tx *sql.Tx, comfy *models.ComfyUIMetadata) error {
-	_, err := tx.Exec(
+func insertComfyMeta(ctx context.Context, tx *sql.Tx, comfy *models.ComfyUIMetadata) error {
+	_, err := tx.ExecContext(ctx,
 		`INSERT OR IGNORE INTO comfyui_metadata (image_id, prompt, model_checkpoint, seed, sampler, steps, cfg_scale, raw_workflow, generation_hash)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		comfy.ImageID, comfy.Prompt, comfy.ModelCheckpoint, comfy.Seed, comfy.Sampler, comfy.Steps, comfy.CFGScale, comfy.RawWorkflow, comfy.GenerationHash,

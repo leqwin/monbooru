@@ -160,7 +160,9 @@ func (s *Server) settingsTaggerPost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if newProvider != "cpu" {
-			if err := tagger.CheckProviderAvailable(newProvider); err != nil {
+			// SA4023: the stub build's probe always errors, the tagger build's
+			// does not, and staticcheck only ever sees the stub.
+			if err := tagger.CheckProviderAvailable(newProvider); err != nil { //nolint:staticcheck
 				writeInlineFlash(w, "err", "Cannot enable "+newProvider+": "+err.Error())
 				return
 			}
@@ -622,11 +624,8 @@ func (s *Server) parseGalleriesForm(r *http.Request) []string {
 // flash slot: the list is left alone and the editor stays open on the
 // value the operator has to fix.
 func (s *Server) settingsTaggerMappingPost(w http.ResponseWriter, r *http.Request) {
-	name, ok := pathTaggerName(w, r)
+	name, ok := taggerNameAndForm(w, r)
 	if !ok {
-		return
-	}
-	if !parseFormOK(w, r) {
 		return
 	}
 	modelPath := s.modelPath()
@@ -692,11 +691,8 @@ func (s *Server) applyMappingRule(name, modelPath string, r *http.Request) (errM
 // success the page refreshes so the row summary, Reset button, and any
 // state badges all reflect the new configuration.
 func (s *Server) settingsTaggerConfigPost(w http.ResponseWriter, r *http.Request) {
-	name, ok := pathTaggerName(w, r)
+	name, ok := taggerNameAndForm(w, r)
 	if !ok {
-		return
-	}
-	if !parseFormOK(w, r) {
 		return
 	}
 	global, overrides, topK, disabled, errMsg := parseThresholdForm(r)
@@ -735,11 +731,8 @@ func (s *Server) settingsTaggerConfigPost(w http.ResponseWriter, r *http.Request
 // deliberate act; the page refreshes so the button disappears with the
 // state it reported.
 func (s *Server) settingsTaggerResetPost(w http.ResponseWriter, r *http.Request) {
-	name, ok := pathTaggerName(w, r)
+	name, ok := taggerNameAndForm(w, r)
 	if !ok {
-		return
-	}
-	if !parseFormOK(w, r) {
 		return
 	}
 	defaults := tagger.SeedTaggerInstance(name, false, catalogEntryByName(s.modelPath(), name))

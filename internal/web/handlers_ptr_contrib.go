@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"sort"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/monbooru/monbooru/internal/logx"
 	"github.com/monbooru/monbooru/internal/models"
 	"github.com/monbooru/monbooru/internal/tags"
 )
@@ -104,6 +106,9 @@ type contribPreviewToAdd struct {
 	// at all, so a send would create the tag. Older monloaders omit it.
 	UnknownTag bool   `json:"unknown_tag"`
 	Color      string `json:"-"`
+	// Sent is the spelling a contribution goes up under, which is the tag's
+	// own name unless an alias here answered for it. Filled at render time.
+	Sent string `json:"-"`
 }
 
 // PTRDiffers reports whether the PTR spelling differs beyond the
@@ -173,7 +178,7 @@ func (s *Server) monloaderContribSend(ctx context.Context, origin string, items 
 // decodes a JSON reply, mapping a 409 to errPTRUnavailable so callers
 // collapse the surface in place.
 func (s *Server) monloaderContribJSON(ctx context.Context, method, path string, body []byte, out any) error {
-	resp, err := s.monloaderDo(ctx, method, path, body)
+	resp, err := s.monloader().Do(ctx, method, path, body)
 	if err != nil {
 		return err
 	}
@@ -242,9 +247,126 @@ func (s *Server) contribStorageTags(imageTags []models.ImageTag) (storage, impli
 func (s *Server) imageContribPreview(rctx context.Context, id int64, sha string) (*contribPreview, error) {
 	_, imageTags, _ := s.tagSvc().GetImageTags(id)
 	storage, implied := s.contribStorageTags(imageTags)
+	byTag, byAlias := s.imageTagAliases(imageTags)
 	ctx, cancel := context.WithTimeout(rctx, 8*time.Second)
 	defer cancel()
-	return s.monloaderContribPreview(ctx, sha, storage, implied)
+	sent, local := s.ptrSubmitSpellings(ctx, storage, byTag)
+	preview, err := s.monloaderContribPreview(ctx, sha, sent, implied)
+	if err != nil {
+		return nil, err
+	}
+	// Rows come back keyed on the submitted spelling; the surfaces label,
+	// count and attribute them by the tag the operator sees.
+	for i, t := range preview.ToAdd {
+		preview.ToAdd[i].Sent = t.Tag
+		if own, ok := local[t.Tag]; ok {
+			preview.ToAdd[i].Tag = own
+		}
+	}
+	foldAliasedPTRTags(preview, byAlias)
+	return preview, nil
+}
+
+// ptrSubmitSpellings picks the spelling each storage tag is contributed
+// under: the repository's own when a pull has left an alias here that answers
+// for the tag, so an add lands in the cluster the catalog already agreed with
+// instead of minting the operator's private spelling. Returns the list to
+// submit and, per substituted spelling, the tag it stands for. Only tags that
+// have an alias are asked about, and the graph endpoint refuses outright while
+// the index is still syncing, where the panel keeps rendering: no answer means
+// no substitution, not a failure.
+func (s *Server) ptrSubmitSpellings(ctx context.Context, storage []string, byTag map[string][]string) ([]string, map[string]string) {
+	var names []string
+	for _, form := range storage {
+		if len(byTag[form]) > 0 {
+			names = append(names, form)
+			names = append(names, byTag[form]...)
+		}
+	}
+	if len(names) == 0 {
+		return storage, nil
+	}
+	graph := map[string]ptrTagInfo{}
+	for start := 0; start < len(names); start += ptrLookupBatch {
+		part, err := s.ptrTagLookup(ctx, names[start:min(start+ptrLookupBatch, len(names))])
+		if err != nil {
+			return storage, nil
+		}
+		maps.Copy(graph, part)
+	}
+	sent := make([]string, len(storage))
+	taken := make(map[string]bool, len(storage))
+	for i, form := range storage {
+		sent[i], taken[form] = form, true
+	}
+	local := map[string]string{}
+	for i, form := range storage {
+		if len(byTag[form]) == 0 {
+			continue
+		}
+		// A spelling another tag on the image already occupies would submit
+		// one name twice and pair the wrong row with it.
+		if spelling, _, ok := resolvePTRSpelling(graph, form, byTag[form]); ok && !taken[spelling] {
+			sent[i], taken[spelling], local[spelling] = spelling, true, form
+		}
+	}
+	return sent, local
+}
+
+// foldAliasedPTRTags reconciles the two sides of the diff through the alias
+// graph. A PTR pull adopts the repository's spellings as aliases of the
+// operator's tag, and the preview only ever sees the tag's own name, so
+// without this the repository's copy reads as a tag the image lacks and the
+// operator's spelling as one the repository lacks - a petition and an upload
+// for the same tag under two names the catalog calls equal.
+func foldAliasedPTRTags(preview *contribPreview, byAlias map[string]string) {
+	if len(byAlias) == 0 {
+		return
+	}
+	carried := map[string]bool{}
+	kept := preview.PTROnly[:0]
+	for _, p := range preview.PTROnly {
+		if local, ok := byAlias[p.Tag]; ok {
+			carried[local] = true
+			continue
+		}
+		kept = append(kept, p)
+	}
+	preview.PTROnly = kept
+	for i, t := range preview.ToAdd {
+		if t.Status == "new" && carried[t.Tag] {
+			preview.ToAdd[i].Status = "known"
+		}
+	}
+}
+
+// imageTagAliases reads the alias rows pointing at the image's tags once for
+// the two questions the diff asks of them: which spellings a tag can be
+// contributed under (byTag), and which tag a repository spelling names
+// (byAlias). The pull stores an alias under the same projection monloader
+// answers the diff in, so the two sides compare as strings; a name a
+// pre-widening catalog folded is keyed under both shapes.
+func (s *Server) imageTagAliases(imageTags []models.ImageTag) (byTag map[string][]string, byAlias map[string]string) {
+	ids := make([]int64, 0, len(imageTags))
+	for _, t := range imageTags {
+		ids = append(ids, t.TagID)
+	}
+	byCanonical, err := s.tagSvc().AliasesForTagIDs(ids)
+	if err != nil {
+		logx.Warnf("AliasesForTagIDs: %v", err)
+		return nil, nil
+	}
+	byTag, out := map[string][]string{}, map[string]string{}
+	for _, list := range byCanonical {
+		for _, a := range list {
+			form := tagFormName(a.CategoryName, a.Name)
+			canonical := tagFormName(a.CanonicalCategoryName, a.CanonicalName)
+			byTag[canonical] = append(byTag[canonical], form)
+			out[form] = canonical
+			out[tags.LegacyFold(form)] = canonical
+		}
+	}
+	return byTag, out
 }
 
 // ptrUnattributed lists the image's tags the repository also holds but
@@ -1213,21 +1335,23 @@ func (s *Server) ptrLookupImplGroup(g ptrLookupGroup, names []string, declared m
 }
 
 // ptrLookupLocalStatus words where the looked-up spelling stands in this
-// catalog, for the preview's header line.
-func (s *Server) ptrLookupLocalStatus(id int64, tagForm, spelling string) string {
+// catalog, for the preview's header line. aliasable is false for the two
+// standings a merge onto that spelling resolves back to this tag, which is
+// no merge at all.
+func (s *Server) ptrLookupLocalStatus(id int64, tagForm, spelling string) (status string, aliasable bool) {
 	if spelling == tagForm {
-		return "this tag"
+		return "this tag", false
 	}
 	isAlias, canonicalID, canonicalName, usage, exists := s.tagRowByForm(spelling)
 	switch {
 	case !exists:
-		return "not in this catalog"
+		return "not in this catalog", true
 	case isAlias && canonicalID == id:
-		return "alias of this tag"
+		return "alias of this tag", false
 	case isAlias:
-		return "alias of " + canonicalName
+		return "alias of " + canonicalName, true
 	default:
-		return fmt.Sprintf("a tag here (usage %d)", usage)
+		return fmt.Sprintf("a tag here (usage %d)", usage), true
 	}
 }
 
@@ -1406,9 +1530,8 @@ func (s *Server) tagPtrLookupDialog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.renderTemplate(w, "partials/tag_ptr_lookup_dialog.html", map[string]any{
-		"TagID":     id,
-		"TagName":   tag.Name,
-		"Qualified": tag.CategoryName != "general",
+		"TagID":   id,
+		"TagName": tag.Name,
 	})
 }
 
@@ -1441,6 +1564,7 @@ func (s *Server) tagPtrLookupPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tagForm := tagFormName(tag.CategoryName, tag.Name)
+	data["TagForm"] = tagForm
 	groups, err := s.ptrLookupGroups(id, tagForm, spelling, info)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1468,7 +1592,7 @@ func (s *Server) tagPtrLookupPreview(w http.ResponseWriter, r *http.Request) {
 	data["Ideal"] = info.Ideal
 	data["SpellingColor"] = color(spelling)
 	data["IdealColor"] = color(info.Ideal)
-	data["LocalStatus"] = s.ptrLookupLocalStatus(id, tagForm, spelling)
+	data["LocalStatus"], data["CanAlias"] = s.ptrLookupLocalStatus(id, tagForm, spelling)
 	data["Groups"] = groups
 	data["AliasAdds"] = aliasAdds
 	data["ImplAdds"] = implAdds

@@ -31,9 +31,7 @@ func ReplaceSourceAnnotations(database *db.DB, imageID int64, site, postID strin
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.Exec(
-		`DELETE FROM image_annotations WHERE image_id = ? AND site = ? AND post_id = ? AND manual = 0`,
-		imageID, site, postID); err != nil {
+	if err := deletePulledAnnotationsTx(tx, imageID, site, postID); err != nil {
 		return err
 	}
 	for _, b := range boxes {
@@ -60,16 +58,9 @@ func AddManualAnnotation(database *db.DB, imageID int64, x, y, w, h int, body st
 // its manual flag. An edit to a source box is overwritten by a later re-pull,
 // the same rule commentary follows.
 func UpdateAnnotation(database *db.DB, id int64, x, y, w, h int, body string) error {
-	res, err := database.Write.Exec(
+	return requireAffected(database.Write.Exec(
 		`UPDATE image_annotations SET x = ?, y = ?, w = ?, h = ?, body = ? WHERE id = ?`,
-		x, y, w, h, body, id)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return errors.New("annotation not found")
-	}
-	return nil
+		x, y, w, h, body, id))
 }
 
 // DeleteAnnotation removes one box by id, source-pulled or operator-drawn. A
@@ -77,8 +68,23 @@ func UpdateAnnotation(database *db.DB, id int64, x, y, w, h int, body string) er
 // replace / removal paths still gate on manual = 0, so they never touch an
 // operator box.
 func DeleteAnnotation(database *db.DB, id int64) error {
-	res, err := database.Write.Exec(
-		`DELETE FROM image_annotations WHERE id = ?`, id)
+	return requireAffected(database.Write.Exec(
+		`DELETE FROM image_annotations WHERE id = ?`, id))
+}
+
+// deletePulledAnnotationsTx drops the boxes one origin contributed. The
+// `manual = 0` predicate is the invariant worth naming: an operator-drawn
+// box survives an origin removal and a re-pull alike.
+func deletePulledAnnotationsTx(tx *sql.Tx, imageID int64, site, postID string) error {
+	_, err := tx.Exec(
+		`DELETE FROM image_annotations WHERE image_id = ? AND site = ? AND post_id = ? AND manual = 0`,
+		imageID, site, postID)
+	return err
+}
+
+// requireAffected turns "the statement ran but matched nothing" into the
+// not-found error both single-box edits answer with.
+func requireAffected(res sql.Result, err error) error {
 	if err != nil {
 		return err
 	}

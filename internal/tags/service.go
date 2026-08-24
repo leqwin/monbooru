@@ -18,6 +18,7 @@ import (
 var (
 	ErrInvalidTagName       = errors.New("invalid tag name")
 	ErrTagNotFound          = errors.New("tag not found")
+	ErrTagImplied           = errors.New("this tag is implied by another tag on the image; remove the parent, or add it yourself first to take ownership of the row")
 	ErrCategoryNotFound     = errors.New("category not found")
 	ErrBuiltinCategory      = errors.New("cannot delete built-in category")
 	ErrBuiltinCategoryName  = errors.New("cannot rename a built-in category")

@@ -34,69 +34,6 @@ import (
 	"github.com/monbooru/monbooru/internal/tags"
 )
 
-// applyCreateProvenance writes the supplied provenance fields onto a
-// freshly-ingested row. Only non-empty values are written; the row's
-// empty-string / NULL defaults already cover the unset case, so a bare
-// create touches nothing. Validation has already run, so a failure here
-// is a DB-level error.
-func applyCreateProvenance(g Gallery, imageID int64, source, postID, url, md5, parentURL, collection, commentary, original string, post gallery.PostFile, order *int) error {
-	if source != "" || url != "" {
-		if err := writeSourceProvenance(g, imageID, source, postID, url, md5, parentURL, post); err != nil {
-			return err
-		}
-	}
-	// Annotations stay with the caller: a failed note write warns rather than
-	// failing a create whose row already landed.
-	if _, err := applySourceProvenance(g, imageID, source, postID, commentary, original, nil); err != nil {
-		return err
-	}
-	if collection != "" {
-		return gallery.SetHomeCollection(g.DB, imageID, collection, order)
-	}
-	return nil
-}
-
-// writeSourceProvenance records one origin row: membership plus its md5
-// and parent-URL columns, keyed by (source, postID).
-func writeSourceProvenance(g Gallery, imageID int64, source, postID, url, md5, parentURL string, post gallery.PostFile) error {
-	if err := gallery.AddSourceMembership(g.DB, imageID, source, postID, url); err != nil {
-		return err
-	}
-	if err := gallery.SetSourceMD5(g.DB, imageID, source, postID, md5); err != nil {
-		return err
-	}
-	if err := gallery.SetSourcePostFile(g.DB, imageID, source, postID, post); err != nil {
-		return err
-	}
-	return gallery.SetSourceParentURL(g.DB, imageID, source, postID, parentURL)
-}
-
-// applySourceProvenance writes the per-source commentary, original, and
-// annotations an enrich or duplicate-merge push carries, skipping empty
-// values. On failure the returned step names what was being applied so
-// each caller can map the error to its own reporting.
-func applySourceProvenance(g Gallery, imageID int64, source, postID, commentary, original string, notes []models.Annotation) (string, error) {
-	if source == "" {
-		return "", nil
-	}
-	if commentary != "" {
-		if err := gallery.SetSourceCommentary(g.DB, imageID, source, postID, commentary); err != nil {
-			return "commentary", err
-		}
-	}
-	if original != "" {
-		if err := gallery.SetSourceOriginal(g.DB, imageID, source, postID, original); err != nil {
-			return "the original source", err
-		}
-	}
-	if len(notes) > 0 {
-		if err := gallery.ReplaceSourceAnnotations(g.DB, imageID, source, postID, notes); err != nil {
-			return "notes", err
-		}
-	}
-	return "", nil
-}
-
 // linkParentRelations turns a booru parent/child declaration into derivative
 // edges once both sides are in the gallery: a pushed post links under the
 // image already holding its declared parent URL, and images whose origins
@@ -133,71 +70,11 @@ func linkParentRelations(g Gallery, imageID int64, url, parentURL string) {
 	}
 }
 
-// mergeSummary reports what a duplicate-merge folded into an existing image.
-type mergeSummary struct {
-	TagsAdded    int  `json:"tags_added"`
-	TagsRetired  int  `json:"tags_retired"`
-	RatingFilled bool `json:"rating_filled"`
-	SourceAdded  bool `json:"source_added"`
-}
-
-// mergeSource folds a re-pushed file's provenance and tags into an existing
-// image instead of discarding them (issue #6): the origin is recorded and the
-// tags imported from that source are reconciled against the incoming set,
-// with the rating protected. Attribution is the source label so each source
-// owns its slice; tags the source dropped are flagged stale, never removed.
-// A push with no source label leaves tags untouched. The
-// second return carries unresolvable-tag warnings for the response envelope.
-// A booru origin arriving while the primary is the url-less "ptr" row takes
-// the primary over: a lookup that hits both backends should lead with the
-// booru post, whatever order monloader's enrich calls landed in.
-//
-// Takes no receiver so ApplyPTRTags can hand the batch PTR pass the same
-// path a per-image enrich walks.
-func mergeSource(g Gallery, imageID int64, source, postID, url, md5, parentURL string, post gallery.PostFile, rawTags []string) (mergeSummary, []string, error) {
-	var sum mergeSummary
-	if source != "" || url != "" {
-		if err := writeSourceProvenance(g, imageID, source, postID, url, md5, parentURL, post); err != nil {
-			return sum, nil, err
-		}
-		if source != "" && !strings.EqualFold(source, "ptr") {
-			var primary string
-			if err := g.DB.Read.QueryRow(`SELECT source FROM images WHERE id = ?`, imageID).Scan(&primary); err == nil &&
-				strings.EqualFold(strings.TrimSpace(primary), "ptr") {
-				if err := gallery.MakeSourcePrimary(g.DB, imageID, source, postID); err != nil {
-					return sum, nil, err
-				}
-			}
-		}
-		sum.SourceAdded = true
-	}
-	var warnings []string
-	if source != "" && len(rawTags) > 0 {
-		tagIDs, warns := resolveTagNames(g, rawTags, source)
-		warnings = warns
-		// The per-site tag slice is shared by every post of that site on the
-		// image, so the reconcile only runs while this origin is the site's
-		// sole one; alongside a sibling post the merge is add-only.
-		var origins int
-		if err := g.DB.Read.QueryRow(
-			`SELECT COUNT(*) FROM image_sources WHERE image_id = ? AND site = ?`, imageID, source,
-		).Scan(&origins); err != nil {
-			return sum, warnings, err
-		}
-		r, err := g.TagSvc.SyncSourceTags(imageID, tagIDs, source, origins <= 1)
-		if err != nil {
-			return sum, warnings, err
-		}
-		sum.TagsAdded, sum.TagsRetired, sum.RatingFilled = r.Added, r.Retired, r.RatingFilled
-	}
-	return sum, warnings, nil
-}
-
 // enrichImage handles POST /api/v1/images/{id}/enrich: applies fetched
 // metadata (tags, provenance, artist commentary, positional notes) to an
 // existing image with no file upload - the metadata-only counterpart of a
-// push, used by monloader's source refetch. It shares mergeSource with the
-// duplicate branch for tags + provenance. When verify is set and a
+// push, used by monloader's source refetch. It shares gallery.MergeSource
+// with the duplicate branch for tags + provenance. When verify is set and a
 // source_md5 is supplied, the image's stored bytes are md5'd on demand and
 // compared first; a mismatch means the source returned a different file -
 // a repointed post, or a page URL that resolves to some other file - so
@@ -305,7 +182,7 @@ func (h *Handler) enrichImage(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	sum, tagWarnings, err := mergeSource(g, id, source, postID, strings.TrimSpace(body.URL), sourceMD5, parentURL,
+	sum, tagWarnings, err := gallery.MergeSource(g.DB, g.TagSvc, id, source, postID, strings.TrimSpace(body.URL), sourceMD5, parentURL,
 		postFile, body.Tags)
 	if err != nil {
 		g.recordFetch(id, "error", "fetch failed while applying tags")
@@ -330,7 +207,7 @@ func (h *Handler) enrichImage(w http.ResponseWriter, r *http.Request) {
 	// Artist commentary and positional notes are attributed to the same
 	// source, so a refetch pulls them in alongside the tags. Both replace what
 	// the source last carried; an empty payload leaves the stored value be.
-	if step, err := applySourceProvenance(g, id, source, postID,
+	if step, err := gallery.ApplySourceProvenance(g.DB, id, source, postID,
 		strings.TrimSpace(body.Commentary), strings.TrimSpace(body.Original), annotationsFromInput(body.Notes, strings.TrimSpace(body.URL))); err != nil {
 		g.recordFetch(id, "error", "fetch failed while applying "+step)
 		apiError(w, http.StatusInternalServerError, "internal_error", err.Error())
@@ -353,7 +230,7 @@ func (h *Handler) enrichImage(w http.ResponseWriter, r *http.Request) {
 // once the enrich lands; it names the tag delta when the fetch changed
 // anything. A tagless enrich that recorded a source (monloader's source-only
 // similarity match) must not claim tags were fetched.
-func fetchSummary(sum mergeSummary, tagsSent int) string {
+func fetchSummary(sum gallery.MergeSummary, tagsSent int) string {
 	switch {
 	case tagsSent == 0 && sum.SourceAdded:
 		return "Recorded the source; no tags were fetched."
@@ -391,19 +268,6 @@ func (h *Handler) fetchStatusReport(w http.ResponseWriter, r *http.Request) {
 	g.recordFetch(id, body.State, body.Message)
 	recordLookupTerminal(g, id, body.State)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-// ApplyPTRTags folds a batch PTR hit into an image exactly as a per-image
-// PTR enrich does: the url-less `ptr` origin, the source-attributed tags, and
-// the same reconcile with the same stale semantics. The scheduled PTR phase
-// reads the hashes from monloader in bulk and applies them itself, so this is
-// what keeps both paths writing one set of rules.
-func ApplyPTRTags(g Gallery, imageID int64, tags []string) error {
-	if _, _, err := mergeSource(g, imageID, "ptr", "", "", "", "", gallery.PostFile{}, tags); err != nil {
-		return err
-	}
-	g.invalidate()
-	return nil
 }
 
 // recordLookupHit concludes an in-flight attempt on the backend the enrich's
@@ -533,15 +397,15 @@ func (h *Handler) replaceImageFile(w http.ResponseWriter, r *http.Request) {
 	newSHA := hex.EncodeToString(shaH.Sum(nil))
 	newMD5 := hex.EncodeToString(md5H.Sum(nil))
 
-	applyMeta := func() (mergeSummary, []string, bool) {
-		sum, tagWarnings, err := mergeSource(g, id, source, postID, url, claimedMD5, parentURL, postFile, tags)
+	applyMeta := func() (gallery.MergeSummary, []string, bool) {
+		sum, tagWarnings, err := gallery.MergeSource(g.DB, g.TagSvc, id, source, postID, url, claimedMD5, parentURL, postFile, tags)
 		if err != nil {
 			g.recordFetch(id, "error", "replace failed while applying tags")
 			apiError(w, http.StatusInternalServerError, "internal_error", err.Error())
 			return sum, nil, false
 		}
 		linkParentRelations(g, id, url, parentURL)
-		if step, err := applySourceProvenance(g, id, source, postID, commentary, original, notes); err != nil {
+		if step, err := gallery.ApplySourceProvenance(g.DB, id, source, postID, commentary, original, notes); err != nil {
 			g.recordFetch(id, "error", "replace failed while applying "+step)
 			apiError(w, http.StatusInternalServerError, "internal_error", err.Error())
 			return sum, tagWarnings, false
@@ -811,12 +675,8 @@ func (h *Handler) getImage(w http.ResponseWriter, r *http.Request) {
 // unless an order is supplied alongside. To clear collection_order on
 // its own, clear the collection. Returns the updated image object.
 func (h *Handler) patchImage(w http.ResponseWriter, r *http.Request) {
-	g, id, ok := h.galleryAndID(w, r)
+	g, id, ok := h.galleryAndExistingID(w, r)
 	if !ok {
-		return
-	}
-	if !imageExists(g, id) {
-		apiError(w, http.StatusNotFound, "not_found", "image not found")
 		return
 	}
 
@@ -1337,14 +1197,14 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 			aliasAdded = false
 			gallery.DropDuplicateCopy(g.DB, img.ID, in.imgPath, "api createImage")
 		}
-		sum, tagWarnings, mergeErr := mergeSource(g, img.ID, in.source, in.postID, in.url, in.md5, in.parentURL, in.postFile, in.initialTags)
+		sum, tagWarnings, mergeErr := gallery.MergeSource(g.DB, g.TagSvc, img.ID, in.source, in.postID, in.url, in.md5, in.parentURL, in.postFile, in.initialTags)
 		if mergeErr != nil {
 			logx.Warnf("api createImage merge: %v", mergeErr)
 			apiError(w, http.StatusInternalServerError, "internal_error", "duplicate detected but the merge failed: "+mergeErr.Error())
 			return
 		}
 		linkParentRelations(g, img.ID, in.url, in.parentURL)
-		if step, err := applySourceProvenance(g, img.ID, in.source, in.postID, in.commentary, in.original, in.notes); err != nil {
+		if step, err := gallery.ApplySourceProvenance(g.DB, img.ID, in.source, in.postID, in.commentary, in.original, in.notes); err != nil {
 			logx.Warnf("api createImage %s: %v", step, err)
 			apiError(w, http.StatusInternalServerError, "internal_error", "duplicate detected but the merge failed: "+err.Error())
 			return
@@ -1376,13 +1236,13 @@ func (h *Handler) createImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := in.naming.Apply(g.DB, g.GalleryPath, img.ID, in.source, in.postID); err != nil {
+	if _, err := in.naming.Apply(r.Context(), g.DB, g.GalleryPath, img.ID, in.source, in.postID); err != nil {
 		logx.Warnf("api createImage name %d: %v", img.ID, err)
 	}
 
 	// A freshly-created row records its provenance directly; the duplicate
 	// path above merges instead.
-	if err := applyCreateProvenance(g, img.ID, in.source, in.postID, in.url, in.md5, in.parentURL, in.collection, in.commentary, in.original, in.postFile, in.collectionOrder); err != nil {
+	if err := gallery.ApplyCreateProvenance(g.DB, img.ID, in.source, in.postID, in.url, in.md5, in.parentURL, in.collection, in.commentary, in.original, in.postFile, in.collectionOrder); err != nil {
 		logx.Warnf("api createImage provenance: %v", err)
 		apiError(w, http.StatusInternalServerError, "internal_error", "failed to set provenance fields")
 		return
@@ -1709,12 +1569,8 @@ func loadTagSourcesForImage(g Gallery, imageID int64) (map[string][]string, erro
 // object remains reachable via GET /api/v1/images/:id for callers who
 // need adjacent metadata.
 func (h *Handler) listImageTags(w http.ResponseWriter, r *http.Request) {
-	g, id, ok := h.galleryAndID(w, r)
+	g, id, ok := h.galleryAndExistingID(w, r)
 	if !ok {
-		return
-	}
-	if !imageExists(g, id) {
-		apiError(w, http.StatusNotFound, "not_found", "image not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, loadImageTagsJSON(g, id))
@@ -1724,12 +1580,8 @@ func (h *Handler) listImageTags(w http.ResponseWriter, r *http.Request) {
 // be a plain name (general category) or "category:name", matching the
 // web UI's tag input.
 func (h *Handler) addImageTags(w http.ResponseWriter, r *http.Request) {
-	g, id, ok := h.galleryAndID(w, r)
+	g, id, ok := h.galleryAndExistingID(w, r)
 	if !ok {
-		return
-	}
-	if !imageExists(g, id) {
-		apiError(w, http.StatusNotFound, "not_found", "image not found")
 		return
 	}
 
@@ -1812,7 +1664,7 @@ func (h *Handler) applyInitialTags(g Gallery, imgID int64, rawTags []string, via
 	// than looking like anonymous UI adds. A caller-supplied via still
 	// wins and is recorded verbatim.
 	via = cmp.Or(via, "api")
-	tagIDs, warnings := resolveTagNames(g, rawTags, via)
+	tagIDs, warnings := gallery.ResolveTagNames(g.DB, g.TagSvc, rawTags, via)
 	if len(tagIDs) > 0 {
 		if _, err := g.TagSvc.AddTagsToOneImage(imgID, tagIDs, via); err != nil {
 			warnings = append(warnings, "apply tags: "+err.Error())
@@ -1821,67 +1673,13 @@ func (h *Handler) applyInitialTags(g Gallery, imgID int64, rawTags []string, via
 	return warnings
 }
 
-// resolveTagNames turns raw `bare` / `category:bare` tokens into tag ids,
-// creating missing rows stamped with origin (the pushing site or the
-// caller's via). Per-token failures land in warnings without aborting
-// the batch.
-func resolveTagNames(g Gallery, rawTags []string, origin string) ([]int64, []string) {
-	var warnings []string
-	tagIDs := make([]int64, 0, len(rawTags))
-	for _, tagName := range rawTags {
-		catID, bareName, err := resolveCategoryTag(g, tagName)
-		if err != nil {
-			warnings = append(warnings, "tag "+tagName+": "+err.Error())
-			continue
-		}
-		tag, err := g.TagSvc.GetOrCreateTagFrom(bareName, catID, origin)
-		if err != nil {
-			warnings = append(warnings, "tag "+tagName+": "+err.Error())
-			continue
-		}
-		tagIDs = append(tagIDs, tag.ID)
-	}
-	return tagIDs, warnings
-}
-
-// resolveCategoryTag splits "artist:foo" into (artist_id, "foo") when
-// "artist" names a real category, otherwise returns (general_id, input)
-// so colon-bearing tag names like "nier:automata" or ":3" round-trip
-// without a warning.
-func resolveCategoryTag(g Gallery, input string) (int64, string, error) {
-	input = strings.TrimSpace(input)
-	catName := "general"
-	tagName := input
-	if idx := strings.Index(input, ":"); idx > 0 {
-		catID, ok, err := categoryIDByName(g, input[:idx])
-		if err != nil {
-			return 0, "", err
-		}
-		if ok {
-			return catID, input[idx+1:], nil
-		}
-	}
-	catID, ok, err := categoryIDByName(g, catName)
-	if err != nil {
-		return 0, "", err
-	}
-	if !ok {
-		return 0, "", fmt.Errorf("unknown category %q", catName)
-	}
-	return catID, tagName, nil
-}
-
 // removeImageTags handles DELETE /api/v1/images/:id/tags. Each entry
 // is plain (any single match) or "category:name" (exact category). A
 // plain name matching more than one category on the image returns 409
 // so the caller can disambiguate.
 func (h *Handler) removeImageTags(w http.ResponseWriter, r *http.Request) {
-	g, id, ok := h.galleryAndID(w, r)
+	g, id, ok := h.galleryAndExistingID(w, r)
 	if !ok {
-		return
-	}
-	if !imageExists(g, id) {
-		apiError(w, http.StatusNotFound, "not_found", "image not found")
 		return
 	}
 
@@ -1915,6 +1713,10 @@ func (h *Handler) removeImageTags(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(tagIDs) > 0 {
 		if err := g.TagSvc.RemoveTagsFromOneImage(id, tagIDs); err != nil {
+			if errors.Is(err, tags.ErrTagImplied) {
+				apiError(w, http.StatusConflict, "tag_implied", err.Error())
+				return
+			}
 			tagWarnings = append(tagWarnings, "remove tags: "+err.Error())
 		}
 	}

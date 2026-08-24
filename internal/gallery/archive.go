@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/monbooru/monbooru/internal/fsx"
 )
 
 // MangaPage describes one image entry inside a cbz/zip archive. Path is
@@ -134,7 +136,7 @@ func (m *Manga) ExtractPage(n int, dst string) error {
 		return err
 	}
 	defer func() { _ = rc.Close() }()
-	return writeAtomic(dst, ".page.*", func(f *os.File) error {
+	return fsx.WriteAtomic(dst, ".page.*", func(f *os.File) error {
 		if _, err := io.Copy(f, rc); err != nil {
 			return fmt.Errorf("write page %d: %w", n+1, err)
 		}

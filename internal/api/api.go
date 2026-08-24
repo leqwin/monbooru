@@ -11,20 +11,18 @@ import (
 	"sync"
 
 	"github.com/monbooru/monbooru/internal/config"
-	"github.com/monbooru/monbooru/internal/db"
+	"github.com/monbooru/monbooru/internal/gallery"
 	"github.com/monbooru/monbooru/internal/jobs"
 	"github.com/monbooru/monbooru/internal/relations"
-	"github.com/monbooru/monbooru/internal/tags"
 )
 
 // Gallery is what API handlers need to act on a single gallery.
 // InvalidateCaches is called after every image add/delete; may be nil.
 type Gallery struct {
-	Name             string
-	GalleryPath      string
-	ThumbnailsPath   string
-	DB               *db.DB
-	TagSvc           *tags.Service
+	// The five fields the web layer's galleryCtx describes identically;
+	// the resolver hands its embedded copy straight across.
+	gallery.Handle
+
 	RelationsSvc     *relations.Service
 	InvalidateCaches func()
 	// RecordFetch reports a source metadata-fetch outcome for an image so the
@@ -131,6 +129,22 @@ func (h *Handler) galleryAndID(w http.ResponseWriter, r *http.Request) (Gallery,
 	}
 	id, ok := apiPathInt64(w, r, "id")
 	if !ok {
+		return Gallery{}, 0, false
+	}
+	return g, id, true
+}
+
+// galleryAndExistingID is galleryAndID for the handlers that probe the row
+// before doing anything - the media reads and the per-image writes whose
+// own error path would otherwise answer something less useful than a 404.
+// The other galleryAndID callers deliberately let the operation answer.
+func (h *Handler) galleryAndExistingID(w http.ResponseWriter, r *http.Request) (Gallery, int64, bool) {
+	g, id, ok := h.galleryAndID(w, r)
+	if !ok {
+		return Gallery{}, 0, false
+	}
+	if !imageExists(g, id) {
+		apiError(w, http.StatusNotFound, "not_found", "image not found")
 		return Gallery{}, 0, false
 	}
 	return g, id, true

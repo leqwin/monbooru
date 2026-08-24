@@ -636,11 +636,6 @@ func writeDuplicatePostDecideHeaders(w http.ResponseWriter, cx *galleryCtx, left
 	if left == original {
 		nonOriginal = right
 	}
-	var canonical string
-	if err := cx.DB.Read.QueryRow(`SELECT canonical_path FROM images WHERE id = ?`, nonOriginal).Scan(&canonical); err != nil {
-		logx.Debugf("dup post-decide filename: %v", err)
-		return false
-	}
 	var hasUnique int
 	if err := cx.DB.Read.QueryRow(`
 		SELECT COUNT(*) FROM (
@@ -662,7 +657,6 @@ func writeDuplicatePostDecideHeaders(w http.ResponseWriter, cx *galleryCtx, left
 	w.Header().Set("X-Relations-Duplicate-ID", strconv.FormatInt(nonOriginal, 10))
 	w.Header().Set("X-Relations-Duplicate-OriginalID", strconv.FormatInt(original, 10))
 	w.Header().Set("X-Relations-Duplicate-GroupID", strconv.FormatInt(gid, 10))
-	w.Header().Set("X-Relations-Duplicate-Filename", path.Base(canonical))
 	if hasUnique > 0 {
 		w.Header().Set("X-Relations-Duplicate-HasUniqueTags", "1")
 	} else {
