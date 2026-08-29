@@ -1,5 +1,9 @@
 # Changelog
 
+## [v1.20.1] - 2026-08-29
+### Fixed
+- Fix the tarball build CI.
+
 ## [v1.20.0] - 2026-08-29
 ### Added
 - Add Windows installer, Flatpak, and binary tarballs. ([#114](https://github.com/monbooru/monbooru/issues/114))

@@ -11,8 +11,7 @@
     <p>
       A self-hosted, offline image organizer for a local collection: tag-based
       search, folder tree, favorites, collections, near-duplicate detection,
-      a manga reader, and Stable Diffusion metadata. The interface is a page
-      in your browser rather than a window.
+      and a manga reader. The interface runs in a browser tab instead of as a standalone app.
     </p>
     <p>
       Monbooru itself never contacts the internet. Downloading from boorus and

@@ -5,7 +5,7 @@ name: Release
 # the latest CHANGELOG.md entry.
 #
 # It also builds every downloadable artifact: the plain binaries, the bundled
-# ones, the Flatpak and the Windows installer. 
+# ones, the Flatpak and the Windows installer.
 
 on:
   push:
@@ -228,6 +228,9 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v7
+
+      - name: Let git read the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Install Go
         run: |
