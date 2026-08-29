@@ -197,13 +197,7 @@ func (s *Server) duplicatesListHandler(w http.ResponseWriter, r *http.Request) {
 	// sha256 walker and the delete-all branch apply - otherwise a SFW
 	// ceiling still prints the paths of what it hides, and [promote]
 	// acts on them.
-	from := ` FROM images i
-		JOIN image_paths ip ON ip.image_id = i.id AND ip.is_canonical = 0`
-	args := []any{}
-	if where, wargs := resolveCeiling(r, s.Active()).WhereOne("i.id"); where != "" {
-		from += ` WHERE ` + where
-		args = append(args, wargs...)
-	}
+	from, args := duplicatePathsFrom(r, s.Active())
 	var total int
 	if err := s.db().Read.QueryRow(`SELECT COUNT(*)`+from, args...).Scan(&total); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

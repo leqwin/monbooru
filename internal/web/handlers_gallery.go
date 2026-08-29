@@ -129,7 +129,7 @@ func (s *Server) galleryHandler(w http.ResponseWriter, r *http.Request) {
 		sortStr, orderStr = "order", "asc"
 	}
 	sortStr = cmp.Or(sortStr, "newest")
-	orderStr = cmp.Or(orderStr, "desc")
+	orderStr = cmp.Or(orderStr, search.DefaultOrder(sortStr))
 	pageStr := q.Get("page")
 	page := 1
 	pageNonPositive := false
@@ -196,7 +196,7 @@ func (s *Server) galleryHandler(w http.ResponseWriter, r *http.Request) {
 		RandomSeed: randomSeed,
 		Page:       page,
 		Limit:      pageSize,
-		CacheKey:   search.BuildAdjacencyCacheKey(s.activeName, queryStr, sortStr, orderStr, randomSeed, ceiling.Level()),
+		CacheKey:   search.BuildAdjacencyCacheKey(s.activeGallery(), queryStr, sortStr, orderStr, randomSeed, ceiling.Level()),
 	}
 	if sortStr == "order" {
 		sq.OrderCollection = pinnedCollection
@@ -281,7 +281,7 @@ func (s *Server) galleryHandler(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		case firstElapsed < galleryHiddenIndicatorBudget:
-			bareKey := search.BuildAdjacencyCacheKey(s.activeName, queryStr, sortStr, orderStr, randomSeed, "")
+			bareKey := search.BuildAdjacencyCacheKey(s.activeGallery(), queryStr, sortStr, orderStr, randomSeed, "")
 			if cachedIDs, ok := search.AdjacencyCacheGet(bareKey); ok {
 				rawTotal = len(cachedIDs)
 			} else {
@@ -331,7 +331,7 @@ func (s *Server) galleryHandler(w http.ResponseWriter, r *http.Request) {
 		FolderTree:        sb.Folders,
 		SourceLabelCounts: sb.SourceLabels,
 		SavedSearches:     sb.Saved,
-		EnabledTaggers:    tagger.EnabledTaggersForGallery(taggerCfg, s.activeName),
+		EnabledTaggers:    tagger.EnabledTaggersForGallery(taggerCfg, s.activeGallery()),
 		TaggersPresent:    tagger.Present(taggerCfg),
 		TaggerReason:      tagger.UnavailableReason(taggerCfg),
 		PluginSlot:        s.pluginSlot(r, config.SlotBatchBar, 0, ""),
@@ -367,9 +367,8 @@ func (s *Server) galleryHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// The batch-strip dialog's source select rides SourceLabelCounts even on
 	// the full-page render, where the sidebar (and its labels) is lazy-loaded;
-	// fill it from the cheap cached, ceiling-blind count. cx read under the
-	// ContextMiddleware RLock, matching s.base.
-	if cx := s.contexts[s.activeName]; cx != nil {
+	// fill it from the cheap cached, ceiling-blind count.
+	if cx := s.Active(); cx != nil {
 		data.SourceLabelCounts, _ = cx.SourceLabelCounts()
 	}
 	s.renderTemplate(w, "gallery.html", data)
@@ -464,7 +463,7 @@ func (s *Server) gallerySidebar(w http.ResponseWriter, r *http.Request) {
 		sortStr := q.Get("sort")
 		sortStr = cmp.Or(sortStr, "newest")
 		orderStr := q.Get("order")
-		orderStr = cmp.Or(orderStr, "desc")
+		orderStr = cmp.Or(orderStr, search.DefaultOrder(sortStr))
 		page := 1
 		if p, err := strconv.Atoi(q.Get("page")); err == nil && p > 0 {
 			page = p

@@ -26,16 +26,19 @@ func (s *Server) SwitchGallery(name string) error {
 		return errJobRunning
 	}
 	s.ctxMu.Lock()
-	if name == s.activeName {
+	st := s.galleryState()
+	if name == st.active {
 		s.ctxMu.Unlock()
 		return nil
 	}
-	if _, ok := s.contexts[name]; !ok {
+	if _, ok := st.contexts[name]; !ok {
 		s.ctxMu.Unlock()
 		return fmt.Errorf("unknown gallery %q", name)
 	}
-	oldName := s.activeName
-	s.activeName = name
+	oldName := st.active
+	next := st.clone()
+	next.active = name
+	s.galState.Store(next)
 	s.ctxMu.Unlock()
 
 	logx.Infof("gallery: switched from %q to %q", oldName, name)
@@ -46,7 +49,7 @@ func (s *Server) SwitchGallery(name string) error {
 // startup. Doesn't change the runtime-active gallery.
 func (s *Server) SetDefault(name string) error {
 	s.ctxMu.Lock()
-	if _, ok := s.contexts[name]; !ok {
+	if _, ok := s.galleryState().contexts[name]; !ok {
 		s.ctxMu.Unlock()
 		return fmt.Errorf("unknown gallery %q", name)
 	}
@@ -91,7 +94,8 @@ func (s *Server) AddGallery(name, galleryPath string) error {
 	}
 
 	s.ctxMu.Lock()
-	if _, ok := s.contexts[name]; ok {
+	next := s.galleryState().clone()
+	if _, ok := next.contexts[name]; ok {
 		s.ctxMu.Unlock()
 		return fmt.Errorf("gallery %q already exists", name)
 	}
@@ -111,12 +115,13 @@ func (s *Server) AddGallery(name, galleryPath string) error {
 		s.ctxMu.Unlock()
 		return err
 	}
-	s.contexts[name] = cx
+	next.contexts[name] = cx
+	s.galState.Store(next)
 	s.cfgMu.Lock()
 	s.cfg.Galleries = append(s.cfg.Galleries, g)
 	s.cfgMu.Unlock()
 	watch, maxMB := s.watcherSettings()
-	cx.startWatcher(watch, maxMB, s.ingestNaming(cx.Name), s.jobs)
+	cx.startBackground(watch, maxMB, s.ingestNaming(cx.Name), s.jobs)
 	s.ctxMu.Unlock()
 
 	if err := s.saveConfig(); err != nil {
@@ -134,12 +139,13 @@ func (s *Server) RemoveGallery(name string, removeFolder bool) error {
 		return errJobRunning
 	}
 	s.ctxMu.Lock()
-	cx, ok := s.contexts[name]
+	next := s.galleryState().clone()
+	cx, ok := next.contexts[name]
 	if !ok {
 		s.ctxMu.Unlock()
 		return fmt.Errorf("unknown gallery %q", name)
 	}
-	if name == s.activeName {
+	if name == next.active {
 		s.ctxMu.Unlock()
 		return fmt.Errorf("cannot remove the active gallery; switch to another first")
 	}
@@ -147,7 +153,7 @@ func (s *Server) RemoveGallery(name string, removeFolder bool) error {
 		s.ctxMu.Unlock()
 		return fmt.Errorf("cannot remove the default gallery; set another as default first")
 	}
-	if len(s.contexts) <= 1 {
+	if len(next.contexts) <= 1 {
 		s.ctxMu.Unlock()
 		return fmt.Errorf("cannot remove the last gallery")
 	}
@@ -155,7 +161,8 @@ func (s *Server) RemoveGallery(name string, removeFolder bool) error {
 	galleryPath := cx.GalleryPath
 	dataDir := filepath.Dir(cx.DBPath) // /<data_path>/<name>
 	cx.close()
-	delete(s.contexts, name)
+	delete(next.contexts, name)
+	s.galState.Store(next)
 	s.cfgMu.Lock()
 	s.cfg.Galleries = slices.DeleteFunc(s.cfg.Galleries, func(g config.Gallery) bool { return g.Name == name })
 	s.cfgMu.Unlock()
@@ -202,12 +209,13 @@ func (s *Server) RenameGallery(oldName, newName string) error {
 		return errJobRunning
 	}
 	s.ctxMu.Lock()
-	cx, ok := s.contexts[oldName]
+	next := s.galleryState().clone()
+	cx, ok := next.contexts[oldName]
 	if !ok {
 		s.ctxMu.Unlock()
 		return fmt.Errorf("unknown gallery %q", oldName)
 	}
-	if _, exists := s.contexts[newName]; exists {
+	if _, exists := next.contexts[newName]; exists {
 		s.ctxMu.Unlock()
 		return fmt.Errorf("gallery %q already exists", newName)
 	}
@@ -219,25 +227,49 @@ func (s *Server) RenameGallery(oldName, newName string) error {
 	}
 	cx.close()
 	oldDir := filepath.Dir(cx.DBPath)
-	if err := os.Rename(oldDir, newDir); err != nil && !os.IsNotExist(err) {
-		// Reopen the old ctx so we don't leave the gallery unusable on failure.
-		if reopened, reopenErr := openGalleryCtx(config.Gallery{
+	// restoreOld puts the gallery back the way it was found, background
+	// goroutines included: the close above already happened, so a refused
+	// rename would otherwise leave the map holding closed handles.
+	restoreOld := func() {
+		reopened, err := openGalleryCtx(config.Gallery{
 			Name: oldName, GalleryPath: cx.GalleryPath, DBPath: cx.DBPath, ThumbnailsPath: cx.ThumbnailsPath,
-		}); reopenErr == nil {
-			s.contexts[oldName] = reopened
+		})
+		if err != nil {
+			logx.Errorf("gallery %q: could not reopen after a refused rename: %v", oldName, err)
+			return
 		}
-		s.ctxMu.Unlock()
-		return fmt.Errorf("rename data dir %q -> %q: %w", oldDir, newDir, err)
+		next.contexts[oldName] = reopened
+		s.galState.Store(next)
+		watch, maxMB := s.watcherSettings()
+		reopened.startBackground(watch, maxMB, s.ingestNaming(oldName), s.jobs)
+	}
+	moved := false
+	if err := os.Rename(oldDir, newDir); err != nil {
+		if !os.IsNotExist(err) {
+			restoreOld()
+			s.ctxMu.Unlock()
+			return fmt.Errorf("rename data dir %q -> %q: %w", oldDir, newDir, err)
+		}
+	} else {
+		moved = true
 	}
 	newCx, err := openGalleryCtx(config.Gallery{
 		Name: newName, GalleryPath: cx.GalleryPath, DBPath: newDB, ThumbnailsPath: newThumbs,
 	})
 	if err != nil {
+		// The directory already moved, so the old context's paths point at
+		// somewhere that is no longer there; put it back before reopening.
+		if moved {
+			if renameErr := os.Rename(newDir, oldDir); renameErr != nil {
+				logx.Errorf("gallery %q: could not put the data dir back at %q: %v", oldName, oldDir, renameErr)
+			}
+		}
+		restoreOld()
 		s.ctxMu.Unlock()
 		return err
 	}
-	delete(s.contexts, oldName)
-	s.contexts[newName] = newCx
+	delete(next.contexts, oldName)
+	next.contexts[newName] = newCx
 	s.cfgMu.Lock()
 	for i := range s.cfg.Galleries {
 		if s.cfg.Galleries[i].Name == oldName {
@@ -251,17 +283,72 @@ func (s *Server) RenameGallery(oldName, newName string) error {
 		s.cfg.DefaultGallery = newName
 	}
 	s.cfgMu.Unlock()
-	if s.activeName == oldName {
-		s.activeName = newName
+	if next.active == oldName {
+		next.active = newName
 	}
+	s.galState.Store(next)
 	watch, maxMB := s.watcherSettings()
-	newCx.startWatcher(watch, maxMB, s.ingestNaming(newCx.Name), s.jobs)
+	newCx.startBackground(watch, maxMB, s.ingestNaming(newCx.Name), s.jobs)
 	s.ctxMu.Unlock()
 
 	if err := s.saveConfig(); err != nil {
 		return fmt.Errorf("persist gallery rename: %w", err)
 	}
 	logx.Infof("gallery: renamed %q to %q", oldName, newName)
+	return nil
+}
+
+// RepointGallery moves a gallery's source folder without touching its data.
+// The db and thumbnails stay where they are, so the whole operation is a
+// reopen: the context caches the path and the watcher holds it open.
+func (s *Server) RepointGallery(name, galleryPath string) error {
+	galleryPath = filepath.Clean(strings.TrimSpace(galleryPath))
+	if galleryPath == "" || !filepath.IsAbs(galleryPath) {
+		return fmt.Errorf("the gallery folder must be an absolute path")
+	}
+	if _, err := os.ReadDir(galleryPath); err != nil {
+		return fmt.Errorf("gallery path %q is not readable: %w", galleryPath, err)
+	}
+	if s.jobs.IsRunning() {
+		return errJobRunning
+	}
+	s.ctxMu.Lock()
+	next := s.galleryState().clone()
+	cx, ok := next.contexts[name]
+	if !ok {
+		s.ctxMu.Unlock()
+		return fmt.Errorf("unknown gallery %q", name)
+	}
+	if cx.GalleryPath == galleryPath {
+		s.ctxMu.Unlock()
+		return nil
+	}
+	// Opened before the old one closes: a reopen that fails after the close
+	// would leave the map holding closed handles, and the wizard's only
+	// submit is what calls this.
+	newCx, err := openGalleryCtx(config.Gallery{
+		Name: name, GalleryPath: galleryPath, DBPath: cx.DBPath, ThumbnailsPath: cx.ThumbnailsPath,
+	})
+	if err != nil {
+		s.ctxMu.Unlock()
+		return err
+	}
+	cx.close()
+	next.contexts[name] = newCx
+	s.galState.Store(next)
+	s.cfgMu.Lock()
+	if g := s.cfg.FindGallery(name); g != nil {
+		g.GalleryPath = galleryPath
+	}
+	s.cfgMu.Unlock()
+	watch, maxMB := s.watcherSettings()
+	newCx.startBackground(watch, maxMB, s.ingestNaming(name), s.jobs)
+	s.ctxMu.Unlock()
+
+	if err := s.saveConfig(); err != nil {
+		return fmt.Errorf("persist gallery path: %w", err)
+	}
+	logx.Infof("gallery: %q now points at %q", name, galleryPath)
 	return nil
 }
 
@@ -302,7 +389,7 @@ func (s *Server) galleryRowsWithSnapshot(activeName string, activeImages, active
 			out[i].Tags = activeTags
 			continue
 		}
-		cx := s.contexts[g.Name]
+		cx := s.Get(g.Name)
 		if cx == nil || cx.DB == nil {
 			continue
 		}

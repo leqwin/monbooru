@@ -29,75 +29,9 @@ import (
 // from the archive. importOver is rejected when the target is the active or
 // default gallery (mirrors RemoveGallery's guard).
 func (s *Server) ImportGallery(name, format string, upload io.Reader) error {
-	if s.jobs.IsRunning() {
-		return errJobRunning
-	}
-
-	s.ctxMu.Lock()
-	cx, ok := s.contexts[name]
-	if !ok {
-		s.ctxMu.Unlock()
-		return fmt.Errorf("unknown gallery %q", name)
-	}
-	if name == s.activeName {
-		s.ctxMu.Unlock()
-		return fmt.Errorf("cannot import over the active gallery; switch to another first")
-	}
-	s.cfgMu.RLock()
-	isDefault := name == s.cfg.DefaultGallery
-	s.cfgMu.RUnlock()
-	if isDefault {
-		s.ctxMu.Unlock()
-		return fmt.Errorf("cannot import over the default gallery; set another as default first")
-	}
-
-	galleryPath := cx.GalleryPath
-	dbPath := cx.DBPath
-	thumbsPath := cx.ThumbnailsPath
-	dataDir := filepath.Dir(dbPath)
-
-	// Buffer the upload to a temp file on the same filesystem as the data
-	// directory so the later rename is atomic. The upload may be a multi-GB
-	// zip; we cannot keep it in RAM.
-	tmp, err := os.CreateTemp(dataDir, "import-*.upload")
+	newCx, err := s.replaceGalleryFromUpload(name, format, upload)
 	if err != nil {
-		s.ctxMu.Unlock()
-		return fmt.Errorf("create temp: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() { _ = os.Remove(tmpPath) }()
-	if _, err := io.Copy(tmp, upload); err != nil {
-		_ = tmp.Close()
-		s.ctxMu.Unlock()
-		return fmt.Errorf("buffer upload: %w", err)
-	}
-	_ = tmp.Close()
-
-	// Close the target DB and stop its watcher before touching on-disk state.
-	cx.close()
-
-	applyErr := galleryio.ApplyImport(format, tmpPath, dbPath, thumbsPath, galleryPath, s.maxFileSizeMB())
-
-	// Reopen regardless so we leave the gallery usable even after a failed import.
-	newCx, openErr := openGalleryCtx(config.Gallery{
-		Name: name, GalleryPath: galleryPath, DBPath: dbPath, ThumbnailsPath: thumbsPath,
-	})
-	if openErr != nil {
-		s.ctxMu.Unlock()
-		if applyErr != nil {
-			return fmt.Errorf("import failed: %w (reopen also failed: %v)", applyErr, openErr)
-		}
-		return fmt.Errorf("reopen gallery: %w", openErr)
-	}
-	s.contexts[name] = newCx
-	watch, maxMB := s.watcherSettings()
-	newCx.startWatcher(watch, maxMB, s.ingestNaming(newCx.Name), s.jobs)
-	s.ctxMu.Unlock()
-
-	go newCx.warmCaches()
-
-	if applyErr != nil {
-		return applyErr
+		return err
 	}
 	logx.Infof("gallery: imported %q (format=%s)", name, format)
 
@@ -120,6 +54,88 @@ func (s *Server) ImportGallery(name, format string, upload io.Reader) error {
 		logx.Infof("gallery %q: skipped post-import rebuild: %v", name, err)
 	}
 	return nil
+}
+
+// replaceGalleryFromUpload buffers the upload, swaps the gallery's files
+// for it and reopens the context, returning the reopened one. It holds the
+// job lane rather than ctxMu for the length of that: buffering a multi-GB
+// archive and replacing a library are minutes of work, and a request that
+// cannot take the read lock is a frozen UI. Every gallery mutation and
+// every job already refuses while the lane is held, so the exclusion the
+// long write lock was providing is unchanged.
+func (s *Server) replaceGalleryFromUpload(name, format string, upload io.Reader) (*galleryCtx, error) {
+	if err := s.jobs.BeginSchedule(); err != nil {
+		return nil, errJobRunning
+	}
+	defer s.jobs.EndSchedule()
+
+	s.ctxMu.Lock()
+	st := s.galleryState()
+	cx, ok := st.contexts[name]
+	if !ok {
+		s.ctxMu.Unlock()
+		return nil, fmt.Errorf("unknown gallery %q", name)
+	}
+	if name == st.active {
+		s.ctxMu.Unlock()
+		return nil, fmt.Errorf("cannot import over the active gallery; switch to another first")
+	}
+	s.cfgMu.RLock()
+	isDefault := name == s.cfg.DefaultGallery
+	s.cfgMu.RUnlock()
+	if isDefault {
+		s.ctxMu.Unlock()
+		return nil, fmt.Errorf("cannot import over the default gallery; set another as default first")
+	}
+	galleryPath := cx.GalleryPath
+	dbPath := cx.DBPath
+	thumbsPath := cx.ThumbnailsPath
+	dataDir := filepath.Dir(dbPath)
+	s.ctxMu.Unlock()
+
+	// Buffer the upload to a temp file on the same filesystem as the data
+	// directory so the later rename is atomic. The upload may be a multi-GB
+	// zip; we cannot keep it in RAM. Before the close below, so an upload
+	// that fails leaves the gallery open and untouched.
+	tmp, err := os.CreateTemp(dataDir, "import-*.upload")
+	if err != nil {
+		return nil, fmt.Errorf("create temp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if _, err := io.Copy(tmp, upload); err != nil {
+		_ = tmp.Close()
+		return nil, fmt.Errorf("buffer upload: %w", err)
+	}
+	_ = tmp.Close()
+
+	// Close the target DB and stop its watcher before touching on-disk state.
+	s.ctxMu.Lock()
+	cx.close()
+	s.ctxMu.Unlock()
+
+	applyErr := galleryio.ApplyImport(format, tmpPath, dbPath, thumbsPath, galleryPath, s.maxFileSizeMB())
+
+	// Reopen regardless so we leave the gallery usable even after a failed import.
+	newCx, openErr := openGalleryCtx(config.Gallery{
+		Name: name, GalleryPath: galleryPath, DBPath: dbPath, ThumbnailsPath: thumbsPath,
+	})
+	if openErr != nil {
+		if applyErr != nil {
+			return nil, fmt.Errorf("import failed: %w (reopen also failed: %v)", applyErr, openErr)
+		}
+		return nil, fmt.Errorf("reopen gallery: %w", openErr)
+	}
+	s.ctxMu.Lock()
+	next := s.galleryState().clone()
+	next.contexts[name] = newCx
+	s.galState.Store(next)
+	watch, maxMB := s.watcherSettings()
+	newCx.startBackground(watch, maxMB, s.ingestNaming(newCx.Name), s.jobs)
+	s.ctxMu.Unlock()
+
+	go newCx.warmCaches()
+	return newCx, applyErr
 }
 
 // settingsGalleryExport serves GET /settings/galleries/{name}/export?format=&with_images=.
@@ -348,7 +364,7 @@ func (s *Server) transferTarget(w http.ResponseWriter, r *http.Request) (*galler
 	switch target {
 	case "":
 		msg = "Pick a target gallery."
-	case s.activeName:
+	case s.activeGallery():
 		msg = "The target must be a different gallery."
 	}
 	if msg == "" {

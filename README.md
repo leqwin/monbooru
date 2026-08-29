@@ -44,7 +44,7 @@ Designed for organizing your local media collection, including AI-generated imag
 
 ## Technical overview
 
-Monbooru compiles to a single self-contained binary (~20 MB, web assets embedded) with a handful of Go dependencies. Storage is one SQLite file per gallery (no database server, no cache layer, nothing else to run). Your collection stays ordinary files and folders on disk, the database and thumbnails live in a separate data directory, so removing monbooru leaves your images exactly where they were. The UI is server-rendered with no JS framework, no frontend build step, ~300 KB of static assets total. Memory scales with the library: a fresh instance starts around 25 MB of RAM, a small library idles around 50 MB, and a million-image library settles around 500 MB, flat over time, with typical pages still rendering in a few milliseconds at that scale. The heavy features stay out of the core process: ONNX auto-tagging is disabled by default and runs in a separate worker that unloads itself when idle, and everything online (downloading, reverse lookup) lives in the optional monloader companion, so monbooru itself never touches the internet. The only external tool is ffmpeg, optional, for video and animated previews.
+Monbooru compiles to a single self-contained binary (~20 MB, web assets embedded) with a handful of Go dependencies; the bundled download is that binary plus ffmpeg and the ONNX Runtime as ordinary files beside it. Storage is one SQLite file per gallery (no database server, no cache layer, nothing else to run). Your collection stays ordinary files and folders on disk, the database and thumbnails live in a separate data directory, so removing monbooru leaves your images exactly where they were. The UI is server-rendered with no JS framework, no frontend build step, ~300 KB of static assets total. Memory scales with the library: a fresh instance starts around 25 MB of RAM, a small library idles around 50 MB, and a million-image library settles around 500 MB, flat over time, with typical pages still rendering in a few milliseconds at that scale. The heavy features stay out of the core process: ONNX auto-tagging is disabled by default and runs in a separate worker that unloads itself when idle, and everything online (downloading, reverse lookup) lives in the optional monloader companion, so monbooru itself never touches the internet. The only external tool is ffmpeg, optional, for video and animated previews.
 
 ---
 
@@ -93,9 +93,18 @@ contribute back`"| loader
 
 ## Quick start (Docker)
 
-Edit the volume paths in [`docker/docker-compose.yml`](docker/docker-compose.yml), then `docker compose up -d`. The app is available at `http://localhost:8080`.
+Edit the volume paths in [`docker/docker-compose.yml`](docker/docker-compose.yml), then `docker compose up -d`. The app is available at `http://localhost:8455`.
 
 See the monbooru documentation for help. In-app, type `system:` in the search bar for the syntax cheat-sheet and press `?` for the keyboard shortcuts; the footer's `help` link opens the documentation.
+
+## Quick start (desktop)
+
+Download a **desktop** build for your system from the [releases](https://github.com/monbooru/monbooru/releases), unpack it, and run it. It opens a browser at `http://localhost:8455`.
+
+Downloads come on two axes:
+
+- **desktop** or **server**. Desktop is the same as Server except it manages setup, paths, tray, shortcuts, start and stop in a way that is more friendly for desktop only users.
+- **lite** or **bundled**. Lite is a single binary. Bundled carries ffmpeg and the ONNX Runtime beside it, so video thumbnails and local auto-tagging work with nothing else installed.
 
 ---
 

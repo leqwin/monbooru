@@ -145,15 +145,6 @@ func (s *Server) startBulkDelete(w http.ResponseWriter, targets []search.DeleteT
 	w.WriteHeader(http.StatusAccepted)
 }
 
-// runBulkDelete processes targets in chunks with one transaction per chunk.
-// The images schema cascades image_tags / image_paths / sd_metadata /
-// comfyui_metadata on image delete, so a single DELETE FROM images clears the
-// dependent rows. dup_groups.original_image_id has no CASCADE, so the
-// relations hook runs first to promote or dissolve, exactly as the
-// single-image delete does. Tag usage counts are reconciled at the end by a
-// targeted recalc scoped to the tag IDs actually touched by the cascade
-// (collected from image_tags before the DELETE), avoiding a full-table Recalc
-// that would walk every tag in the library.
 // recalcAffectedTags reconciles usage counts for the tags a batch touched,
 // reporting the step on the job bar. logCtx names the caller in the warning.
 func (s *Server) recalcAffectedTags(affected []int64, processed, total int, logCtx string) {
@@ -166,6 +157,15 @@ func (s *Server) recalcAffectedTags(affected []int64, processed, total int, logC
 	}
 }
 
+// runBulkDelete processes targets in chunks with one transaction per chunk.
+// The images schema cascades image_tags / image_paths / sd_metadata /
+// comfyui_metadata on image delete, so a single DELETE FROM images clears the
+// dependent rows. dup_groups.original_image_id has no CASCADE, so the
+// relations hook runs first to promote or dissolve, exactly as the
+// single-image delete does. Tag usage counts are reconciled at the end by a
+// targeted recalc scoped to the tag IDs actually touched by the cascade
+// (collected from image_tags before the DELETE), avoiding a full-table Recalc
+// that would walk every tag in the library.
 func (s *Server) runBulkDelete(targets []search.DeleteTarget) {
 	ctx := s.jobs.Context()
 	total := len(targets)
@@ -257,10 +257,6 @@ func (s *Server) batchMove(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// runPerImageJob walks ids one at a time, applying op and counting the
-// per-image failures rather than stopping on them - a single unreadable
-// file must not strand the rest of the scope. Progress lands every 25
-// images; the caches are dropped only when something actually changed.
 // perImageLoop walks ids with per-image error isolation, reporting
 // progress every 25th and on the last. The callers own the completion
 // summary: they differ in which caches to invalidate and what to name
@@ -286,6 +282,10 @@ func (s *Server) perImageLoop(ids []int64, verb, gerund string, op func(i int, i
 	return done, failed, false
 }
 
+// runPerImageJob walks ids one at a time, applying op and counting the
+// per-image failures rather than stopping on them - a single unreadable
+// file must not strand the rest of the scope. Progress lands every 25
+// images; the caches are dropped only when something actually changed.
 func (s *Server) runPerImageJob(ids []int64, verb, gerund, past string, op func(i int, id int64) error) {
 	total := len(ids)
 	done, failed, cancelled := s.perImageLoop(ids, verb, gerund, op)
@@ -326,7 +326,7 @@ func (s *Server) batchName(tmpl *gallery.NameTemplate, literal string, i, total 
 	if !tmpl.HasTokens() {
 		return literal, nil
 	}
-	facts, err := gallery.LoadNameFacts(s.jobs.Context(), s.db(), s.activeName, id, 0, tmpl)
+	facts, err := gallery.LoadNameFacts(s.jobs.Context(), s.db(), s.activeGallery(), id, 0, tmpl)
 	if err != nil {
 		return "", err
 	}
@@ -393,7 +393,7 @@ func (s *Server) batchTag(w http.ResponseWriter, r *http.Request) {
 		flashStatus(w, http.StatusBadRequest, "No tags provided.")
 		return
 	}
-	catTags, parseErrMsg := s.parseTagInput(tagInput)
+	catTags, unknownCats, parseErrMsg := s.parseTagInput(tagInput)
 	if parseErrMsg != "" {
 		flashStatus(w, http.StatusBadRequest, parseErrMsg)
 		return
@@ -403,8 +403,9 @@ func (s *Server) batchTag(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	note := unknownCategoryNote(unknownCats)
 	s.startScopedJob(w, r, "batch-tag", models.JobTypeTag, func(ids []int64) {
-		s.runBatchTag(ids, op, catTags)
+		s.runBatchTag(ids, op, catTags, note)
 	})
 }
 
@@ -431,17 +432,22 @@ func (s *Server) anyTagHasImplications(tagIDs []int64) bool {
 // (creating new tags on add, looking up only existing ones on remove) and
 // applies the resolved set to every image in turn. Cancellable via the
 // shared job context, identical to runBulkDelete's pattern.
-func (s *Server) runBatchTag(ids []int64, op string, catTags []catTag) {
+func (s *Server) runBatchTag(ids []int64, op string, catTags []catTag, note string) {
 	type resolvedTag struct {
 		id   int64
 		name string
 	}
 	var resolved []resolvedTag
+	// A token the tag charset refuses has to be named: the operator uses the
+	// batch bar precisely so they do not open every image to check, and a
+	// typo carrying * or " would otherwise land as plain success.
+	var refused skipReasons
 	if op == "add" {
 		for _, ct := range catTags {
 			t, err := s.tagSvc().GetOrCreateTag(ct.name, ct.catID)
 			if err != nil {
 				logx.Warnf("batch-tag get-or-create %q: %v", ct.name, err)
+				refused.add(fmt.Errorf("%s: %w", ct.name, err))
 				continue
 			}
 			resolved = append(resolved, resolvedTag{t.ID, t.Name})
@@ -459,6 +465,10 @@ func (s *Server) runBatchTag(ids []int64, op string, catTags []catTag) {
 		}
 	}
 	if len(resolved) == 0 {
+		if refused.any() {
+			s.jobs.Fail("nothing to add: " + refused.String())
+			return
+		}
 		s.jobs.Complete(fmt.Sprintf("nothing to %s (no matching tags)", op))
 		return
 	}
@@ -522,6 +532,12 @@ func (s *Server) runBatchTag(ids []int64, op string, catTags []catTag) {
 	s.Active().InvalidateCaches()
 
 	done := fmt.Sprintf("%s %d image(s) (%d row change(s)).", summary, processed, applied)
+	if note != "" {
+		done += " " + note + "."
+	}
+	if refused.any() {
+		done += " Refused: " + refused.String() + "."
+	}
 	if reRated > 0 {
 		done += fmt.Sprintf(" Replaced the rating on %d image(s).", reRated)
 	}
@@ -934,6 +950,10 @@ func (s *Server) runBatchLookup(opts batchLookupOpts, ids []int64) {
 		s.jobs.Fail("no active gallery")
 		return
 	}
+	// The PTR pass writes image_tags before the booru loop starts, so a
+	// failure or a cancel below still owes the caches a drop. Deferred
+	// rather than repeated at each return; over-invalidating costs nothing.
+	defer cx.InvalidateCaches()
 	if opts.mode == "schedule" {
 		s.runBatchSchedule(ctx, cx, opts.on, ids)
 		return
@@ -1018,7 +1038,6 @@ func (s *Server) runBatchLookup(opts batchLookupOpts, ids []int64) {
 			enqueued++
 		}
 	}
-	cx.InvalidateCaches()
 	if opts.mode == "refresh" {
 		s.jobs.Complete(fmt.Sprintf("Queued %d source fetch(es) on monloader; skipped %d without a fetchable source.", enqueued, skipped))
 		return

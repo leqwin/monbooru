@@ -3,6 +3,9 @@ name: Release
 # Builds the CPU image for amd64 and arm64 and the CUDA and OpenVINO images
 # for amd64, pushes them to GHCR, and creates a GitHub release whose body is
 # the latest CHANGELOG.md entry.
+#
+# It also builds every downloadable artifact: the plain binaries, the bundled
+# ones, the Flatpak and the Windows installer. 
 
 on:
   push:
@@ -13,6 +16,19 @@ on:
 permissions:
   contents: write
   packages: write
+
+env:
+  GO_VERSION: '1.26.7'
+  GO_SHA256_LINUX_AMD64: ffb5f8de10c62550dfddab66b36b57030721e0a44a3218e9e1181d7b59f121ca
+  ORT_VERSION: '1.21.0'
+  FFMPEG_BUILD: v8.1.2-mb2
+  FFMPEG_NAME: ffmpeg-8.1.2-mb2
+  ORT_SHA256_LINUX_X64: 7485c7e7aac6501b27e353dcbe068e45c61ab51fbaf598d13970dfae669d20bf
+  ORT_SHA256_LINUX_AARCH64: 4508084bde1232ee1ab4b6fad2155be0ea2ccab1c1aae9910ddb3fb68a60805e
+  ORT_SHA256_WIN_X64: 5c07bb2805cd666dda75fa9bfa60e75f2f90d478b952298dd9d55c00740d81bf
+  FFMPEG_SHA256_LINUX64: 256131407bd62df7ff2d870073d9f7cc14e6cc0123cebd3616497805bc45f168
+  FFMPEG_SHA256_LINUXARM64: f77a5808571b6716bf66f5d25fbb01078e6e2930defdaa5606617f0e4c7b1644
+  FFMPEG_SHA256_WIN64: 2591b30504586fdcba369d8960111ba6b966c49a43867c02d42a1d376df50a84
 
 jobs:
   docker:
@@ -165,3 +181,169 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
           body_path: .latest_changelog.md
+
+  lite:
+    name: Lite binaries and installer
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Go
+        run: |
+          ./packaging/install-go.sh "${GO_VERSION}" "${GO_SHA256_LINUX_AMD64}"
+
+      - name: Build
+        run: ./packaging/build-binaries.sh lite
+
+      - name: Build the installer
+        run: ./packaging/build-installer.sh lite
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: binaries-lite
+          path: dist/*
+          if-no-files-found: error
+
+  bundled-linux:
+    name: Bundled Linux (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    container: node:24-bookworm
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+            gosha: ffb5f8de10c62550dfddab66b36b57030721e0a44a3218e9e1181d7b59f121ca
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            gosha: 5a4ec883379d51ee9ce1040d5e87f8d35e20387574dd8c947feb01eabc3c1b37
+    steps:
+      - name: Install the build tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl gcc git libc6-dev tar xz-utils
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Go
+        run: |
+          ./packaging/install-go.sh "${GO_VERSION}" "${{ matrix.gosha }}" "${{ matrix.arch }}"
+
+      - name: Fetch the bundled tools
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+        run: ./packaging/fetch-tools.sh
+
+      - name: Build
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+        run: ./packaging/build-binaries.sh bundled
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: binaries-bundled-linux-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  bundled-windows:
+    name: Bundled Windows and installer
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install the build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-mingw-w64-x86-64-win32 unzip zip
+          ./packaging/install-go.sh "${GO_VERSION}" "${GO_SHA256_LINUX_AMD64}"
+
+      - name: Fetch the bundled tools
+        env:
+          GOOS: windows
+          GOARCH: amd64
+        run: ./packaging/fetch-tools.sh
+
+      - name: Build
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CC: x86_64-w64-mingw32-gcc-win32
+        run: ./packaging/build-binaries.sh bundled
+
+      - name: Build the installer
+        run: ./packaging/build-installer.sh bundled
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: binaries-bundled-windows
+          path: dist/*
+          if-no-files-found: error
+
+  flatpak:
+    name: Flatpak bundle
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install flatpak-builder
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder
+
+      - name: Let bwrap open a user namespace
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Check the route to flathub
+        run: |
+          probe=https://dl.flathub.org/repo/config
+          getent hosts dl.flathub.org || true
+          v4=0
+          v6=0
+          curl -4 -fsS --max-time 30 -o /dev/null \
+            -w 'ipv4: %{http_code} in %{time_total}s from %{remote_ip}\n' "$probe" && v4=1 || echo "ipv4: no answer"
+          curl -6 -fsS --max-time 30 -o /dev/null \
+            -w 'ipv6: %{http_code} in %{time_total}s from %{remote_ip}\n' "$probe" && v6=1 || echo "ipv6: no answer"
+          if [ "$v4" = 1 ] && [ "$v6" = 0 ]; then
+            echo "ipv6 is broken here; preferring ipv4"
+            echo 'precedence ::ffff:0:0/96  100' | sudo tee -a /etc/gai.conf
+          fi
+
+      - name: Build the bundle
+        run: ./packaging/flatpak-bundle.sh
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: binaries-flatpak
+          path: dist/*
+          if-no-files-found: error
+
+  attach:
+    name: Attach the artifacts to the release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [release, lite, bundled-linux, bundled-windows, flatpak]
+    steps:
+      - name: Download every artifact
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: binaries-*
+          merge-multiple: true
+
+      - name: Attach
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: dist/*

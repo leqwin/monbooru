@@ -551,7 +551,7 @@ func (s *Server) addTagAliasPost(w http.ResponseWriter, r *http.Request) {
 		writeInlineFlash(w, "err", "Alias name is required.")
 		return
 	}
-	catTags, parseErrMsg := s.parseTagInput(rawInput)
+	catTags, unknownCats, parseErrMsg := s.parseTagInput(rawInput)
 	if parseErrMsg != "" {
 		writeInlineFlash(w, "err", parseErrMsg)
 		return
@@ -575,7 +575,11 @@ func (s *Server) addTagAliasPost(w http.ResponseWriter, r *http.Request) {
 		if added != 1 {
 			noun = "aliases"
 		}
-		hxDone(w, r, strconv.Itoa(added)+" "+noun+" created.", "", fmt.Sprintf("/tags/%d", id))
+		msg := strconv.Itoa(added) + " " + noun + " created."
+		if note := unknownCategoryNote(unknownCats); note != "" {
+			msg += " " + note + "."
+		}
+		hxDone(w, r, msg, "", fmt.Sprintf("/tags/%d", id))
 	case added > 0:
 		writeInlineFlash(w, "err", "Added "+strconv.Itoa(added)+". Failed: "+strings.Join(failures, "; "))
 	default:

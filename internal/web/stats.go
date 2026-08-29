@@ -34,8 +34,18 @@ type memStats struct {
 	// glibc arenas). The kernel can only reclaim this through swap,
 	// so it's the part that puts real pressure on host RAM.
 	Anon int64
-	// Native is the slice of Anon that Go's runtime didn't allocate:
-	// Anon - Sys, clamped at zero. Two feeders in this process:
+	// GoInuse is the runtime's own share of Anon: the spans and structures
+	// actually in use. Not Sys, which measures address space the runtime
+	// mapped - arenas and GC metadata it never faulted in included - and so
+	// routinely reads larger than the resident Anon it would appear to sit
+	// inside.
+	GoInuse int64
+	// GoIdle is the rest of what the runtime holds from the kernel: spans
+	// it has freed but not handed back yet, plus the slack in its stack
+	// and span allocators. It drains on its own as the scavenger runs, and
+	// is most of what a finished job leaves behind.
+	GoIdle int64
+	// Native is the slice of Anon neither of the two above accounts for:
 	// modernc/libc holding SQLite's page cache, and any other CGO
 	// allocation. The auto-tagger's ORT heap lives in the worker
 	// subprocess and reports separately under the Auto-tagger row.
@@ -243,21 +253,28 @@ func gatherTaggerStats(s *Server) taggerCacheStats {
 func gatherMemStats() memStats {
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
+	// What the runtime still holds from the kernel. GCSys, OtherSys and
+	// BuckHashSys are left out: they are mapped far larger than they are
+	// ever faulted in, and counting them puts the runtime's share above
+	// RssAnon and the native remainder to zero.
+	goResident := int64(ms.HeapSys-ms.HeapReleased) + int64(ms.StackSys+ms.MSpanSys+ms.MCacheSys)
 	out := memStats{
 		HeapAlloc:  int64(ms.HeapAlloc),
 		Sys:        int64(ms.Sys),
+		GoInuse:    int64(ms.HeapInuse + ms.StackInuse + ms.MSpanInuse + ms.MCacheInuse),
 		Goroutines: runtime.NumGoroutine(),
 	}
+	out.GoIdle = goResident - out.GoInuse
 	if r, ok := procRSS(); ok {
 		out.Total = int64(r.total)
 		out.Anon = int64(r.anon)
 		out.File = int64(r.file)
 		out.DB = int64(r.db)
 		out.OtherFile = max(out.File-out.DB, 0)
-		// Sys can briefly exceed Anon when Go reserves arenas it
-		// hasn't faulted yet; clamp to zero so the row never
-		// renders as a negative.
-		out.Native = max(out.Anon-out.Sys, 0)
+		// Clamped: the runtime's accounting and the kernel's RssAnon are
+		// taken a moment apart, and a page swapped out leaves one and not
+		// the other.
+		out.Native = max(out.Anon-goResident, 0)
 		out.Available = true
 	}
 	return out

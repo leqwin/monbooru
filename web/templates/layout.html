@@ -93,7 +93,7 @@
       <span id="footer-hidden" class="footer-hidden">{{with .HiddenByCeiling}}<span class="footer-sep-strong">::</span>{{.}} hidden {{plural . "image" "images"}} in the current search{{end}}</span>
     </div>
     <div id="footer-right">
-      {{if .MonloaderPaired}}{{template "partials/monloader_light.html" .}} · {{end}}page loaded in <span id="page-load-ms">{{pageLoadMs .RequestStart}}</span> ms · <a href="{{.RepoURL}}" target="_blank" rel="noopener">monbooru{{if .Variant}} ({{.Variant}}){{end}}</a> {{.Version}} · <a href="#" id="footer-shortcuts" onclick="document.getElementById('shortcuts-help').showModal();return false">shortcuts</a> · <a href="{{.DocURL}}" target="_blank" rel="noopener">help</a> · <a href="/api/v1/docs" target="_blank" rel="noopener">API</a>
+      {{if .MonloaderPaired}}{{template "partials/monloader_light.html" .}} · {{end}}page loaded in <span id="page-load-ms">{{pageLoadMs .RequestStart}}</span> ms · <a href="{{.RepoURL}}" target="_blank" rel="noopener">monbooru{{if .Build}} ({{.Build}}){{end}}</a> {{.Version}} · <a href="#" id="footer-shortcuts" onclick="document.getElementById('shortcuts-help').showModal();return false">shortcuts</a> · <a href="{{.DocURL}}" target="_blank" rel="noopener">help</a> · <a href="/api/v1/docs" target="_blank" rel="noopener">API</a>
     </div>
   </footer>
   <dialog id="confirm-dialog">
@@ -235,7 +235,7 @@
         <h4>Settings page</h4>
         <table>
           <tbody>
-            <tr><td><kbd>1</kbd>-<kbd>9</kbd></td><td>Jump to section heading</td></tr>
+            <tr><td><kbd>1</kbd>-<kbd>9</kbd> <kbd>0</kbd></td><td>Jump to section heading, in sidebar order</td></tr>
           </tbody>
         </table>
       </section>

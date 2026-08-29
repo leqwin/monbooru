@@ -13,7 +13,7 @@ RUN VERSION=$(cat VERSION.md 2>/dev/null | tr -d '[:space:]') && \
     REPO=$(cat REPOSITORY.md 2>/dev/null | tr -d '[:space:]') && \
     DOC=$(cat DOC.md 2>/dev/null | tr -d '[:space:]') && \
     CGO_ENABLED=1 go build -tags tagger \
-    -ldflags="-s -w -X 'github.com/monbooru/monbooru/internal/web.Version=${VERSION}' -X 'github.com/monbooru/monbooru/internal/web.RepoURL=${REPO}' -X 'github.com/monbooru/monbooru/internal/web.DocURL=${DOC}' -X 'github.com/monbooru/monbooru/internal/web.Variant=openvino'" \
+    -ldflags="-s -w -X 'github.com/monbooru/monbooru/internal/web.Version=${VERSION}' -X 'github.com/monbooru/monbooru/internal/web.RepoURL=${REPO}' -X 'github.com/monbooru/monbooru/internal/web.DocURL=${DOC}' -X 'github.com/monbooru/monbooru/internal/web.Package=docker' -X 'github.com/monbooru/monbooru/internal/web.Variant=openvino'" \
     -o /monbooru ./cmd/monbooru
 
 # Stage 2: runtime -- Intel OpenVINO 2026.3 on Ubuntu 22.04 (x86_64 only).
@@ -23,10 +23,13 @@ COPY --from=build /monbooru /usr/local/bin/monbooru
 
 # Single layer: install build-only fetch tools and pull a static
 # ffmpeg/ffprobe.
-ARG FFMPEG_RELEASE=n8.1
+ARG FFMPEG_BUILD=v8.1.2-mb2
+ARG FFMPEG_NAME=ffmpeg-8.1.2-mb2
+ARG FFMPEG_SHA256_LINUX64=256131407bd62df7ff2d870073d9f7cc14e6cc0123cebd3616497805bc45f168
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl xz-utils && \
-    curl -fsSL "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-${FFMPEG_RELEASE}-latest-linux64-gpl-${FFMPEG_RELEASE#n}.tar.xz" -o /tmp/ffmpeg.tar.xz && \
+    curl -fsSL "https://github.com/monbooru/ffmpeg-builds/releases/download/${FFMPEG_BUILD}/${FFMPEG_NAME}-linux64.tar.xz" -o /tmp/ffmpeg.tar.xz && \
+    echo "${FFMPEG_SHA256_LINUX64}  /tmp/ffmpeg.tar.xz" | sha256sum -c - && \
     mkdir -p /tmp/ff && tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ff --strip-components=1 && \
     cp /tmp/ff/bin/ffmpeg /tmp/ff/bin/ffprobe /usr/local/bin/ && \
     apt-get purge -y curl xz-utils && apt-get autoremove -y && \
@@ -54,9 +57,9 @@ RUN mkdir -p /home/monbooru && chown 1000:1000 /home/monbooru
 USER 1000:1000
 
 ENV HOME=/home/monbooru \
-    MONBOORU_SERVER_BIND_ADDRESS=0.0.0.0:8080
+    MONBOORU_SERVER_BIND_ADDRESS=0.0.0.0:8455
 
-EXPOSE 8080
+EXPOSE 8455
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["/usr/local/bin/monbooru", "healthcheck", "-config", "/config/monbooru.toml"]

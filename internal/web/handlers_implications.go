@@ -65,7 +65,7 @@ func (s *Server) declareImplications(w http.ResponseWriter, r *http.Request, fie
 		writeInlineFlash(w, "err", "Tag name is required.")
 		return 0, nil, false
 	}
-	catTags, parseErrMsg := s.parseTagInput(raw)
+	catTags, _, parseErrMsg := s.parseTagInput(raw)
 	if parseErrMsg != "" {
 		writeInlineFlash(w, "err", parseErrMsg)
 		return 0, nil, false
@@ -435,59 +435,12 @@ func propagateAddImplication(tx *sql.Tx, imageID, parentID, ratingCatID int64) e
 	return tags.ApplyImpliedFanoutTx(tx, imageID, parentID, ratingCatID, isAuto == 1)
 }
 
-// propagateRemoveImplication walks the supplied implied-tag closure
-// on this image and drops any row whose only justification was the
-// now-deleted edge. is_implied=0 rows (user-owned) and rows still
-// implied by another parent on the image are preserved. The closure
-// (impliedID plus its transitive children) is resolved once by the
-// caller and reused across every image carrying the parent.
-// A row in the closure can be the only justification for another one, and
-// the closure is walked in an arbitrary order within a level, so sweep
-// until a pass drops nothing.
+// propagateRemoveImplication drops the rows on this image whose only
+// justification was the now-deleted edge. The closure (impliedID plus its
+// transitive children) is resolved once by the caller and reused across
+// every image carrying the parent. The edge is already gone, so nothing
+// is excluded from the still-implied check.
 func propagateRemoveImplication(tx *sql.Tx, imageID int64, closure []int64) error {
-	for {
-		dropped := false
-		for _, id := range closure {
-			var rowImplied int
-			err := tx.QueryRow(
-				`SELECT is_implied FROM image_tags WHERE image_id = ? AND tag_id = ?`, imageID, id,
-			).Scan(&rowImplied)
-			if err == sql.ErrNoRows {
-				continue
-			} else if err != nil {
-				return err
-			}
-			if rowImplied != 1 {
-				continue
-			}
-			// Still implied by another parent on the image? Keep it.
-			var alt int64
-			err = tx.QueryRow(
-				`SELECT ti.parent_tag_id
-				 FROM tag_implications ti
-				 JOIN image_tags it ON it.tag_id = ti.parent_tag_id
-				 WHERE ti.implied_tag_id = ? AND it.image_id = ?
-				 LIMIT 1`,
-				id, imageID,
-			).Scan(&alt)
-			if err == nil {
-				continue
-			}
-			if err != sql.ErrNoRows {
-				return err
-			}
-			if _, err := tx.Exec(
-				`DELETE FROM image_tags WHERE image_id = ? AND tag_id = ?`, imageID, id,
-			); err != nil {
-				return err
-			}
-			if err := tags.DropTagUsageTx(tx, id, imageID); err != nil {
-				return err
-			}
-			dropped = true
-		}
-		if !dropped {
-			return nil
-		}
-	}
+	_, err := tags.SweepImpliedClosureTx(tx, imageID, closure, 0)
+	return err
 }

@@ -1,4 +1,4 @@
-.PHONY: build build-tagger test test-tagger lint coverage coverage-tagger
+.PHONY: build build-tagger build-tray test test-tagger lint coverage coverage-tagger
 
 VERSION  := $(shell cat VERSION.md 2>/dev/null | tr -d '[:space:]')
 REPO_URL := $(shell cat REPOSITORY.md 2>/dev/null | tr -d '[:space:]')
@@ -10,6 +10,9 @@ build:
 
 build-tagger:
 	go build -tags tagger $(LDFLAGS) ./cmd/monbooru
+
+build-tray:
+	go build -tags tray $(LDFLAGS) ./cmd/monbooru
 
 test:
 	go test -race ./...

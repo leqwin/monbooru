@@ -529,6 +529,9 @@ func buildSpec(baseURL string) map[string]any {
 					}),
 					"responses": map[string]any{
 						"200": resp("Updated tag list", "#/components/schemas/TagArray"),
+						"400": resp("Empty `tags`", "#/components/schemas/Error"),
+						"404": resp("Not found", "#/components/schemas/Error"),
+						"409": resp("conflict for a name matching more than one tag on the image; tag_implied when another tag on the image implies the one being removed", "#/components/schemas/Error"),
 					},
 				},
 			},
@@ -933,6 +936,14 @@ func queryParam(name, desc string) map[string]any {
 	}
 }
 
+// baseURL reads the configured base under the web layer's config lock,
+// the way every other reader of that field does.
+func (h *Handler) baseURL() string {
+	h.cfgMu.RLock()
+	defer h.cfgMu.RUnlock()
+	return h.cfg.Server.BaseURL
+}
+
 // galleryParam is the shared ?gallery=<name> selector. Omitted means
 // the active gallery.
 func galleryParam() map[string]any {
@@ -941,7 +952,7 @@ func galleryParam() map[string]any {
 
 // openAPIJSON serves the raw OpenAPI JSON spec.
 func (h *Handler) openAPIJSON(w http.ResponseWriter, r *http.Request) {
-	spec := buildSpec(h.cfg.Server.BaseURL)
+	spec := buildSpec(h.baseURL())
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(spec)
 }
@@ -950,7 +961,7 @@ func (h *Handler) openAPIJSON(w http.ResponseWriter, r *http.Request) {
 // OpenAPI spec served at /api/v1/openapi.json. No external assets are
 // loaded at runtime, so the page works offline.
 func (h *Handler) openAPIDocs(w http.ResponseWriter, r *http.Request) {
-	view := extractDocsView(buildSpec(h.cfg.Server.BaseURL))
+	view := extractDocsView(buildSpec(h.baseURL()))
 	h.cfgMu.RLock()
 	view.APIEnabled = len(h.cfg.Auth.Tokens) > 0
 	h.cfgMu.RUnlock()

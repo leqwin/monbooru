@@ -535,19 +535,11 @@ func mergeFromZip(cx gallery.Handle, tmpPath string, maxFileSizeMB int) (MergeRe
 	}
 	defer func() { _ = zr.Close() }()
 
-	var innerDB, innerJSON, innerLight *zip.File
-	galleryFiles := map[string]*zip.File{}
-	for _, f := range zr.File {
-		switch {
-		case f.Name == "monbooru.db":
-			innerDB = f
-		case f.Name == "monbooru.json":
-			innerJSON = f
-		case f.Name == "tags.json":
-			innerLight = f
-		case strings.HasPrefix(f.Name, "gallery/") && !strings.HasSuffix(f.Name, "/"):
-			galleryFiles[strings.TrimPrefix(f.Name, "gallery/")] = f
-		}
+	innerDB, innerJSON, innerLight, inGallery := classifyArchive(zr.File)
+	// Keyed by the path under gallery/, which is what a light manifest names.
+	galleryFiles := make(map[string]*zip.File, len(inGallery))
+	for _, f := range inGallery {
+		galleryFiles[strings.TrimPrefix(f.Name, "gallery/")] = f
 	}
 
 	var records []mergeRecord

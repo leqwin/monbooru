@@ -12,7 +12,7 @@ RUN VERSION=$(cat VERSION.md 2>/dev/null | tr -d '[:space:]') && \
     REPO=$(cat REPOSITORY.md 2>/dev/null | tr -d '[:space:]') && \
     DOC=$(cat DOC.md 2>/dev/null | tr -d '[:space:]') && \
     CGO_ENABLED=1 go build -tags tagger \
-    -ldflags="-s -w -X 'github.com/monbooru/monbooru/internal/web.Version=${VERSION}' -X 'github.com/monbooru/monbooru/internal/web.RepoURL=${REPO}' -X 'github.com/monbooru/monbooru/internal/web.DocURL=${DOC}' -X 'github.com/monbooru/monbooru/internal/web.Variant=cuda'" \
+    -ldflags="-s -w -X 'github.com/monbooru/monbooru/internal/web.Version=${VERSION}' -X 'github.com/monbooru/monbooru/internal/web.RepoURL=${REPO}' -X 'github.com/monbooru/monbooru/internal/web.DocURL=${DOC}' -X 'github.com/monbooru/monbooru/internal/web.Package=docker' -X 'github.com/monbooru/monbooru/internal/web.Variant=cuda'" \
     -o /monbooru ./cmd/monbooru
 
 # Stage 2: runtime -- NVIDIA CUDA 12.6 + cuDNN 9 runtime (x86_64 only).
@@ -27,7 +27,9 @@ RUN apt-get update && apt-get remove -y --purge 'cuda-compat-*' && \
 # static ffmpeg/ffprobe.
 ARG ORT_VERSION=1.21.0
 ARG ORT_SHA256_X64_GPU=ef37a33ba75e457aebfd0d7b342ab20424aa6126bc5f565d247f1201b66996cf
-ARG FFMPEG_RELEASE=n8.1
+ARG FFMPEG_BUILD=v8.1.2-mb2
+ARG FFMPEG_NAME=ffmpeg-8.1.2-mb2
+ARG FFMPEG_SHA256_LINUX64=256131407bd62df7ff2d870073d9f7cc14e6cc0123cebd3616497805bc45f168
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl xz-utils && \
     curl -fsSL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-gpu-${ORT_VERSION}.tgz" \
@@ -37,7 +39,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cp /tmp/onnxruntime-linux-x64-gpu-${ORT_VERSION}/lib/libonnxruntime*.so* /usr/lib/ && \
     ln -sf /usr/lib/libonnxruntime.so.${ORT_VERSION} /usr/lib/libonnxruntime.so && \
     ldconfig && \
-    curl -fsSL "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-${FFMPEG_RELEASE}-latest-linux64-gpl-${FFMPEG_RELEASE#n}.tar.xz" -o /tmp/ffmpeg.tar.xz && \
+    curl -fsSL "https://github.com/monbooru/ffmpeg-builds/releases/download/${FFMPEG_BUILD}/${FFMPEG_NAME}-linux64.tar.xz" -o /tmp/ffmpeg.tar.xz && \
+    echo "${FFMPEG_SHA256_LINUX64}  /tmp/ffmpeg.tar.xz" | sha256sum -c - && \
     mkdir -p /tmp/ff && tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ff --strip-components=1 && \
     cp /tmp/ff/bin/ffmpeg /tmp/ff/bin/ffprobe /usr/local/bin/ && \
     apt-get purge -y curl xz-utils && apt-get autoremove -y && \
@@ -50,8 +53,8 @@ RUN groupadd --gid 1000 monbooru && \
     useradd --uid 1000 --gid 1000 --home-dir /home/monbooru --create-home monbooru
 USER 1000:1000
 
-ENV MONBOORU_SERVER_BIND_ADDRESS=0.0.0.0:8080
-EXPOSE 8080
+ENV MONBOORU_SERVER_BIND_ADDRESS=0.0.0.0:8455
+EXPOSE 8455
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["/usr/local/bin/monbooru", "healthcheck", "-config", "/config/monbooru.toml"]

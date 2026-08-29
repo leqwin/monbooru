@@ -6,16 +6,59 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/monbooru/monbooru/internal/fsx"
 )
 
 var (
-	ffmpegOnce sync.Once
-	ffmpegOK   bool
+	toolsOnce   sync.Once
+	ffmpegPath  string
+	ffprobePath string
 )
+
+// resolveTools finds ffmpeg and ffprobe once, as absolute paths. A copy
+// shipped beside the executable wins over one on PATH: that rung is the
+// whole reason a downloaded bundle works, where nothing sets anything up
+// before the process starts. Inside a container or a sandbox the tools are
+// on PATH anyway, so it is harmless there rather than load bearing.
+func resolveTools() {
+	toolsOnce.Do(func() {
+		ffmpegPath = resolveTool("ffmpeg")
+		ffprobePath = resolveTool("ffprobe")
+	})
+}
+
+func resolveTool(name string) string {
+	binary := name
+	if runtime.GOOS == "windows" {
+		binary += ".exe"
+	}
+	if dir := fsx.ExeDir(); dir != "" {
+		if p := filepath.Join(dir, binary); runnable(p) {
+			return p
+		}
+	}
+	if p, err := exec.LookPath(name); err == nil {
+		return p
+	}
+	return ""
+}
+
+// runnable rejects a file that is there but cannot be executed - a tarball
+// unpacked without the mode bits - so it does not shadow a working copy on
+// PATH.
+func runnable(path string) bool {
+	fi, err := os.Stat(path)
+	if err != nil || fi.IsDir() {
+		return false
+	}
+	return runtime.GOOS == "windows" || fi.Mode()&0o111 != 0
+}
 
 // ffmpegTimeout caps any single ffmpeg/ffprobe run. The per-file size cap
 // bounds bytes, not decode time, so a truncated or pathological-but-small
@@ -35,13 +78,17 @@ func runFFmpeg(combinedOutput bool, name string, args ...string) ([]byte, error)
 	return cmd.Output()
 }
 
-// ffmpegAvailable reports whether ffmpeg is on PATH (cached).
+// ffmpegAvailable reports whether an ffmpeg was resolved (cached).
 func ffmpegAvailable() bool {
-	ffmpegOnce.Do(func() {
-		_, err := exec.LookPath("ffmpeg")
-		ffmpegOK = err == nil
-	})
-	return ffmpegOK
+	resolveTools()
+	return ffmpegPath != ""
+}
+
+// ffprobeAvailable is the same for the probe half. The two are shipped
+// together but nothing guarantees both are present.
+func ffprobeAvailable() bool {
+	resolveTools()
+	return ffprobePath != ""
 }
 
 // runFFmpegToFile runs one ffmpeg encode into a temp file next to dstPath
@@ -60,7 +107,7 @@ func runFFmpegToFile(dstPath, tmpPattern, label string, args func(tmp string) []
 	_ = tmp.Close()
 	tmpName := tmp.Name()
 	defer func() { _ = os.Remove(tmpName) }()
-	if out, err := runFFmpeg(true, "ffmpeg", args(tmpName)...); err != nil {
+	if out, err := runFFmpeg(true, ffmpegPath, args(tmpName)...); err != nil {
 		return fmt.Errorf("ffmpeg %s: %w\n%s", label, err, string(out))
 	}
 	return os.Rename(tmpName, dstPath)
@@ -177,7 +224,7 @@ func ExtractVideoFrames(srcPath, tmpDir string, positions []float64) ([]string, 
 			"--",
 			tmp.Name(),
 		}
-		if _, err := runFFmpeg(true, "ffmpeg", args...); err != nil {
+		if _, err := runFFmpeg(true, ffmpegPath, args...); err != nil {
 			_ = os.Remove(tmp.Name())
 			continue
 		}
@@ -188,9 +235,12 @@ func ExtractVideoFrames(srcPath, tmpDir string, positions []float64) ([]string, 
 
 // probeDuration returns the video's duration in seconds via ffprobe.
 func probeDuration(srcPath string) (float64, error) {
+	// The thumbnail path reaches this before anything has resolved the
+	// tools, and an unresolved ffprobe would report no duration at all.
+	resolveTools()
 	// `--` terminates option parsing so a filename beginning with `-`
 	// is treated as positional rather than a flag.
-	out, err := runFFmpeg(false, "ffprobe",
+	out, err := runFFmpeg(false, ffprobePath,
 		"-v", "quiet",
 		"-print_format", "csv=p=0",
 		"-show_entries", "format=duration",
@@ -210,7 +260,7 @@ func probeDuration(srcPath string) (float64, error) {
 // (0, false) when ffmpeg is unavailable or probing fails; callers
 // leave the column NULL in that case.
 func ProbeDurationSeconds(srcPath string) (float64, bool) {
-	if !ffmpegAvailable() {
+	if !ffprobeAvailable() {
 		return 0, false
 	}
 	d, err := probeDuration(srcPath)
@@ -225,10 +275,10 @@ func ProbeDurationSeconds(srcPath string) (float64, bool) {
 // ffmpeg is unavailable or the probe fails so callers leave width and
 // height NULL in that case.
 func ProbeVideoDimensions(srcPath string) (int, int, bool) {
-	if !ffmpegAvailable() {
+	if !ffprobeAvailable() {
 		return 0, 0, false
 	}
-	out, err := runFFmpeg(false, "ffprobe",
+	out, err := runFFmpeg(false, ffprobePath,
 		"-v", "quiet",
 		"-select_streams", "v:0",
 		"-show_entries", "stream=width,height",

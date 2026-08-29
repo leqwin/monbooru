@@ -69,7 +69,7 @@ func (s *Server) namePreview(w http.ResponseWriter, r *http.Request) {
 	var rowErr error
 	md5Cap := s.previewMD5Cap()
 	for i, id := range ids {
-		facts, factErr := gallery.LoadNameFacts(r.Context(), s.db(), s.activeName, id, md5Cap, tmpl)
+		facts, factErr := gallery.LoadNameFacts(r.Context(), s.db(), s.activeGallery(), id, md5Cap, tmpl)
 		if factErr != nil {
 			rowErr = factErr
 			continue
@@ -181,7 +181,7 @@ func (s *Server) uploadDestPreview(ctx context.Context, w http.ResponseWriter, f
 	if (folderTmpl == nil && nameTmpl == nil) || len(ids) == 0 {
 		return
 	}
-	facts, err := gallery.LoadNameFacts(ctx, s.db(), s.activeName, ids[0], s.previewMD5Cap(), folderTmpl, nameTmpl)
+	facts, err := gallery.LoadNameFacts(ctx, s.db(), s.activeGallery(), ids[0], s.previewMD5Cap(), folderTmpl, nameTmpl)
 	if err != nil {
 		s.renderNamePreviewError(w, "", err.Error())
 		return

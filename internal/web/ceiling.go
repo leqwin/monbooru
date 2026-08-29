@@ -33,6 +33,21 @@ type Ceiling struct {
 	excludedLoaded bool
 }
 
+// duplicatePathsFrom is the FROM clause both file-duplicate surfaces
+// count and list against, with the rating ceiling folded in. Shared
+// because the two must agree on what a duplicate file is and on hiding
+// the same rows: one prints paths the other's counter would deny.
+func duplicatePathsFrom(r *http.Request, cx *galleryCtx) (string, []any) {
+	from := ` FROM images i
+		JOIN image_paths ip ON ip.image_id = i.id AND ip.is_canonical = 0`
+	args := []any{}
+	if where, wargs := resolveCeiling(r, cx).WhereOne("i.id"); where != "" {
+		from += ` WHERE ` + where
+		args = append(args, wargs...)
+	}
+	return from, args
+}
+
 // resolveCeiling reads the cookie and returns a Ceiling bound to cx.
 // cx may be nil (no active gallery) - the resolver still works for AST
 // shapes that don't need the tag-id resolution. ExcludedTagIDs returns

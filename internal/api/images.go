@@ -847,6 +847,17 @@ func atoiOrZero(v string) int {
 	return n
 }
 
+// checkCreateProvenance runs the provenance validation both create paths
+// end on and answers its 400. The ten-argument call is spelled once.
+func checkCreateProvenance(w http.ResponseWriter, in createInput) bool {
+	if err := validateCreateProvenance(in.source, in.postID, in.url, in.md5, in.parentURL,
+		in.collection, in.commentary, in.original, in.postFile.Ext, in.collectionOrder); err != nil {
+		apiError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return false
+	}
+	return true
+}
+
 // postFileFrom builds the claim from whichever entry point parsed it,
 // so the JSON bodies and the form read a negative dimension the same way
 // atoiOrZero does: as a source that published nothing.
@@ -944,8 +955,7 @@ func (h *Handler) parseCreateMultipart(w http.ResponseWriter, r *http.Request, g
 		}
 		in.collectionOrder = &n
 	}
-	if err := validateCreateProvenance(in.source, in.postID, in.url, in.md5, in.parentURL, in.collection, in.commentary, in.original, in.postFile.Ext, in.collectionOrder); err != nil {
-		apiError(w, http.StatusBadRequest, "invalid_request", err.Error())
+	if !checkCreateProvenance(w, in) {
 		return in, false
 	}
 
@@ -1042,8 +1052,7 @@ func (h *Handler) parseCreateJSON(w http.ResponseWriter, r *http.Request, g Gall
 	in.notes = annotationsFromInput(body.Notes, in.url)
 	in.collection = strings.TrimSpace(body.Collection)
 	in.collectionOrder = body.CollectionOrder
-	if err := validateCreateProvenance(in.source, in.postID, in.url, in.md5, in.parentURL, in.collection, in.commentary, in.original, in.postFile.Ext, in.collectionOrder); err != nil {
-		apiError(w, http.StatusBadRequest, "invalid_request", err.Error())
+	if !checkCreateProvenance(w, in) {
 		return in, false
 	}
 
@@ -1408,7 +1417,7 @@ func (h *Handler) searchImages(w http.ResponseWriter, r *http.Request) {
 	sortStr := q.Get("sort")
 	sortStr = cmp.Or(sortStr, "newest")
 	orderStr := q.Get("order")
-	orderStr = cmp.Or(orderStr, "desc")
+	orderStr = cmp.Or(orderStr, search.DefaultOrder(sortStr))
 
 	offset, limit := parsePage(r, h.cfg.UI.PageSize, 200)
 	pageNum := offset/limit + 1

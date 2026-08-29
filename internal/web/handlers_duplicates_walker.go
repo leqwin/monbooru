@@ -85,14 +85,7 @@ func (s *Server) sha256WalkerPage(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	ceiling := resolveCeiling(r, cx)
-	from := ` FROM images i
-		JOIN image_paths ip ON ip.image_id = i.id AND ip.is_canonical = 0`
-	args := []any{}
-	if where, wargs := ceiling.WhereOne("i.id"); where != "" {
-		from += ` WHERE ` + where
-		args = append(args, wargs...)
-	}
+	from, args := duplicatePathsFrom(r, cx)
 	var total int
 	if err := cx.DB.Read.QueryRow(`SELECT COUNT(*)`+from, args...).Scan(&total); err != nil {
 		logx.Warnf("sha256 walker count: %v", err)
@@ -125,7 +118,7 @@ func (s *Server) sha256WalkerPage(w http.ResponseWriter, r *http.Request) {
 	}
 	s.renderTemplate(w, "relations_duplicates_sha256.html", relationsWalkerData{
 		baseData:      s.base(r, "relations", "Duplicate files - "+s.booruName()),
-		ActiveGallery: s.activeName,
+		ActiveGallery: s.activeGallery(),
 		Kind:          "sha256",
 		Sha256Rows:    out,
 		Total:         total,
@@ -191,7 +184,7 @@ func (s *Server) markedWalkerPage(w http.ResponseWriter, r *http.Request) {
 	}
 	s.renderTemplate(w, "relations_duplicates_marked.html", relationsWalkerData{
 		baseData:      s.base(r, "relations", "Duplicate images - "+s.booruName()),
-		ActiveGallery: s.activeName,
+		ActiveGallery: s.activeGallery(),
 		Kind:          "marked",
 		MarkedRows:    out,
 		Total:         total,

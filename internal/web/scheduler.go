@@ -18,10 +18,18 @@ import (
 	"github.com/monbooru/monbooru/internal/tagger"
 )
 
+// scheduleGraceDelay is how long a catch-up run waits after startup. Long
+// enough that a cold start is not competing with the first pages the
+// operator asked for.
+const scheduleGraceDelay = 5 * time.Minute
+
 // runScheduler is a background goroutine that fires once per day at
 // cfg.Schedule.Time and runs the enabled actions sequentially on every
 // configured gallery. Started from NewServer; exits when s.done is closed.
 func (s *Server) runScheduler() {
+	// Its own goroutine: the grace delay must not hold the clock trigger
+	// unarmed, or a start shortly before schedule.time misses that day.
+	go s.scheduleCatchUp()
 	for {
 		next, ok := s.nextScheduledFire(time.Now())
 		if !ok {
@@ -45,18 +53,105 @@ func (s *Server) runScheduler() {
 		case <-s.schedReload:
 			continue
 		case <-time.After(d):
+			if !s.clockFireOwed() {
+				logx.Infof("scheduler: today's pass already ran; skipping the clock trigger")
+				continue
+			}
 			s.runScheduledActions()
 		}
 	}
 }
 
+// scheduleCatchUp runs the pass a machine that was asleep at schedule.time
+// never got. On a container this never fires; on a laptop it is the
+// difference between nightly maintenance and none at all.
+func (s *Server) scheduleCatchUp() {
+	if !s.catchUpOwed() {
+		return
+	}
+	select {
+	case <-s.done:
+		return
+	case <-time.After(scheduleGraceDelay):
+	}
+	// Re-read: the operator has had the grace delay to change the schedule,
+	// and a run they just switched off should not fire anyway.
+	if !s.catchUpOwed() {
+		return
+	}
+	logx.Infof("scheduler: running the pass this machine was not awake for")
+	s.runScheduledActions()
+}
+
+func (s *Server) catchUpOwed() bool {
+	s.cfgMu.RLock()
+	sched := s.cfg.Schedule
+	s.cfgMu.RUnlock()
+	return shouldCatchUp(sched, s.lastScheduledRun(), time.Now())
+}
+
+// clockFireOwed reports whether the wall-clock trigger still has work.
+// The two triggers are independent, so in catch-up mode a boot between
+// midnight and schedule.time runs the pass once on the grace delay and
+// then again on the clock - two full syncs inside half an hour. Only
+// that mode has a startup pass to collide with.
+func (s *Server) clockFireOwed() bool {
+	s.cfgMu.RLock()
+	mode := s.cfg.Schedule.EffectiveMode()
+	s.cfgMu.RUnlock()
+	if mode != config.ScheduleAtTimeCatchup {
+		return true
+	}
+	return dayPassOwed(s.lastScheduledRun(), time.Now())
+}
+
+// shouldCatchUp decides whether a startup pass is owed. on_start has no
+// clock trigger at all, so its once-per-day bound is this check.
+func shouldCatchUp(sched config.ScheduleConfig, last, now time.Time) bool {
+	switch sched.EffectiveMode() {
+	case config.ScheduleAtTimeCatchup, config.ScheduleOnStart:
+	default:
+		return false
+	}
+	if !schedHasAnyEnabled(sched) {
+		return false
+	}
+	return dayPassOwed(last, now)
+}
+
+// dayPassOwed reports whether now's day has yet to see a run. The bound is
+// the local calendar day, not a rolling 24 hours: a machine booted a few
+// minutes earlier than yesterday's run would fall short of the span and
+// skip a day it also slept through at schedule.time.
+func dayPassOwed(last, now time.Time) bool {
+	return last.IsZero() || localDayStart(now).After(localDayStart(last))
+}
+
+// localDayStart is midnight of t's day in the process timezone, which is the
+// clock schedule.time is read against.
+func localDayStart(t time.Time) time.Time {
+	local := t.In(time.Local)
+	return time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, time.Local)
+}
+
+// scheduleFiresAtTime reports whether the wall-clock trigger is live: an
+// action has to be enabled and the mode has to be one that watches a clock.
+func scheduleFiresAtTime(sched config.ScheduleConfig) bool {
+	if !schedHasAnyEnabled(sched) {
+		return false
+	}
+	mode := sched.EffectiveMode()
+	return mode == config.ScheduleAtTime || mode == config.ScheduleAtTimeCatchup
+}
+
 // nextScheduledFire returns the next local time cfg.Schedule.Time will hit.
-// Returns ok=false when no schedule flag is enabled or the time is unparseable.
+// Returns ok=false when nothing is enabled, the mode has no clock trigger,
+// or the time is unparseable.
 func (s *Server) nextScheduledFire(now time.Time) (time.Time, bool) {
 	s.cfgMu.RLock()
 	sched := s.cfg.Schedule
 	s.cfgMu.RUnlock()
-	if !schedHasAnyEnabled(sched) {
+	if !scheduleFiresAtTime(sched) {
 		return time.Time{}, false
 	}
 	t, err := parseScheduleTime(sched.Time)
@@ -134,12 +229,11 @@ func (s *Server) runScheduledActions() {
 	sched := s.cfg.Schedule
 	s.cfgMu.RUnlock()
 
-	s.ctxMu.RLock()
-	names := make([]string, 0, len(s.contexts))
-	for name := range s.contexts {
+	st := s.galleryState()
+	names := make([]string, 0, len(st.contexts))
+	for name := range st.contexts {
 		names = append(names, name)
 	}
-	s.ctxMu.RUnlock()
 	// Sorted, then rotated to the gallery after the one the last run stopped
 	// at. A daily budget too small to cover gallery 1 would otherwise starve
 	// every other gallery permanently, and map order gives no rotation to
@@ -446,10 +540,13 @@ func (s *Server) scheduledAutotag(cx *galleryCtx) error {
 // status string ("OK" or a failure summary).
 func (s *Server) recordScheduleRun(started time.Time, dur time.Duration, info string) {
 	s.schedMu.Lock()
-	defer s.schedMu.Unlock()
 	s.schedLastRun = started
 	s.schedLastDur = dur
 	s.schedLastInfo = info
+	s.schedMu.Unlock()
+	// Persisted too: the in-memory copy dies with the process, and a
+	// catch-up run has to know whether last night already happened.
+	s.saveScheduledRun(started)
 }
 
 // recordLookupRun keeps a lookup phase's summary for the Schedule section's
@@ -475,7 +572,11 @@ type ScheduleStatus struct {
 	LastRun  time.Time     // zero value when no run has happened yet
 	LastDur  time.Duration // zero when LastRun is zero
 	LastInfo string        // "OK" or a short failure summary; empty when never run
-	NextRun  time.Time     // zero when no schedule action is enabled
+	NextRun  time.Time     // zero when nothing will fire on a clock
+	// NextRunNote stands in for the time when there is none. Three
+	// different settings land here and only one of them is the action
+	// checkboxes, so the line names the control that has to change.
+	NextRunNote string
 	// LookupInfo is what the last run's lookup phases found, one line per
 	// phase and gallery; empty when neither phase ran.
 	LookupInfo []string
@@ -491,6 +592,20 @@ func (s *Server) ScheduleStatus() ScheduleStatus {
 	s.schedMu.Unlock()
 	if next, ok := s.nextScheduledFire(time.Now()); ok {
 		st.NextRun = next
+		return st
+	}
+	s.cfgMu.RLock()
+	sched := s.cfg.Schedule
+	s.cfgMu.RUnlock()
+	switch mode := sched.EffectiveMode(); {
+	case mode == config.ScheduleOff:
+		st.NextRunNote = "No next run scheduled (set to never)."
+	case mode == config.ScheduleOnStart:
+		st.NextRunNote = "No next run scheduled (it runs at startup only)."
+	case !schedHasAnyEnabled(sched):
+		st.NextRunNote = "No next run scheduled (every action is off)."
+	default:
+		st.NextRunNote = "No next run scheduled (the time of day is unreadable)."
 	}
 	return st
 }

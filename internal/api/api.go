@@ -207,6 +207,16 @@ func (h *Handler) Mount(mux *http.ServeMux) {
 	}))
 }
 
+// requireID answers the 400 a missing id gets and reports whether the
+// caller may go on. Returns false only after writing.
+func requireID(w http.ResponseWriter, v int64, name string) bool {
+	if v == 0 {
+		apiError(w, http.StatusBadRequest, "invalid_request", name+" required")
+		return false
+	}
+	return true
+}
+
 // auth wraps a handler with bearer-token authentication, per-token scope
 // enforcement, and the configured-base-URL CORS check.
 func (h *Handler) auth(next http.HandlerFunc) http.HandlerFunc {
@@ -215,7 +225,9 @@ func (h *Handler) auth(next http.HandlerFunc) http.HandlerFunc {
 		// Browsers always send Origin without a trailing slash; an
 		// operator's base_url written as "http://host/" would otherwise
 		// reject every CORS request with no obvious diagnostic.
+		h.cfgMu.RLock()
 		baseURL := strings.TrimRight(h.cfg.Server.BaseURL, "/")
+		h.cfgMu.RUnlock()
 		if origin != "" && baseURL != "" {
 			if origin != baseURL {
 				apiError(w, http.StatusForbidden, "forbidden", "CORS: origin not allowed")

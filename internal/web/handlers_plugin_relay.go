@@ -92,10 +92,8 @@ func (s *Server) pluginRelay(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The route bypasses ContextMiddleware so the peer call never runs under
-	// ctxMu; snapshot the active name under a short lock instead.
-	s.ctxMu.RLock()
-	galleryName := s.activeName
-	s.ctxMu.RUnlock()
+	// ctxMu; snapshot the active name instead.
+	galleryName := s.activeGallery()
 
 	answer, err := s.callPluginRelay(r.Context(), p.Name, base+button.Path, p.PeerToken, pluginRelayRequest{
 		Payload:  pluginPayloadVersion,

@@ -36,10 +36,10 @@ type catTag struct {
 //	red hair                 -> [{general, "red"}, {general, "hair"}]
 //	"red hair" blue_eyes     -> [{general, "red_hair"}, {general, "blue_eyes"}]
 //	artist:"john doe" 1girl  -> [{artist, "john_doe"}, {general, "1girl"}]
-func (s *Server) parseTagInput(tagInput string) ([]catTag, string) {
+func (s *Server) parseTagInput(tagInput string) ([]catTag, []string, string) {
 	tokens, err := splitTagTokens(tagInput)
 	if err != nil {
-		return nil, err.Error()
+		return nil, nil, err.Error()
 	}
 
 	// general category id is cached on galleryCtx at open time so this
@@ -51,11 +51,16 @@ func (s *Server) parseTagInput(tagInput string) ([]catTag, string) {
 
 	categories, err := s.categoryIDsByName()
 	if err != nil {
-		return nil, err.Error()
+		return nil, nil, err.Error()
 	}
 
 	var catTags []catTag
 	var rejected []string
+	// A prefix that names no category is a literal tag name by design
+	// ("nier:automata"), and it is also what a mistyped category looks
+	// like. The caller says which reading it took rather than leaving the
+	// operator with a catalog row they did not mean to create.
+	var unknownCats []string
 	for _, name := range tokens {
 		if idx := strings.Index(name, ":"); idx > 0 {
 			catName := name[:idx]
@@ -73,11 +78,20 @@ func (s *Server) parseTagInput(tagInput string) ([]catTag, string) {
 			}
 			// Prefix isn't a known category; treat the whole token as a
 			// literal general-category tag (e.g. "nier:automata").
+			if !slices.Contains(unknownCats, catName) {
+				unknownCats = append(unknownCats, catName)
+			}
 		}
 		catTags = append(catTags, catTag{generalID, name})
 	}
 
-	return catTags, strings.Join(rejected, "; ")
+	return catTags, unknownCats, strings.Join(rejected, "; ")
+}
+
+// unknownCategoryNote names the prefixes parseTagInput read as part of a
+// tag name rather than as a category.
+func unknownCategoryNote(unknownCats []string) string {
+	return joinLabeled("no category named ", ", ", unknownCats)
 }
 
 // categoryIDsByName preloads every category in one read so a
@@ -166,7 +180,7 @@ func (s *Server) addTagToImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	catTags, parseErrMsg := s.parseTagInput(tagInput)
+	catTags, unknownCats, parseErrMsg := s.parseTagInput(tagInput)
 
 	var added, rejected, dupes []string
 	var promotedTokens []string
@@ -247,6 +261,7 @@ func (s *Server) addTagToImage(w http.ResponseWriter, r *http.Request) {
 	}
 	displacedPart := joinLabeled("replaced rating ", ", ", displacedRatings)
 	rejectedPart := joinLabeled("rejected: ", "; ", rejected)
+	unknownPart := unknownCategoryNote(unknownCats)
 
 	joinNonEmpty := func(parts ...string) string {
 		return strings.Join(slices.DeleteFunc(parts, func(p string) bool { return p == "" }), "; ")
@@ -259,7 +274,7 @@ func (s *Server) addTagToImage(w http.ResponseWriter, r *http.Request) {
 	case mutated && (len(rejected) > 0 || parseErrMsg != ""):
 		// Mixed outcome: render in warn-orange and surface both
 		// successes and the rejected tokens.
-		addWarnMsg = joinNonEmpty(parseErrMsg, addedPart, promotedPart, dupesPart, displacedPart, rejectedPart)
+		addWarnMsg = joinNonEmpty(parseErrMsg, addedPart, promotedPart, dupesPart, displacedPart, unknownPart, rejectedPart)
 	case len(rejected) > 0:
 		addErrMsg = joinNonEmpty(parseErrMsg, rejectedPart)
 	case len(dupes) > 0 && !mutated && parseErrMsg == "":
@@ -267,7 +282,7 @@ func (s *Server) addTagToImage(w http.ResponseWriter, r *http.Request) {
 		// soft-error feedback so the user sees something happened.
 		addErrMsg = "tag already on image: " + strings.Join(dupes, ", ")
 	default:
-		addOkMsg = joinNonEmpty(addedPart, promotedPart, dupesPart, displacedPart)
+		addOkMsg = joinNonEmpty(addedPart, promotedPart, dupesPart, displacedPart, unknownPart)
 	}
 	s.renderTagListWithSidebar(w, r, id, addErrMsg, addWarnMsg, addOkMsg, len(rejected) == 0 && parseErrMsg == "")
 }
@@ -287,19 +302,7 @@ func (s *Server) renderTagListWithSidebar(w http.ResponseWriter, r *http.Request
 		tagMode = normalizeTagMode(requested)
 		writeTagModeCookie(w, tagMode)
 	}
-	hasUserTags := false
-	hasStaleTags := false
-	for _, t := range imageTags {
-		if !t.IsAuto && t.TaggerName == "" {
-			hasUserTags = true
-		}
-		if t.Stale {
-			hasStaleTags = true
-		}
-		if hasUserTags && hasStaleTags {
-			break
-		}
-	}
+	hasUserTags, hasStaleTags := userAndStaleTags(imageTags)
 	back := parseBackContext(r)
 	// The footer's tally is a per-render snapshot everywhere else; here
 	// the swap that lands the tag can move it, so it rides along. The
@@ -310,6 +313,10 @@ func (s *Server) renderTagListWithSidebar(w http.ResponseWriter, r *http.Request
 	}
 	var canonicalPath string
 	_ = s.db().Read.QueryRow(`SELECT canonical_path FROM images WHERE id = ?`, id).Scan(&canonicalPath)
+	// The delete confirm names the copies that go with the row, and this
+	// fragment re-renders it out of band. Counted the way the Duplicates
+	// panel counts, so the two never disagree.
+	extraPaths := max(len(loadImagePaths(r.Context(), s.db(), id))-1, 0)
 	filename := ""
 	if canonicalPath != "" {
 		filename = filepath.Base(canonicalPath)
@@ -339,6 +346,7 @@ func (s *Server) renderTagListWithSidebar(w http.ResponseWriter, r *http.Request
 		"ClearInput":       clearInput,
 		"CurrentFolder":    folderPath,
 		"Filename":         filename,
+		"ExtraPaths":       extraPaths,
 		"TagCount":         tagCount,
 	})
 }

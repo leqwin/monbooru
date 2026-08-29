@@ -256,6 +256,51 @@ func walkToRootTx(tx *sql.Tx, table, parentCol, childCol string, start int64) (i
 	return chainRoot(tx, table, parentCol, childCol, start)
 }
 
+// edgeSpec is what an add-edge differs in: the table and its two columns,
+// the sentinel a refusal answers with, the predicate that says the
+// endpoints are already spoken for, and the measure of what hangs below
+// the child. The shared body is addEdgeTx, next to the dissolveEdges the
+// two Dissolve methods already share.
+type edgeSpec struct {
+	table, parentCol, childCol string
+	exists                     error
+	// occupied reports whether either endpoint already carries an edge
+	// this one would conflict with: a version chain refuses a second
+	// child, a derivative tree does not.
+	occupied func(tx *sql.Tx, parent, child int64) (bool, error)
+	// down measures the chain or subtree already hanging under child.
+	down func(tx *sql.Tx, child int64) (int, error)
+}
+
+var versionEdge = edgeSpec{
+	table: "version_edges", parentCol: "parent_image_id", childCol: "child_image_id",
+	exists: ErrVersionExists,
+	occupied: func(tx *sql.Tx, parent, child int64) (bool, error) {
+		var n int
+		err := tx.QueryRow(
+			`SELECT COUNT(*) FROM version_edges WHERE child_image_id = ? OR parent_image_id = ?`,
+			child, parent,
+		).Scan(&n)
+		return n > 0, err
+	},
+	down: func(tx *sql.Tx, child int64) (int, error) {
+		return chainDepthTx(tx, "version_edges", "child_image_id", "parent_image_id", child)
+	},
+}
+
+var derivativeEdge = edgeSpec{
+	table: "derivative_edges", parentCol: "source_image_id", childCol: "derivative_image_id",
+	exists: ErrDerivativeExists,
+	occupied: func(tx *sql.Tx, _, child int64) (bool, error) {
+		var n int
+		err := tx.QueryRow(
+			`SELECT COUNT(*) FROM derivative_edges WHERE derivative_image_id = ?`, child,
+		).Scan(&n)
+		return n > 0, err
+	},
+	down: derivativeHeightTx,
+}
+
 // AddVersionEdge declares child as the newer version of parent. The
 // chain is strict: each image has at most one parent (PK on
 // child_image_id) and at most one child (UNIQUE on parent_image_id), so
@@ -263,65 +308,7 @@ func walkToRootTx(tx *sql.Tx, table, parentCol, childCol string, start int64) (i
 // (b) parent already has a child, or (c) adding the edge would close a
 // loop with an existing ancestor chain.
 func (s *Service) AddVersionEdge(parent, child int64) error {
-	if parent == child {
-		return ErrSelfRelation
-	}
-	return s.inWriteTx(func(tx *sql.Tx) error {
-		if err := pairConflictTx(tx, parent, child, "version"); err != nil {
-			return err
-		}
-		// Idempotent re-add: the same (parent, child) already on the
-		// chain is a silent success so REST retries against a flaky
-		// network don't have to distinguish "first call landed but
-		// the response was lost" from a real cycle / direction
-		// conflict. Still prunes: a queue row can predate the edge.
-		var exact int
-		if err := tx.QueryRow(
-			`SELECT 1 FROM version_edges WHERE child_image_id = ? AND parent_image_id = ?`,
-			child, parent,
-		).Scan(&exact); err == nil {
-			return pruneQueueForChainTx(tx, "version_edges", "parent_image_id", "child_image_id", parent, child)
-		} else if !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		var n int
-		if err := tx.QueryRow(
-			`SELECT COUNT(*) FROM version_edges WHERE child_image_id = ? OR parent_image_id = ?`,
-			child, parent,
-		).Scan(&n); err != nil {
-			return err
-		}
-		if n > 0 {
-			return ErrVersionExists
-		}
-		// Walk parent's ancestors; if child is anywhere up that chain, the
-		// new edge would close a cycle.
-		if reaches, err := chainReachesTx(tx, "version_edges", "parent_image_id", "child_image_id", parent, child); err != nil {
-			return err
-		} else if reaches {
-			return ErrVersionExists
-		}
-		// The new edge joins parent's chain above and child's chain below;
-		// the combined depth must stay within the walkers' horizon.
-		up, err := chainDepthTx(tx, "version_edges", "parent_image_id", "child_image_id", parent)
-		if err != nil {
-			return err
-		}
-		down, err := chainDepthTx(tx, "version_edges", "child_image_id", "parent_image_id", child)
-		if err != nil {
-			return err
-		}
-		if up+down+1 > MaxVersionChainDepth {
-			return ErrChainTooDeep
-		}
-		if _, err := tx.Exec(
-			`INSERT INTO version_edges (child_image_id, parent_image_id, created_at) VALUES (?, ?, ?)`,
-			child, parent, nowISO(),
-		); err != nil {
-			return err
-		}
-		return pruneQueueForChainTx(tx, "version_edges", "parent_image_id", "child_image_id", parent, child)
-	})
+	return s.addEdge(versionEdge, "version", parent, child)
 }
 
 // AddDerivativeEdge declares derivative was made from source. A source
@@ -329,63 +316,69 @@ func (s *Service) AddVersionEdge(parent, child int64) error {
 // source. Refuses when the derivative already has a source or when
 // adding the edge would close a cycle with an existing source chain.
 func (s *Service) AddDerivativeEdge(source, derivative int64) error {
-	if source == derivative {
+	return s.addEdge(derivativeEdge, "derivative", source, derivative)
+}
+
+// addEdge is the body both declarations share. kind names the relation
+// for the cross-kind conflict check.
+func (s *Service) addEdge(spec edgeSpec, kind string, parent, child int64) error {
+	if parent == child {
 		return ErrSelfRelation
 	}
 	return s.inWriteTx(func(tx *sql.Tx) error {
-		if err := pairConflictTx(tx, source, derivative, "derivative"); err != nil {
+		if err := pairConflictTx(tx, parent, child, kind); err != nil {
 			return err
 		}
-		// Idempotent re-add: the same (source, derivative) already
-		// declared returns silent success so retries don't have to
-		// distinguish a same-edge replay from a real source-conflict.
-		// Still prunes: a queue row can predate the edge.
+		prune := func() error {
+			return pruneQueueForChainTx(tx, spec.table, spec.parentCol, spec.childCol, parent, child)
+		}
+		// Idempotent re-add: the same pair already declared is a silent
+		// success so REST retries against a flaky network don't have to
+		// distinguish "first call landed but the response was lost" from a
+		// real cycle / direction conflict. Still prunes: a queue row can
+		// predate the edge.
 		var exact int
 		if err := tx.QueryRow(
-			`SELECT 1 FROM derivative_edges WHERE derivative_image_id = ? AND source_image_id = ?`,
-			derivative, source,
+			`SELECT 1 FROM `+spec.table+` WHERE `+spec.childCol+` = ? AND `+spec.parentCol+` = ?`,
+			child, parent,
 		).Scan(&exact); err == nil {
-			return pruneQueueForChainTx(tx, "derivative_edges", "source_image_id", "derivative_image_id", source, derivative)
+			return prune()
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		var n int
-		if err := tx.QueryRow(
-			`SELECT COUNT(*) FROM derivative_edges WHERE derivative_image_id = ?`, derivative,
-		).Scan(&n); err != nil {
+		switch occupied, err := spec.occupied(tx, parent, child); {
+		case err != nil:
 			return err
+		case occupied:
+			return spec.exists
 		}
-		if n > 0 {
-			return ErrDerivativeExists
-		}
-		// Walk source's source-chain; if derivative is anywhere up that
-		// chain, the new edge would close a cycle. Same depth budget as
-		// the version chain so a pathological tree can't loop indefinitely.
-		if reaches, err := chainReachesTx(tx, "derivative_edges", "source_image_id", "derivative_image_id", source, derivative); err != nil {
+		// Walk parent's own chain upwards; if child is anywhere up there,
+		// the new edge would close a cycle.
+		if reaches, err := chainReachesTx(tx, spec.table, spec.parentCol, spec.childCol, parent, child); err != nil {
 			return err
 		} else if reaches {
-			return ErrDerivativeExists
+			return spec.exists
 		}
-		// The new edge hangs derivative's subtree under source; the joined
-		// depth must stay within the walkers' horizon.
-		up, err := chainDepthTx(tx, "derivative_edges", "source_image_id", "derivative_image_id", source)
+		// The new edge joins what is above parent to what hangs under
+		// child; the combined depth must stay within the walkers' horizon.
+		up, err := chainDepthTx(tx, spec.table, spec.parentCol, spec.childCol, parent)
 		if err != nil {
 			return err
 		}
-		height, err := derivativeHeightTx(tx, derivative)
+		down, err := spec.down(tx, child)
 		if err != nil {
 			return err
 		}
-		if up+height+1 > MaxVersionChainDepth {
+		if up+down+1 > MaxVersionChainDepth {
 			return ErrChainTooDeep
 		}
 		if _, err := tx.Exec(
-			`INSERT INTO derivative_edges (derivative_image_id, source_image_id, created_at) VALUES (?, ?, ?)`,
-			derivative, source, nowISO(),
+			`INSERT INTO `+spec.table+` (`+spec.childCol+`, `+spec.parentCol+`, created_at) VALUES (?, ?, ?)`,
+			child, parent, nowISO(),
 		); err != nil {
 			return err
 		}
-		return pruneQueueForChainTx(tx, "derivative_edges", "source_image_id", "derivative_image_id", source, derivative)
+		return prune()
 	})
 }
 

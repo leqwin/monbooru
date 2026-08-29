@@ -217,14 +217,7 @@ func (s *Server) imageByHashHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.ctxMu.RLock()
-	ctxs := make([]*galleryCtx, 0, len(s.contexts))
-	for _, cx := range s.contexts {
-		ctxs = append(ctxs, cx)
-	}
-	s.ctxMu.RUnlock()
-
-	for _, cx := range ctxs {
+	for _, cx := range s.allContexts() {
 		if cx.DB == nil {
 			continue
 		}
@@ -321,7 +314,7 @@ func (s *Server) detailHandler(w http.ResponseWriter, r *http.Request) {
 		if backSort == "random" && backSeed != "" {
 			seed, _ = strconv.ParseInt(backSeed, 10, 64)
 		}
-		cacheKey := search.BuildAdjacencyCacheKey(s.activeName, backQ, backSort, backOrder, seed, ceiling.Level())
+		cacheKey := search.BuildAdjacencyCacheKey(s.activeGallery(), backQ, backSort, backOrder, seed, ceiling.Level())
 		switch ids, ok := search.AdjacencyCacheGet(cacheKey); {
 		case ok:
 			// A populated list settles the question either way: an image
@@ -466,22 +459,10 @@ func (s *Server) detailHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	taggerCfg := s.cfgSnapshot()
-	enabledTaggers := tagger.EnabledTaggersForGallery(taggerCfg, s.activeName)
+	enabledTaggers := tagger.EnabledTaggersForGallery(taggerCfg, s.activeGallery())
 	imageTaggers := distinctTaggerNames(imageTags, true)
 	imageSources := distinctTaggerNames(imageTags, false)
-	hasUserTags := false
-	hasStaleTags := false
-	for _, t := range imageTags {
-		if !t.IsAuto && t.TaggerName == "" {
-			hasUserTags = true
-		}
-		if t.Stale {
-			hasStaleTags = true
-		}
-		if hasUserTags && hasStaleTags {
-			break
-		}
-	}
+	hasUserTags, hasStaleTags := userAndStaleTags(imageTags)
 
 	// Split annotations into operator-drawn boxes (edited under the image, by
 	// the Note) and source-pulled boxes grouped onto their origin's panel.
@@ -576,7 +557,7 @@ func (s *Server) detailHandler(w http.ResponseWriter, r *http.Request) {
 		ManualAnnotations: buildAnnotationEntries(manualAnnotations),
 		NoteHTML:          noteDoc.Render(mkRes),
 		ImagePaths:        imagePaths,
-		ThumbnailURL:      fmt.Sprintf("/thumbnails/%s/%d.jpg", s.activeName, id),
+		ThumbnailURL:      fmt.Sprintf("/thumbnails/%s/%d.jpg", s.activeGallery(), id),
 		PrevID:            prevID,
 		NextID:            nextID,
 		RefURL:            refURL,
@@ -636,7 +617,7 @@ func (s *Server) relatedImagesHandler(w http.ResponseWriter, r *http.Request) {
 	back := parseBackContext(r)
 	s.renderTemplate(w, "partials/related_images.html", map[string]any{
 		"Images":        related,
-		"ActiveGallery": s.activeName,
+		"ActiveGallery": s.activeGallery(),
 		// Each similar-image link carries ref=<current image> so the
 		// destination detail page swaps "← Images" for "← Previous image"
 		// (pointing back here) and Escape walks browser history. back_*
@@ -720,7 +701,7 @@ func (s *Server) pageHoldingMatch(ctx context.Context, sq search.Query, id int64
 // adjacency walks the same set the gallery shows.
 func (s *Server) findAdjacentImages(ctx context.Context, currentID int64, queryStr, sortStr, orderStr, seedStr string, ceiling *Ceiling) (prevID, nextID *int64) {
 	sq := adjacentSearchQuery(queryStr, sortStr, orderStr, seedStr, ceiling)
-	sq.CacheKey = search.BuildAdjacencyCacheKey(s.activeName, queryStr, sortStr, orderStr, sq.RandomSeed, ceiling.Level())
+	sq.CacheKey = search.BuildAdjacencyCacheKey(s.activeGallery(), queryStr, sortStr, orderStr, sq.RandomSeed, ceiling.Level())
 	prevID, nextID, err := search.ExecuteAdjacent(ctx, s.db(), sq, currentID)
 	if err != nil {
 		logx.Warnf("findAdjacentImages: %v", err)

@@ -536,15 +536,25 @@ func removeTagFromImageTx(tx *sql.Tx, imageID, tagID int64) (int, error) {
 	}
 	removed := 1
 
-	// For every transitively implied tag still sitting on the image as
-	// is_implied=1, drop it unless another parent currently on the image
-	// still implies it. is_implied=0 rows are user-owned and untouched.
-	// A row in the closure can be the only justification for another one,
-	// and the closure is walked in an arbitrary order within a level, so
-	// sweep until a pass drops nothing.
+	n, err := SweepImpliedClosureTx(tx, imageID, implied, tagID)
+	return removed + n, err
+}
+
+// SweepImpliedClosureTx drops every row in closure that sits on the image
+// as is_implied=1 with nothing left to justify it, and returns how many
+// went. is_implied=0 rows are user-owned and untouched; a row another
+// parent on the image still implies stays. excludeParent is the parent
+// being removed, whose own row is still there while this runs; 0 excludes
+// nothing, which is what the caller whose edge is already deleted passes.
+//
+// A row in the closure can be the only justification for another one, and
+// the closure is walked in an arbitrary order within a level, so it sweeps
+// until a pass drops nothing.
+func SweepImpliedClosureTx(tx *sql.Tx, imageID int64, closure []int64, excludeParent int64) (int, error) {
+	removed := 0
 	for {
 		dropped := false
-		for _, impID := range implied {
+		for _, impID := range closure {
 			var rowImplied int
 			err := tx.QueryRow(
 				`SELECT is_implied FROM image_tags WHERE image_id = ? AND tag_id = ?`, imageID, impID,
@@ -557,7 +567,7 @@ func removeTagFromImageTx(tx *sql.Tx, imageID, tagID int64) (int, error) {
 			if rowImplied != 1 {
 				continue
 			}
-			stillImplied, err := implicationParentsOnImageExcluding(tx, imageID, impID, tagID)
+			stillImplied, err := implicationParentsOnImageExcluding(tx, imageID, impID, excludeParent)
 			if err != nil {
 				return removed, err
 			}

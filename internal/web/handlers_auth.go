@@ -23,17 +23,25 @@ func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
 	s.renderTemplate(w, "login.html", s.loginPageData(nil))
 }
 
-// loginPageData builds the data map for login.html. The login screen does
-// not run through s.base(), so the brand-name, logo, and custom-stylesheet
-// overrides have to be threaded explicitly - otherwise the configured brand
-// would change every page except the login one.
+// loginPageData builds the data map for login.html.
 func (s *Server) loginPageData(extra map[string]any) map[string]any {
+	return s.standalonePageData("Login - "+s.booruName(), extra)
+}
+
+// standalonePageData is what a page rendered outside layout.html needs to
+// look like the rest of the install: the fields partials/head.html reads.
+// These pages do not run through s.base(), so the brand name, the favicon,
+// the theme and the custom stylesheet have to be threaded explicitly -
+// otherwise the configured branding covers every page except the ones an
+// operator meets first and last.
+func (s *Server) standalonePageData(title string, extra map[string]any) map[string]any {
 	data := map[string]any{
-		"Title":        "Login - " + s.booruName(),
+		"Title":        title,
 		"CSRFToken":    s.csrfToken("anon"),
 		"BooruName":    s.booruName(),
 		"BooruFavicon": s.booruFaviconURL(),
 		"CustomCSS":    s.customCSSPath() != "",
+		"Theme":        s.activeTheme().Path != "",
 	}
 	for k, v := range extra {
 		data[k] = v

@@ -214,6 +214,13 @@ func (s *Supervisor) supervise(m *managedPlugin) {
 // monbooru's log under the plugin's name.
 func (m *managedPlugin) run() error {
 	m.mu.Lock()
+	// Under the lock that publishes m.proc: a Stop between the loop's flag
+	// read and here finds nothing to terminate, and the child it was meant
+	// to end would outlive the supervision, StopAll included.
+	if m.stopped {
+		m.mu.Unlock()
+		return nil
+	}
 	cmd := exec.Command(m.command, m.args...)
 	cmd.Dir = m.dir
 	cmd.Env = append(os.Environ(), m.env...)

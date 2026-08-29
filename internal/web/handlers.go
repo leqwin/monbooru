@@ -166,6 +166,24 @@ func loadComfyMeta(ctx context.Context, database *db.DB, id int64) *models.Comfy
 	return &m
 }
 
+// userAndStaleTags reports what the remove-tags dialog needs to know about
+// an image's tag list: whether it carries any of the operator's own, and
+// whether any of them went stale.
+func userAndStaleTags(imageTags []models.ImageTag) (hasUser, hasStale bool) {
+	for _, t := range imageTags {
+		if !t.IsAuto && t.TaggerName == "" {
+			hasUser = true
+		}
+		if t.Stale {
+			hasStale = true
+		}
+		if hasUser && hasStale {
+			break
+		}
+	}
+	return hasUser, hasStale
+}
+
 func loadImagePaths(ctx context.Context, database *db.DB, id int64) []models.ImagePath {
 	rows, err := database.Read.QueryContext(ctx,
 		`SELECT id, image_id, path, is_canonical FROM image_paths WHERE image_id = ? ORDER BY is_canonical DESC, id`,

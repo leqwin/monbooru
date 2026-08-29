@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"html/template"
 	"io/fs"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -17,11 +18,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/monbooru/monbooru/internal/api"
 	"github.com/monbooru/monbooru/internal/config"
 	"github.com/monbooru/monbooru/internal/counts"
+	"github.com/monbooru/monbooru/internal/desktop"
 	"github.com/monbooru/monbooru/internal/gallery"
 	"github.com/monbooru/monbooru/internal/jobs"
 	"github.com/monbooru/monbooru/internal/logx"
@@ -78,17 +81,39 @@ type Server struct {
 	staticFS   fs.FS
 	done       chan struct{} // closed on Close() to stop background goroutines
 
+	// desktop marks the -desktop profile. It gates the controls that only
+	// make sense on the machine the operator is sitting at: the directory
+	// picker, the folder opener, Quit, and the first-run redirect.
+	desktop bool
+	// folderOpener hands a folder to the platform opener. A field so the
+	// handler runs where none is installed and pops no window.
+	folderOpener func(string) error
+	// logDir is where the profile put the log file. Only the command knows:
+	// it resolves the layout before the config is loaded.
+	logDir string
+	// quit carries a Quit click to the command's shutdown select, so the
+	// stop path is the same one SIGTERM takes. quitOnce keeps a second
+	// click from closing it twice. A Restart click rides the same path with
+	// the flag set, and the command starts a fresh process once it has
+	// drained.
+	quit     chan struct{}
+	quitOnce sync.Once
+	restart  atomic.Bool
+
 	// schedReload wakes runScheduler so a Settings → Schedule edit takes
 	// effect on the next select tick instead of waiting out the current
 	// sleep. Buffered cap 1 with non-blocking sends so concurrent saves
 	// coalesce into one reload.
 	schedReload chan struct{}
 
-	// ctxMu guards contexts and activeName. Read handlers take RLock via
-	// ContextMiddleware; mutation handlers take the write lock.
-	ctxMu      sync.RWMutex
-	contexts   map[string]*galleryCtx
-	activeName string
+	// ctxMu serialises the gallery mutations and is held read-locked by
+	// ContextMiddleware for the length of a request, so a swap cannot land
+	// mid-render. The state itself is read through the atomic pointer, never
+	// through the lock: a handler re-entering ctxMu while the middleware
+	// holds it read-locked would block behind a pending writer, and that
+	// writer waits on the read lock the handler is inside.
+	ctxMu    sync.RWMutex
+	galState atomic.Pointer[galleryState]
 
 	// schedMu guards the last-schedule-run fields. Written by runScheduler,
 	// read by the Schedule settings section.
@@ -144,9 +169,19 @@ type Server struct {
 	fetchStatus   map[string]fetchStatusEntry
 }
 
+// Desktop is what the -desktop profile tells the server: whether it is
+// active, and where it put the log file. The second is not derivable here
+// because the command resolves the layout before the config is loaded, and
+// a config that moved data_path by hand would send the Logs button
+// somewhere the log never was.
+type Desktop struct {
+	Active bool
+	LogDir string
+}
+
 // NewServer creates the HTTP server with all routes wired. One *db.DB is
 // opened per configured gallery.
-func NewServer(cfg *config.Config, configPath string, jobManager *jobs.Manager) (*Server, error) {
+func NewServer(cfg *config.Config, configPath string, jobManager *jobs.Manager, dk Desktop) (*Server, error) {
 	sessions := NewSessionStore()
 
 	// Parse all templates
@@ -171,9 +206,11 @@ func NewServer(cfg *config.Config, configPath string, jobManager *jobs.Manager) 
 		tmpl:         tmpl,
 		staticFS:     staticFS,
 		done:         make(chan struct{}),
+		desktop:      dk.Active,
+		folderOpener: desktop.OpenFolder,
+		logDir:       dk.LogDir,
+		quit:         make(chan struct{}),
 		schedReload:  make(chan struct{}, 1),
-		contexts:     map[string]*galleryCtx{},
-		activeName:   cfg.DefaultGallery,
 		fetchStatus:  map[string]fetchStatusEntry{},
 		pluginProbes: map[string]pluginProbe{},
 	}
@@ -181,16 +218,18 @@ func NewServer(cfg *config.Config, configPath string, jobManager *jobs.Manager) 
 
 	applyRelationsConfig(cfg.Relations)
 
+	opened := &galleryState{contexts: map[string]*galleryCtx{}, active: cfg.DefaultGallery}
 	for _, g := range cfg.Galleries {
 		cx, err := openGalleryCtx(g)
 		if err != nil {
-			for _, done := range s.contexts {
+			for _, done := range opened.contexts {
 				done.close()
 			}
 			return nil, err
 		}
-		s.contexts[g.Name] = cx
+		opened.contexts[g.Name] = cx
 	}
+	s.galState.Store(opened)
 
 	// Validate the operator-supplied custom CSS path lives in a directory
 	// monbooru already trusts (config dir, /config, or /data). Any other
@@ -248,19 +287,42 @@ func NewServer(cfg *config.Config, configPath string, jobManager *jobs.Manager) 
 // enough that a finished one gives the memory back.
 const idleIndexReleaseAfter = 30 * time.Minute
 
-// runMemoryReclaim wakes every 5 minutes and, when no job is active,
+// reclaimTick is how often the reclaim loop looks at the process,
+// reclaimInterval how often it reclaims while nothing else happens. The
+// two differ so a job's peak working set - the largest this process ever
+// holds - is handed back when the job ends instead of staying resident
+// until the interval comes round.
+const (
+	reclaimTick     = 30 * time.Second
+	reclaimInterval = 5 * time.Minute
+)
+
+// reclaimDue reports whether an idle tick owes a reclaim: a job ended
+// since the last one, or the interval has elapsed.
+func reclaimDue(jobEnded bool, since time.Duration) bool {
+	return jobEnded || since >= reclaimInterval
+}
+
+// runMemoryReclaim wakes every reclaimTick and, when no job is active,
 // drops each gallery's idle in-memory indexes, shrinks its SQLite page
 // cache, returns the Go heap, and tears down the cached auto-tagger
 // session set if it has been idle for tagger.idle_release_after_minutes.
 func (s *Server) runMemoryReclaim() {
-	ticker := time.NewTicker(5 * time.Minute)
+	ticker := time.NewTicker(reclaimTick)
 	defer ticker.Stop()
+	last := time.Now()
+	seen := s.jobs.Finished()
 	for {
 		select {
 		case <-ticker.C:
 			if s.jobs.IsRunning() {
 				continue
 			}
+			ended := s.jobs.Finished()
+			if !reclaimDue(ended != seen, time.Since(last)) {
+				continue
+			}
+			seen, last = ended, time.Now()
 			ctxs := s.allContexts()
 			for _, cx := range ctxs {
 				dropped := counts.ReleaseIdleCountedTags(cx.DB, idleIndexReleaseAfter)
@@ -298,19 +360,35 @@ func (s *Server) runMemoryReclaim() {
 	}
 }
 
+// galleryState is the set of open galleries and the name of the active one,
+// published as one immutable value so every reader is a single atomic load.
+// Writers hold ctxMu, copy, mutate the copy and store it.
+type galleryState struct {
+	contexts map[string]*galleryCtx
+	active   string
+}
+
+// clone returns a copy for a writer to mutate before publishing.
+func (st *galleryState) clone() *galleryState {
+	next := &galleryState{contexts: make(map[string]*galleryCtx, len(st.contexts)+1), active: st.active}
+	maps.Copy(next.contexts, st.contexts)
+	return next
+}
+
+// galleryState returns the published gallery state.
+func (s *Server) galleryState() *galleryState { return s.galState.Load() }
+
+// activeGallery names the runtime-active gallery.
+func (s *Server) activeGallery() string { return s.galleryState().active }
+
 // Active returns the currently-active gallery context.
 func (s *Server) Active() *galleryCtx {
-	s.ctxMu.RLock()
-	defer s.ctxMu.RUnlock()
-	return s.contexts[s.activeName]
+	st := s.galleryState()
+	return st.contexts[st.active]
 }
 
 // Get returns the gallery context with the given name, or nil.
-func (s *Server) Get(name string) *galleryCtx {
-	s.ctxMu.RLock()
-	defer s.ctxMu.RUnlock()
-	return s.contexts[name]
-}
+func (s *Server) Get(name string) *galleryCtx { return s.galleryState().contexts[name] }
 
 // ContextMiddleware RLocks ctxMu for the request so a concurrent swap can't
 // tear state out under it. Mutation endpoints bypass it because they take
@@ -330,6 +408,10 @@ func (s *Server) ContextMiddleware(next http.Handler) http.Handler {
 func contextMiddlewareBypass(path string) bool {
 	switch path {
 	case "/internal/gallery/switch", "/custom.css", "/custom.logo", "/theme.css", "/theme.logo", "/manifest.json":
+		return true
+	case "/setup":
+		// The wizard's submit repoints the default gallery, which takes the
+		// write lock.
 		return true
 	}
 	if strings.HasPrefix(path, "/i/") {
@@ -375,9 +457,8 @@ func contextMiddlewareBypass(path string) bool {
 func (s *Server) StartWatchers() {
 	s.ctxMu.Lock()
 	defer s.ctxMu.Unlock()
-	for _, cx := range s.contexts {
-		cx.startWatcher(s.cfg.Gallery.WatchEnabled, s.cfg.Gallery.MaxFileSizeMB, s.ingestNaming(cx.Name), s.jobs)
-		cx.startMangaReclaim()
+	for _, cx := range s.galleryState().contexts {
+		cx.startBackground(s.cfg.Gallery.WatchEnabled, s.cfg.Gallery.MaxFileSizeMB, s.ingestNaming(cx.Name), s.jobs)
 		go cx.warmCaches()
 	}
 }
@@ -404,7 +485,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "version": Version})
+		// "app" is what lets a second launch tell our own instance from
+		// whatever else already took the port.
+		_ = json.NewEncoder(w).Encode(map[string]string{"app": "monbooru", "status": "ok", "version": Version})
 	})
 
 	mux.HandleFunc("GET /login", s.loginPage)
@@ -520,6 +603,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /settings/auth/tokens/{id}/privileges", s.settingsTokenPrivilegesPost)
 	mux.HandleFunc("PATCH /settings/categories/{id}", s.updateCategoryPatch)
 	mux.HandleFunc("POST /settings/schedule", s.settingsSchedulePost)
+	mux.HandleFunc("POST /settings/schedule/run", s.settingsScheduleRunPost)
+	mux.HandleFunc("GET /setup", s.setupPage)
+	mux.HandleFunc("POST /setup", s.setupPost)
+	mux.HandleFunc("GET /internal/browse", s.browseDirs)
+	mux.HandleFunc("POST /internal/open-folder", s.openFolder)
+	mux.HandleFunc("POST /settings/desktop", s.settingsDesktopPost)
+	mux.HandleFunc("POST /settings/quit", s.settingsQuit)
+	mux.HandleFunc("POST /settings/restart", s.settingsRestart)
 	mux.HandleFunc("POST /settings/maintenance/prune-missing", s.pruneMissingImagesPost)
 	mux.HandleFunc("POST /settings/maintenance/prune-orphaned-thumbnails", s.pruneOrphanedThumbnailsPost)
 	mux.HandleFunc("POST /settings/maintenance/recalc-tags", s.recalcTagsPost)
@@ -647,9 +738,11 @@ func (s *Server) Handler() http.Handler {
 
 	api.New(s.cfg, &s.cfgMu, s.jobs, s.apiResolver, Version).Mount(mux)
 
-	// Middleware order, outermost first: logging, context (RLock), session, CSRF.
+	// Middleware order, outermost first: logging, context (RLock), session,
+	// first-run gate, CSRF.
 	var h http.Handler = mux
 	h = s.CSRFMiddleware(h)
+	h = s.SetupMiddleware(h)
 	h = s.SessionMiddleware(h)
 	h = s.ContextMiddleware(h)
 	h = loggingMiddleware(h)
@@ -657,15 +750,11 @@ func (s *Server) Handler() http.Handler {
 	return h
 }
 
-// allContexts snapshots every open gallery under the context lock. The
-// copy is the point: the callers walk it doing DB work, and holding the
-// lock across that would block a gallery switch for the length of the
-// walk.
+// allContexts lists every open gallery.
 func (s *Server) allContexts() []*galleryCtx {
-	s.ctxMu.RLock()
-	defer s.ctxMu.RUnlock()
-	out := make([]*galleryCtx, 0, len(s.contexts))
-	for _, cx := range s.contexts {
+	st := s.galleryState()
+	out := make([]*galleryCtx, 0, len(st.contexts))
+	for _, cx := range st.contexts {
 		out = append(out, cx)
 	}
 	return out
@@ -745,6 +834,25 @@ var DocURL = "https://monbooru.github.io/mondocs/index.html"
 // CPU build; rendered in parentheses in the footer when non-empty.
 var Variant = ""
 
+// Package names whatever produced this artifact ("docker", "tarball", "zip",
+// "installer", "flatpak"), injected at build time via -ldflags. With several
+// artifacts in circulation every bug report opens on the question it answers.
+// "source" is a plain go build and renders as nothing.
+var Package = "source"
+
+// BuildLabel joins the two build stamps for the footer and -version, so
+// which artifact and which provider are one parenthesis rather than two.
+func BuildLabel() string {
+	parts := make([]string, 0, 2)
+	if Package != "" && Package != "source" {
+		parts = append(parts, Package)
+	}
+	if Variant != "" {
+		parts = append(parts, Variant)
+	}
+	return strings.Join(parts, ", ")
+}
+
 // ratingLevel is one cell in the footer rating selector. Value is the
 // underlying tag name (used as the cookie value and the AST key); Label
 // is the user-facing text - "general" renders as "sfw" so the toggle
@@ -773,8 +881,10 @@ type baseData struct {
 	Version     string
 	RepoURL     string
 	DocURL      string
-	Variant     string
-	CustomCSS   bool
+	// Build is the artifact-and-provider stamp rendered beside the version;
+	// empty on a plain source build.
+	Build     string
+	CustomCSS bool
 	// Theme is true while an operator-installed theme resolves, gating the
 	// /theme.css link between the bundled sheet and the operator's own.
 	Theme bool
@@ -874,7 +984,7 @@ func sidebarCollapsed(r *http.Request) bool {
 
 func (s *Server) base(r *http.Request, nav, title string) baseData {
 	sessID := sessionFromContext(r.Context())
-	cx := s.contexts[s.activeName] // ctxMu RLocked by ContextMiddleware
+	cx := s.Active()
 	degraded := false
 	visible, inbox, tagCount, collectionsCount := 0, 0, 0, 0
 	if cx != nil {
@@ -912,7 +1022,7 @@ func (s *Server) base(r *http.Request, nav, title string) baseData {
 		Version:             Version,
 		RepoURL:             RepoURL,
 		DocURL:              DocURL,
-		Variant:             Variant,
+		Build:               BuildLabel(),
 		CustomCSS:           s.customCSSPath() != "",
 		Theme:               themeSheet,
 		SidebarCollapsed:    sidebarCollapsed(r),
@@ -928,7 +1038,7 @@ func (s *Server) base(r *http.Request, nav, title string) baseData {
 		MonloaderPTRSyncing: ptrSyncing,
 		MonloaderPTRPresent: paired && (ptrReady || ptrSyncing || !monloaderUsable),
 		MonloaderContrib:    ptrContrib,
-		ActiveGallery:       s.activeName,
+		ActiveGallery:       s.activeGallery(),
 		Galleries:           galleries,
 		VisibleCount:        visible,
 		InboxCount:          inbox,
@@ -1351,7 +1461,7 @@ func (s *Server) serveMangaPagePath(
 	}
 	// Scope the cached bytes to the active gallery so a gallery switch
 	// invalidates them; see serveImageFile for the same trick.
-	setGalleryScopedCache(w, s.activeName, fmt.Sprintf("%s-%d%s", idStr, n, cacheSuffix), page)
+	setGalleryScopedCache(w, s.activeGallery(), fmt.Sprintf("%s-%d%s", idStr, n, cacheSuffix), page)
 	http.ServeFile(w, r, page)
 }
 
@@ -1408,13 +1518,13 @@ func (s *Server) serveImageBytes(w http.ResponseWriter, r *http.Request, scaled 
 		if err != nil {
 			logx.Warnf("view rendition for image %s: %v", idStr, err)
 		} else {
-			setGalleryScopedCache(w, s.activeName, idStr+"-view", rendition)
+			setGalleryScopedCache(w, s.activeGallery(), idStr+"-view", rendition)
 			w.Header().Set("Content-Type", "image/jpeg")
 			http.ServeFile(w, r, rendition)
 			return
 		}
 	}
-	setGalleryScopedCache(w, s.activeName, idStr, canonPath)
+	setGalleryScopedCache(w, s.activeGallery(), idStr, canonPath)
 	if ct := gallery.MIMEForFileType(fileType); ct != "" {
 		w.Header().Set("Content-Type", ct)
 	}
@@ -1438,6 +1548,15 @@ func setGalleryScopedCache(w http.ResponseWriter, gallery, id, path string) {
 	w.Header().Set("ETag", fmt.Sprintf(`"%s-%s-%d"`, gallery, id, info.ModTime().UnixNano()))
 }
 
+// RestartRequested reports whether the shutdown under way should be followed
+// by a fresh process. Read by the command once it has drained.
+func (s *Server) RestartRequested() bool { return s.restart.Load() }
+
+// QuitRequested fires when the Quit control asks the process to stop. The
+// command selects on it beside the signal channel so both routes run the
+// same graceful shutdown.
+func (s *Server) QuitRequested() <-chan struct{} { return s.quit }
+
 // Close stops background goroutines and closes every gallery's database.
 func (s *Server) Close() {
 	select {
@@ -1450,7 +1569,7 @@ func (s *Server) Close() {
 	tagger.ReleaseAll()
 	s.ctxMu.Lock()
 	defer s.ctxMu.Unlock()
-	for _, cx := range s.contexts {
+	for _, cx := range s.galleryState().contexts {
 		cx.close()
 	}
 }

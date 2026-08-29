@@ -150,14 +150,12 @@ func (h *Handler) removeRelation(w http.ResponseWriter, r *http.Request) {
 	var err error
 	switch body.Type {
 	case "duplicate":
-		if body.ImageID == 0 {
-			apiError(w, http.StatusBadRequest, "invalid_request", "image_id required")
+		if !requireID(w, body.ImageID, "image_id") {
 			return
 		}
 		err = g.RelationsSvc.RemoveDupMember(body.ImageID)
 	case "alternate":
-		if body.ImageID == 0 {
-			apiError(w, http.StatusBadRequest, "invalid_request", "image_id required")
+		if !requireID(w, body.ImageID, "image_id") {
 			return
 		}
 		err = g.RelationsSvc.RemoveAltMember(body.ImageID)
@@ -168,32 +166,27 @@ func (h *Handler) removeRelation(w http.ResponseWriter, r *http.Request) {
 	case "not_related":
 		err = g.RelationsSvc.RemoveNotRelated(body.A, body.B)
 	case "dissolve_dup":
-		if body.GroupID == 0 {
-			apiError(w, http.StatusBadRequest, "invalid_request", "group_id required")
+		if !requireID(w, body.GroupID, "group_id") {
 			return
 		}
 		err = g.RelationsSvc.DissolveDupGroup(body.GroupID)
 	case "dissolve_alt":
-		if body.GroupID == 0 {
-			apiError(w, http.StatusBadRequest, "invalid_request", "group_id required")
+		if !requireID(w, body.GroupID, "group_id") {
 			return
 		}
 		err = g.RelationsSvc.DissolveAltGroup(body.GroupID)
 	case "dissolve_version":
-		if body.RootID == 0 {
-			apiError(w, http.StatusBadRequest, "invalid_request", "root_id required")
+		if !requireID(w, body.RootID, "root_id") {
 			return
 		}
 		err = g.RelationsSvc.DissolveVersionChain(body.RootID)
 	case "dissolve_derivative":
-		if body.RootID == 0 {
-			apiError(w, http.StatusBadRequest, "invalid_request", "root_id required")
+		if !requireID(w, body.RootID, "root_id") {
 			return
 		}
 		err = g.RelationsSvc.DissolveDerivativeTree(body.RootID)
 	case "promote_original":
-		if body.GroupID == 0 || body.ImageID == 0 {
-			apiError(w, http.StatusBadRequest, "invalid_request", "group_id and image_id required")
+		if !requireID(w, body.GroupID, "group_id") || !requireID(w, body.ImageID, "image_id") {
 			return
 		}
 		err = g.RelationsSvc.PromoteToOriginal(body.GroupID, body.ImageID)

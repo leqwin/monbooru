@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.monbooru.Monbooru</id>
+  <name>Monbooru</name>
+  <summary>Lightweight and fast private booru</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>AGPL-3.0-only</project_license>
+  <launchable type="desktop-id">io.github.monbooru.Monbooru.desktop</launchable>
+
+  <description>
+    <p>
+      A self-hosted, offline image organizer for a local collection: tag-based
+      search, folder tree, favorites, collections, near-duplicate detection,
+      a manga reader, and Stable Diffusion metadata. The interface is a page
+      in your browser rather than a window.
+    </p>
+    <p>
+      Monbooru itself never contacts the internet. Downloading from boorus and
+      reverse image lookup live in monloader, a separate optional companion.
+    </p>
+  </description>
+
+  <categories>
+    <category>Graphics</category>
+    <category>2DGraphics</category>
+    <category>RasterGraphics</category>
+    <category>Viewer</category>
+  </categories>
+
+  <url type="homepage">https://github.com/monbooru/monbooru</url>
+  <url type="bugtracker">https://github.com/monbooru/monbooru/issues</url>
+  <url type="help">https://monbooru.github.io/mondocs/index.html</url>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="1.19.1" date="2026-08-24"/>
+  </releases>
+</component>

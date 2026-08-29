@@ -116,7 +116,7 @@ func (s *Server) uploadPost(w http.ResponseWriter, r *http.Request) {
 	autotagAfter := r.FormValue("autotag") == "on"
 	// The inline inbox drop zone posts no folder field, so fall back to the
 	// operator's configured destination; an explicit folder still wins.
-	folderInput, naming := gallery.ReceivedNaming(s.activeName,
+	folderInput, naming := gallery.ReceivedNaming(s.activeGallery(),
 		strings.TrimSpace(r.FormValue("folder")),
 		strings.TrimSpace(cfg.Gallery.DefaultUploadFolder),
 		strings.TrimSpace(cfg.Gallery.DefaultUploadName))
@@ -140,7 +140,7 @@ func (s *Server) uploadPost(w http.ResponseWriter, r *http.Request) {
 	// Resolve tags using the shared parser (same logic as addTagToImage).
 	var tagPairs []catTag
 	if tagInput != "" {
-		tagPairs, _ = s.parseTagInput(tagInput)
+		tagPairs, _, _ = s.parseTagInput(tagInput)
 	}
 
 	var totalBytes int64
@@ -299,7 +299,7 @@ func (s *Server) uploadPost(w http.ResponseWriter, r *http.Request) {
 
 	// Optionally kick off auto-tagging on the newly uploaded images.
 	if autotagAfter && len(addedIDs) > 0 && tagger.IsAvailable(cfg) {
-		selected, selErr := selectTaggers(cfg, s.activeName, taggerName)
+		selected, selErr := selectTaggers(cfg, s.activeGallery(), taggerName)
 		if selErr != nil {
 			fmt.Fprintf(&msg, " (autotag skipped: %s)", html.EscapeString(selErr.Error()))
 		} else if err := s.jobs.Start(models.JobTypeAutotag); err != nil {
@@ -342,7 +342,7 @@ func (s *Server) autotagTrigger(w http.ResponseWriter, r *http.Request) {
 	scope := strings.TrimSpace(r.FormValue("scope"))
 	taggerName := strings.TrimSpace(r.FormValue("tagger_name"))
 
-	selected, selErr := selectTaggers(cfg, s.activeName, taggerName)
+	selected, selErr := selectTaggers(cfg, s.activeGallery(), taggerName)
 	if selErr != nil {
 		externalErr(w, r, selErr.Error(), http.StatusBadRequest)
 		return
@@ -424,7 +424,7 @@ func (s *Server) autotagImage(w http.ResponseWriter, r *http.Request) {
 	}
 	taggerName := strings.TrimSpace(r.FormValue("tagger_name"))
 
-	selected, selErr := selectTaggers(cfg, s.activeName, taggerName)
+	selected, selErr := selectTaggers(cfg, s.activeGallery(), taggerName)
 	if selErr != nil {
 		externalErr(w, r, selErr.Error(), http.StatusBadRequest)
 		return

@@ -1,0 +1,98 @@
+app-id: io.github.monbooru.Monbooru
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.golang
+command: monbooru-run
+
+finish-args:
+  - --share=network
+  - --filesystem=home
+  - --filesystem=/mnt
+  - --filesystem=/media
+  - --filesystem=/run/media
+  - --filesystem=xdg-config/autostart:create
+
+modules:
+  - name: onnxruntime
+    buildsystem: simple
+    build-commands:
+      - install -Dm644 lib/libonnxruntime.so.1.21.0 /app/bin/libonnxruntime.so
+    sources:
+      - type: archive
+        only-arches: [x86_64]
+        url: https://github.com/microsoft/onnxruntime/releases/download/v1.21.0/onnxruntime-linux-x64-1.21.0.tgz
+        sha256: 7485c7e7aac6501b27e353dcbe068e45c61ab51fbaf598d13970dfae669d20bf
+      - type: archive
+        only-arches: [aarch64]
+        url: https://github.com/microsoft/onnxruntime/releases/download/v1.21.0/onnxruntime-linux-aarch64-1.21.0.tgz
+        sha256: 4508084bde1232ee1ab4b6fad2155be0ea2ccab1c1aae9910ddb3fb68a60805e
+
+  - name: ffmpeg
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 bin/ffmpeg /app/bin/ffmpeg
+      - install -Dm755 bin/ffprobe /app/bin/ffprobe
+    sources:
+      - type: archive
+        only-arches: [x86_64]
+        url: https://github.com/monbooru/ffmpeg-builds/releases/download/v8.1.2-mb2/ffmpeg-8.1.2-mb2-linux64.tar.xz
+        sha256: 256131407bd62df7ff2d870073d9f7cc14e6cc0123cebd3616497805bc45f168
+      - type: archive
+        only-arches: [aarch64]
+        url: https://github.com/monbooru/ffmpeg-builds/releases/download/v8.1.2-mb2/ffmpeg-8.1.2-mb2-linuxarm64.tar.xz
+        sha256: f77a5808571b6716bf66f5d25fbb01078e6e2930defdaa5606617f0e4c7b1644
+
+  - name: monbooru
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/golang/bin
+      build-args:
+        - --share=network
+    build-commands:
+      - |
+        set -eu
+        VERSION=$(tr -d '[:space:]' < VERSION.md)
+        REPO=$(tr -d '[:space:]' < REPOSITORY.md)
+        DOC=$(tr -d '[:space:]' < DOC.md)
+        MOD=github.com/monbooru/monbooru/internal/web
+        CGO_ENABLED=1 go build -tags tagger \
+          -ldflags="-s -w -X '$MOD.Version=$VERSION' -X '$MOD.RepoURL=$REPO' -X '$MOD.DocURL=$DOC' -X '$MOD.Package=flatpak'" \
+          -o monbooru ./cmd/monbooru
+        # The AppStream release entry is written from VERSION.md and the newest
+        # changelog heading, so a release has one version to bump, not two.
+        HEADING=$(awk '/^## /{print $2; exit}' CHANGELOG.md)
+        RELDATE=$(awk '/^## /{print $4; exit}' CHANGELOG.md)
+        [ "$HEADING" = "[$VERSION]" ] || {
+          echo "CHANGELOG.md's newest entry is $HEADING, VERSION.md says $VERSION" >&2
+          exit 1
+        }
+        RELEASE="<release version=\"${VERSION#v}\" date=\"$RELDATE\"/>"
+        sed -E "s|<release version=\"[^\"]*\" date=\"[^\"]*\"/>|$RELEASE|" \
+          packaging/flatpak/io.github.monbooru.Monbooru.metainfo.xml > metainfo.xml
+        grep -qF "$RELEASE" metainfo.xml || {
+          echo "no release entry in the metainfo to rewrite" >&2
+          exit 1
+        }
+      - install -Dm755 monbooru /app/bin/monbooru
+      - install -Dm755 packaging/flatpak/monbooru-run /app/bin/monbooru-run
+      - install -Dm644 packaging/flatpak/io.github.monbooru.Monbooru.desktop /app/share/applications/io.github.monbooru.Monbooru.desktop
+      - install -Dm644 metainfo.xml /app/share/metainfo/io.github.monbooru.Monbooru.metainfo.xml
+      - install -Dm644 packaging/icons/monbooru-64.png /app/share/icons/hicolor/64x64/apps/io.github.monbooru.Monbooru.png
+      - install -Dm644 packaging/icons/monbooru-128.png /app/share/icons/hicolor/128x128/apps/io.github.monbooru.Monbooru.png
+      - install -Dm644 packaging/icons/monbooru-256.png /app/share/icons/hicolor/256x256/apps/io.github.monbooru.Monbooru.png
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - .git
+          - monbooru
+          - perf
+          - tests
+          - project
+          - dist
+          - stage
+          - tools
+          - test-results
+          - .playwright-mcp

@@ -23,18 +23,25 @@ import (
 
 // Config holds all application configuration.
 type Config struct {
-	DefaultGallery string          `toml:"default_gallery"`
-	Galleries      []Gallery       `toml:"galleries,omitempty"`
-	Server         ServerConfig    `toml:"server"`
-	Monloader      MonloaderConfig `toml:"monloader"`
-	Paths          PathsConfig     `toml:"paths"`
-	Gallery        GalleryConfig   `toml:"gallery"`
-	Tagger         TaggerConfig    `toml:"tagger"`
-	Auth           AuthConfig      `toml:"auth"`
-	UI             UIConfig        `toml:"ui"`
-	Log            LogConfig       `toml:"log"`
-	Schedule       ScheduleConfig  `toml:"schedule"`
-	Relations      RelationsConfig `toml:"relations"`
+	DefaultGallery string `toml:"default_gallery"`
+	// SetupDone gates the desktop profile's first-run wizard. A file
+	// monbooru creates starts at false; one that already exists without the
+	// key loads as true, so an upgrade never shows the wizard to an
+	// operator who configured by hand. Outside the desktop profile the
+	// flag changes nothing.
+	SetupDone bool            `toml:"setup_done"`
+	Galleries []Gallery       `toml:"galleries,omitempty"`
+	Server    ServerConfig    `toml:"server"`
+	Monloader MonloaderConfig `toml:"monloader"`
+	Paths     PathsConfig     `toml:"paths"`
+	Gallery   GalleryConfig   `toml:"gallery"`
+	Tagger    TaggerConfig    `toml:"tagger"`
+	Auth      AuthConfig      `toml:"auth"`
+	UI        UIConfig        `toml:"ui"`
+	Log       LogConfig       `toml:"log"`
+	Schedule  ScheduleConfig  `toml:"schedule"`
+	Relations RelationsConfig `toml:"relations"`
+	Desktop   DesktopConfig   `toml:"desktop"`
 	// Emptied arrays of tables are omitted rather than written as
 	// `key = []`: TOML refuses a later `[[key]]` block under a key already
 	// bound to an inline array, so a file monbooru wrote would stop loading
@@ -552,15 +559,44 @@ type UIConfig struct {
 	ThumbnailFit string `toml:"thumbnail_fit"` // "natural" (real aspect ratio) | "square" (cropped)
 }
 
+// DesktopConfig holds what the desktop profile keeps in the config file.
+// The applications-menu entry and start-at-login are files the platform
+// reads, so the tray is the only switch with nowhere else to live. Absent
+// from a file written before the key existed, it loads as the default.
+type DesktopConfig struct {
+	Tray bool `toml:"tray"`
+}
+
 // LogConfig controls log verbosity: "warn" (default), "info", "debug".
 type LogConfig struct {
 	Level string `toml:"level"`
 }
 
+// Schedule modes. at_time is the wall-clock trigger and the behaviour a
+// config without the key keeps. The other three exist because a desktop
+// sleeps: at_time_catchup adds a startup pass when a day was missed,
+// on_start drops the clock entirely, and off overrides every per-action
+// flag without clearing them.
+const (
+	ScheduleAtTime        = "at_time"
+	ScheduleAtTimeCatchup = "at_time_catchup"
+	ScheduleOnStart       = "on_start"
+	ScheduleOff           = "off"
+)
+
+// ScheduleModes lists the modes in UI order.
+var ScheduleModes = []string{ScheduleAtTime, ScheduleAtTimeCatchup, ScheduleOnStart, ScheduleOff}
+
+// IsValidScheduleMode reports whether v names a mode.
+func IsValidScheduleMode(v string) bool { return slices.Contains(ScheduleModes, v) }
+
 // ScheduleConfig drives the once-per-day maintenance run at HH:MM on
 // every configured gallery.
 type ScheduleConfig struct {
-	Time              string `toml:"time"` // "HH:MM" 24h, default "01:00"
+	Time string `toml:"time"` // "HH:MM" 24h, default "01:00"
+	// Mode picks when the run fires; empty is at_time, so an existing
+	// install keeps the behaviour it had.
+	Mode              string `toml:"mode"`
 	SyncGallery       bool   `toml:"sync_gallery"`
 	RemoveOrphans     bool   `toml:"remove_orphans"`
 	RunAutoTaggers    bool   `toml:"run_auto_taggers"`
@@ -572,6 +608,15 @@ type ScheduleConfig struct {
 	LookupBooru bool `toml:"lookup_booru"`
 }
 
+// EffectiveMode folds an absent or unrecognised mode onto the default, so
+// every caller reads one vocabulary.
+func (sc ScheduleConfig) EffectiveMode() string {
+	if IsValidScheduleMode(sc.Mode) {
+		return sc.Mode
+	}
+	return ScheduleAtTime
+}
+
 // Default returns a fully populated config with all spec defaults.
 func Default() *Config {
 	return &Config{
@@ -580,9 +625,13 @@ func Default() *Config {
 			Name:        "default",
 			GalleryPath: "/gallery",
 		}},
+		// 8080 collides often enough to be a support burden; monloader takes
+		// the adjacent 8456. The container images bind the same 8455 through
+		// their own env, differing only in the wildcard host they have to
+		// listen on.
 		Server: ServerConfig{
-			BindAddress: "127.0.0.1:8080",
-			BaseURL:     "http://localhost:8080",
+			BindAddress: "127.0.0.1:8455",
+			BaseURL:     "http://localhost:8455",
 		},
 		Paths: PathsConfig{
 			DataPath:  "/data",
@@ -610,10 +659,14 @@ func Default() *Config {
 		},
 		Schedule: ScheduleConfig{
 			Time:              defaultScheduleTime,
+			Mode:              ScheduleAtTime,
 			SyncGallery:       true,
 			RemoveOrphans:     true,
 			RunAutoTaggers:    false,
 			FindRelationPairs: false,
+		},
+		Desktop: DesktopConfig{
+			Tray: true,
 		},
 		Relations: RelationsConfig{
 			DefaultDistance:     4,
@@ -636,11 +689,20 @@ func ValidateScheduleTime(v string) error {
 }
 
 // Load reads and decodes a TOML config file. If absent, creates it with defaults.
-func Load(path string) (*Config, error) {
+func Load(path string) (*Config, error) { return LoadWithDefaults(path, nil) }
+
+// LoadWithDefaults is Load with the defaults adjusted by seed before a
+// missing file is written. seed runs only on that path: a config already on
+// disk is loaded as it stands, whatever profile is active, so the container
+// volume layout the shipped image depends on is never rewritten.
+func LoadWithDefaults(path string, seed func(*Config)) (*Config, error) {
 	cfg := Default()
 
 	_, err := os.Stat(path)
 	if os.IsNotExist(err) {
+		if seed != nil {
+			seed(cfg)
+		}
 		if writeErr := Save(cfg, path); writeErr != nil {
 			return nil, fmt.Errorf("creating default config: %w", writeErr)
 		}
@@ -652,6 +714,7 @@ func Load(path string) (*Config, error) {
 		// Cleared so a file that omits the key is distinguishable from an
 		// explicit "cpu"; the use_cuda migration fires only on the empty value.
 		cfg.Tagger.ExecutionProvider = ""
+		cfg.SetupDone = true
 		if _, err := toml.DecodeFile(path, cfg); err != nil {
 			return nil, fmt.Errorf("parsing config file %q: %w", path, err)
 		}
@@ -873,6 +936,9 @@ func validate(cfg *Config) error {
 	} else if err := ValidateScheduleTime(cfg.Schedule.Time); err != nil {
 		return err
 	}
+	// A hand-edited typo snaps back to the documented default rather than
+	// refusing to start, like the other UI-settable enums.
+	cfg.Schedule.Mode = cfg.Schedule.EffectiveMode()
 	if cfg.Tagger.ExecutionProvider == "" {
 		cfg.Tagger.ExecutionProvider = defaultExecutionProvider
 	} else if !IsValidExecutionProvider(cfg.Tagger.ExecutionProvider) {

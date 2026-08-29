@@ -52,9 +52,7 @@ const (
 	maxSourcePostExtLen   = 16
 )
 
-// validateImageSource / validateImageURL / validateImageCollection carry
-// the caps into the create (POST /images) and edit (PATCH /images/{id})
-// paths. Callers pass the already-trimmed value.
+// validateMaxLen enforces one field's cap.
 func validateMaxLen(field, s string, max int) error {
 	if len(s) > max {
 		return fmt.Errorf("%s must be %d characters or less", field, max)
@@ -62,6 +60,9 @@ func validateMaxLen(field, s string, max int) error {
 	return nil
 }
 
+// validateImageSource / validateImageURL / validateImageCollection carry
+// the caps into the create (POST /images) and edit (PATCH /images/{id})
+// paths. Callers pass the already-trimmed value.
 func validateImageSource(s string) error {
 	return validateMaxLen("source", s, maxImageSourceLen)
 }

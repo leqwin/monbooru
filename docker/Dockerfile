@@ -9,7 +9,7 @@ RUN VERSION=$(cat VERSION.md 2>/dev/null | tr -d '[:space:]') && \
     REPO=$(cat REPOSITORY.md 2>/dev/null | tr -d '[:space:]') && \
     DOC=$(cat DOC.md 2>/dev/null | tr -d '[:space:]') && \
     CGO_ENABLED=1 go build -tags tagger \
-    -ldflags="-s -w -X 'github.com/monbooru/monbooru/internal/web.Version=${VERSION}' -X 'github.com/monbooru/monbooru/internal/web.RepoURL=${REPO}' -X 'github.com/monbooru/monbooru/internal/web.DocURL=${DOC}'" \
+    -ldflags="-s -w -X 'github.com/monbooru/monbooru/internal/web.Version=${VERSION}' -X 'github.com/monbooru/monbooru/internal/web.RepoURL=${REPO}' -X 'github.com/monbooru/monbooru/internal/web.DocURL=${DOC}' -X 'github.com/monbooru/monbooru/internal/web.Package=docker'" \
     -o /monbooru ./cmd/monbooru
 
 # Stage 2: fetch runtime assets.
@@ -43,16 +43,19 @@ RUN ARCH=$(dpkg --print-architecture) && \
     cp /tmp/onnxruntime-linux-${ONNX_ARCH}-${ORT_VERSION}/lib/libonnxruntime.so.${ORT_VERSION} /opt/ort/libonnxruntime.so && \
     rm -f /tmp/ort.tgz
 
-# ffmpeg + ffprobe. BtbN's builds bundle their codecs statically but link
-# glibc dynamically; the distroless cc base provides it.
-ARG FFMPEG_RELEASE=n8.1
+# ffmpeg + ffprobe: the project's trimmed fully-static builds.
+ARG FFMPEG_BUILD=v8.1.2-mb2
+ARG FFMPEG_NAME=ffmpeg-8.1.2-mb2
+ARG FFMPEG_SHA256_LINUX64=256131407bd62df7ff2d870073d9f7cc14e6cc0123cebd3616497805bc45f168
+ARG FFMPEG_SHA256_LINUXARM64=f77a5808571b6716bf66f5d25fbb01078e6e2930defdaa5606617f0e4c7b1644
 RUN ARCH=$(dpkg --print-architecture) && \
     case "$ARCH" in \
-      amd64) FF_ARCH="linux64" ;; \
-      arm64) FF_ARCH="linuxarm64" ;; \
+      amd64) FF_ARCH="linux64";    FF_SHA="${FFMPEG_SHA256_LINUX64}" ;; \
+      arm64) FF_ARCH="linuxarm64"; FF_SHA="${FFMPEG_SHA256_LINUXARM64}" ;; \
       *) echo "Unsupported arch: $ARCH" && exit 1 ;; \
     esac && \
-    curl -fsSL "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-${FFMPEG_RELEASE}-latest-${FF_ARCH}-gpl-${FFMPEG_RELEASE#n}.tar.xz" -o /tmp/ffmpeg.tar.xz && \
+    curl -fsSL "https://github.com/monbooru/ffmpeg-builds/releases/download/${FFMPEG_BUILD}/${FFMPEG_NAME}-${FF_ARCH}.tar.xz" -o /tmp/ffmpeg.tar.xz && \
+    echo "${FF_SHA}  /tmp/ffmpeg.tar.xz" | sha256sum -c - && \
     mkdir -p /tmp/ff /opt/ffmpeg && \
     tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ff --strip-components=1 && \
     cp /tmp/ff/bin/ffmpeg /tmp/ff/bin/ffprobe /opt/ffmpeg/
@@ -67,10 +70,10 @@ COPY --from=assets /opt/ort/libonnxruntime.so       /usr/lib/libonnxruntime.so
 COPY --from=assets /opt/ffmpeg/ffmpeg /opt/ffmpeg/ffprobe /usr/local/bin/
 COPY --from=build  /monbooru                         /usr/local/bin/monbooru
 
-ENV MONBOORU_SERVER_BIND_ADDRESS=0.0.0.0:8080
+ENV MONBOORU_SERVER_BIND_ADDRESS=0.0.0.0:8455
 ENV HOME=/home/monbooru
 
-EXPOSE 8080
+EXPOSE 8455
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["/usr/local/bin/monbooru", "healthcheck", "-config", "/config/monbooru.toml"]

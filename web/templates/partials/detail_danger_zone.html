@@ -17,7 +17,7 @@
             hx-swap="none"
             hx-headers='{"X-CSRF-Token":"{{.CSRFToken}}"}'
             hx-confirm="Delete this image?"
-            data-confirm-danger="Files are permanently deleted from disk. This cannot be undone."
+            data-confirm-danger="{{if .ExtraPaths}}Deletes {{add .ExtraPaths 1}} files: this one and {{.ExtraPaths}} identical cop{{if eq .ExtraPaths 1}}y{{else}}ies{{end}} filed elsewhere. {{end}}Files are permanently deleted from disk. This cannot be undone."
             data-confirm-ok="Delete">Delete image</button>
   </div>
 

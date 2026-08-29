@@ -65,7 +65,7 @@ func (s *Server) relatedEntriesGet(w http.ResponseWriter, r *http.Request) {
 		"Collection":    siblings,
 		"ImagePaths":    paths,
 		"CSRFToken":     s.csrfToken(sessionFromContext(r.Context())),
-		"ActiveGallery": s.activeName,
+		"ActiveGallery": s.activeGallery(),
 		"BackQ":         back.Q,
 		"BackSort":      back.Sort,
 		"BackOrder":     back.Order,
@@ -228,7 +228,7 @@ func (s *Server) imageRelationsPage(w http.ResponseWriter, r *http.Request) {
 		}
 		nextOriginal = next
 	}
-	thumbURL := fmt.Sprintf("/thumbnails/%s/%d.jpg", s.activeName, id)
+	thumbURL := fmt.Sprintf("/thumbnails/%s/%d.jpg", s.activeGallery(), id)
 	// Mirror the detail page's parent/basename title shape so a tab
 	// strip with several /relations tabs open stays distinguishable.
 	titleName := filepath.Base(img.CanonicalPath)
@@ -892,6 +892,10 @@ func (s *Server) copyTagsToOriginalPreview(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		entries = append(entries, rec)
+	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, "load preview", http.StatusInternalServerError)
+		return
 	}
 	category := func(e row) string { return cmp.Or(e.category, "(uncategorised)") }
 	groups := groupOrdered(entries, nil, category,

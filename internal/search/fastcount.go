@@ -604,8 +604,8 @@ func parseBoolVal(v string) (bool, bool) {
 // autotagged:true. Computes visible_total - untagged_visible: the
 // untagged subtrahend is a NOT-EXISTS walk over image_tags that hits
 // multi-second p95 on a million-row library, so it rides the counts
-// cache that counts.Invalidate drops on every membership write. Falls back to (0, false) on any DB error so the slow path
-// takes over.
+// cache that counts.Invalidate drops on every membership write. Falls
+// back to (0, false) on any DB error so the slow path takes over.
 func fastCountTagged(database *db.DB, e FilterExpr) (int, bool) {
 	val, ok := parseBoolVal(e.Val)
 	if !ok || !val {

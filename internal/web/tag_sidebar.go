@@ -54,6 +54,11 @@ type tagSidebarRow struct {
 	// Source is the writer the row is attributed to: where it belongs in
 	// the by-source view, and what the "Just added" list keys off.
 	Source string
+	// Orphaned marks an implied row no parent on the image still
+	// justifies. It hangs under nothing, so it lists on its own and keeps
+	// a remove button - the backend allows that removal precisely because
+	// the row would otherwise be stranded.
+	Orphaned bool
 	// RemoveURL is what the row's button calls. In the by-source view it
 	// withdraws that source's claim rather than deleting the tag, so a
 	// tag another source also vouches for stays on the image.
@@ -61,8 +66,9 @@ type tagSidebarRow struct {
 }
 
 // Removable reports whether the row owns a remove button. An implied row
-// goes when the parent justifying it goes, so it has none of its own.
-func (r tagSidebarRow) Removable() bool { return !r.IsImplied }
+// goes when the parent justifying it goes, so it has none of its own -
+// unless no parent is left to go.
+func (r tagSidebarRow) Removable() bool { return !r.IsImplied || r.Orphaned }
 
 // tagSidebarSection is one group of the sidebar list: a category in the
 // default view, a source in the by-source view.
@@ -244,6 +250,18 @@ func groupTagRowsBySource(imageID int64, imageTags []models.ImageTag,
 		}
 		out = append(out, section)
 	}
+	// Last, and with no delete: nothing vouches for these, which is the
+	// whole reason they are listed apart from the sources that do.
+	if orphans := orphanedImplied(imageTags, implied); len(orphans) > 0 {
+		sortForDisplay(orphans)
+		section := tagSidebarSection{Name: "implied"}
+		for _, t := range orphans {
+			row := rows[t.TagID]
+			row.Orphaned = true
+			section.Rows = append(section.Rows, row)
+		}
+		out = append(out, section)
+	}
 	return out
 }
 
@@ -356,12 +374,10 @@ func groupTagRowsByCategory(imageID int64, imageTags []models.ImageTag,
 		subtrees[t.TagID] = nestImplied(nil, t.TagID, 1, rows, implied, attached)
 	}
 	// An implied tag whose parents have all gone - a propagation job still
-	// catching up - heads its own entry rather than disappearing.
-	for _, t := range imageTags {
-		if t.IsImplied && !attached[t.TagID] {
-			tops = append(tops, t)
-		}
-	}
+	// catching up, or an edge removed through the API - heads its own entry
+	// rather than disappearing.
+	orphans := orphanedImplied(imageTags, implied)
+	tops = append(tops, orphans...)
 	sortForDisplay(tops)
 
 	var out []tagSidebarSection
@@ -370,7 +386,9 @@ func groupTagRowsByCategory(imageID int64, imageTags []models.ImageTag,
 			out = append(out, tagSidebarSection{Name: t.Category, Color: t.Color})
 		}
 		section := &out[len(out)-1]
-		section.Rows = append(section.Rows, rows[t.TagID])
+		row := rows[t.TagID]
+		row.Orphaned = t.IsImplied
+		section.Rows = append(section.Rows, row)
 		section.Rows = append(section.Rows, subtrees[t.TagID]...)
 		if !t.IsImplied {
 			section.DeleteCount++
@@ -379,6 +397,36 @@ func groupTagRowsByCategory(imageID int64, imageTags []models.ImageTag,
 	for i := range out {
 		if out[i].DeleteCount > 0 {
 			out[i].DeleteURL = fmt.Sprintf("/images/%d/category-tags?cat=%s", imageID, url.QueryEscape(out[i].Name))
+		}
+	}
+	return out
+}
+
+// orphanedImplied lists the implied rows no tag on the image still
+// justifies. They nest under nothing, so each grouping has to give them a
+// home of their own or the tag is on the image, in every search and in the
+// API, and nowhere on the page that is supposed to explain it.
+func orphanedImplied(imageTags []models.ImageTag, implied map[int64][]int64) []models.ImageTag {
+	justified := map[int64]bool{}
+	var walk func(parent int64)
+	walk = func(parent int64) {
+		for _, child := range implied[parent] {
+			if justified[child] {
+				continue
+			}
+			justified[child] = true
+			walk(child)
+		}
+	}
+	for _, t := range imageTags {
+		if !t.IsImplied {
+			walk(t.TagID)
+		}
+	}
+	var out []models.ImageTag
+	for _, t := range imageTags {
+		if t.IsImplied && !justified[t.TagID] {
+			out = append(out, t)
 		}
 	}
 	return out

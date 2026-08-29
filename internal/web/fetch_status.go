@@ -129,7 +129,7 @@ func (s *Server) fetchStatusHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n, _ := strconv.ParseInt(r.URL.Query().Get("n"), 10, 64)
-	e, ok := s.loadFetchStatus(s.activeName, id)
+	e, ok := s.loadFetchStatus(s.activeGallery(), id)
 	if !ok {
 		// Nothing in flight (or already consumed): stop polling, clear the slot.
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -145,7 +145,7 @@ func (s *Server) fetchStatusHandler(w http.ResponseWriter, r *http.Request) {
 	case "ok":
 		// The refresh reloads the page so the applied tags render; the flash
 		// rides the stash-and-show bridge to survive the reload.
-		s.clearFetchStatus(s.activeName, id)
+		s.clearFetchStatus(s.activeGallery(), id)
 		msg := e.Msg
 		msg = cmp.Or(msg, "Fetched tags from the source.")
 		setFlashHeader(w, msg, "ok", nil)
@@ -157,25 +157,25 @@ func (s *Server) fetchStatusHandler(w http.ResponseWriter, r *http.Request) {
 		// as a result, not an error. monloader's message is a "; "-joined
 		// per-source trail; render it as a list with the searched hashes
 		// recorded at enqueue time.
-		s.clearFetchStatus(s.activeName, id)
+		s.clearFetchStatus(s.activeGallery(), id)
 		writeFetchOutcome(w, "warn", lookupMissBody(e.Msg, e.Hashes))
 	case "canceled":
 		// monloader dropped the job before it ran - an operator cancel, or a
 		// restart draining its queue. Nothing was tried, so it reads as a
 		// standing state rather than a failure.
-		s.clearFetchStatus(s.activeName, id)
+		s.clearFetchStatus(s.activeGallery(), id)
 		writeFetchOutcome(w, "warn", "monloader dropped this job before it ran; nothing was looked up.")
 	case "already_exists":
 		// A replace found its original already in the library as another
 		// image; the pair was recorded as potential duplicates. A standing
 		// state the operator resolves in the dup workflow, not an error.
-		s.clearFetchStatus(s.activeName, id)
+		s.clearFetchStatus(s.activeGallery(), id)
 		writeFetchOutcome(w, "warn", alreadyExistsBody(e.Msg))
 	default:
 		// Any other state is terminal: a hash mismatch or apply error from
 		// enrich, or a code monloader reported for a fetch that failed before
 		// it could enrich. Surface it inline and stop polling.
-		s.clearFetchStatus(s.activeName, id)
+		s.clearFetchStatus(s.activeGallery(), id)
 		writeFetchOutcome(w, "err", html.EscapeString(fetchFailureMessage(e.State, e.Msg)))
 	}
 }

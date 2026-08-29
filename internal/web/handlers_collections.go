@@ -176,7 +176,7 @@ func (s *Server) collectionOrderDialog(w http.ResponseWriter, r *http.Request) {
 	s.renderTemplate(w, "partials/collection_order.html", map[string]any{
 		"Name":          name,
 		"Members":       members,
-		"Gallery":       s.activeName,
+		"Gallery":       s.activeGallery(),
 		"HasMore":       hasMore,
 		"NextLimit":     limit + collectionOrderWindow,
 		"CeilingHidden": ceilingHidden,

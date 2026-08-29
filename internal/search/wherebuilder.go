@@ -19,23 +19,6 @@ import (
 	"github.com/monbooru/monbooru/internal/upgrade"
 )
 
-// isPureTagExpr reports whether expr's data SELECT should pin
-// idx_images_ingested_visible (or _filesize_visible) instead of
-// letting the planner pick. Tag leaves and the cat:/rating:/tagged:/
-// autotagged:/inbox: filter keywords qualify because their per-row
-// EXISTS rides idx_image_tags_image cleanly. The v1.7.2 metadata
-// keywords without a covering column index (width, height, date,
-// ratio, pages, tagcount) also qualify: each evaluates to a per-row
-// column read or a small predicate, so walking the partial sort
-// index in (ingested_at, id) order with the predicate as a filter
-// beats the fall-back to idx_images_missing + USE TEMP B-TREE FOR
-// ORDER BY. fav / source / source_type (ai) / folder / file_type
-// (mime/type) / file_size / collection / hash / duration /
-// origin (via) / sd-metadata-backed (name / prompt / model /
-// sampler / seed) all have their own selective column or partial
-// index so the planner picks fine on its own; pinning the sort
-// index there forces a 1 M-row scan that the seek would otherwise
-// short-circuit.
 // andDefaultVisible appends the default `i.is_missing = 0` predicate
 // unless the caller's expression already pinned an explicit missing:
 // filter (in which case `hasMissingFilter` is true and `where` is
@@ -120,6 +103,23 @@ func allLeaves(expr Expr, pred func(Expr) bool) bool {
 	return WalkLeaves(expr, pred)
 }
 
+// isPureTagExpr reports whether expr's data SELECT should pin
+// idx_images_ingested_visible (or _filesize_visible) instead of
+// letting the planner pick. Tag leaves and the cat:/rating:/tagged:/
+// autotagged:/inbox: filter keywords qualify because their per-row
+// EXISTS rides idx_image_tags_image cleanly. The v1.7.2 metadata
+// keywords without a covering column index (width, height, date,
+// ratio, pages, tagcount) also qualify: each evaluates to a per-row
+// column read or a small predicate, so walking the partial sort
+// index in (ingested_at, id) order with the predicate as a filter
+// beats the fall-back to idx_images_missing + USE TEMP B-TREE FOR
+// ORDER BY. fav / source / source_type (ai) / folder / file_type
+// (mime/type) / file_size / collection / hash / duration /
+// origin (via) / sd-metadata-backed (name / prompt / model /
+// sampler / seed) all have their own selective column or partial
+// index so the planner picks fine on its own; pinning the sort
+// index there forces a 1 M-row scan that the seek would otherwise
+// short-circuit.
 func isPureTagExpr(expr Expr) bool {
 	return allLeaves(expr, func(e Expr) bool {
 		switch v := e.(type) {
@@ -952,8 +952,6 @@ func (b *whereBuilder) buildTagExpr(e TagExpr) string {
 	return b.imageTagsPredicate(`it.tag_id IN (SELECT COALESCE(canonical_tag_id, id) FROM tags WHERE `+pred+`)`, false)
 }
 
-// scalarComp emits template with op spliced in and n bound. ok=false
-// collapses to "1=0" so each scalar filter case stays one expression.
 // buildCompFilter emits a numeric filter from its column template:
 // an X..Y range when the value carries one, otherwise a single
 // comparison. parseVal reads one half of a range, parseComp an
@@ -966,6 +964,8 @@ func (b *whereBuilder) buildCompFilter(template, val string, parseVal func(strin
 	return b.scalarComp(template, op, n, ok)
 }
 
+// scalarComp emits template with op spliced in and n bound. ok=false
+// collapses to "1=0" so each scalar filter case stays one expression.
 func (b *whereBuilder) scalarComp(template, op string, n any, ok bool) string {
 	if !ok {
 		return "1=0"

@@ -90,7 +90,7 @@
        column is collapsed. BackQuery drives active-state highlighting when
        the detail page was reached with gallery context. */}}
   <div id="detail-sidebar-browse"
-       hx-get="/internal/sidebar-browse?q={{.BackQuery}}"
+       hx-get="/internal/sidebar-browse?q={{urlQ .BackQuery}}"
        hx-trigger="{{if .SidebarCollapsed}}sidebar-shown from:body{{else}}load{{end}}"
        hx-swap="innerHTML"></div>
 {{end}}

@@ -205,7 +205,7 @@ func (s *Server) sessionPage(w http.ResponseWriter, r *http.Request) {
 		Order:           order,
 		Detector:        detector,
 		TagPairs:        tagPairs,
-		ActiveGallery:   s.activeName,
+		ActiveGallery:   s.activeGallery(),
 		Left:            leftFacts,
 		Right:           rightFacts,
 		SharedTags:      sharedTags,

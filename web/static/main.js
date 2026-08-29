@@ -832,10 +832,14 @@ document.addEventListener('keydown', function(e) {
     if (focusFirstSelector(['.add-cat-form input[name="name"]'])) { e.preventDefault(); return; }
   }
 
-  // Settings page: 1-9 jump to section anchors, in nav order.
-  if (isSettingsPage() && /^[1-9]$/.test(e.key)) {
-    var settingsAnchors = ['#general', '#galleries', '#plugins', '#tagger', '#relations', '#auth', '#maintenance', '#schedule', '#stats'];
-    var sec = document.querySelector(settingsAnchors[parseInt(e.key, 10) - 1]);
+  // Settings page: the digits jump to section anchors, read off the nav so a
+  // profile-gated section cannot shift them away from what is listed. 0 is
+  // the tenth, which is what the desktop profile's extra entry pushes off
+  // the end of 1-9.
+  if (isSettingsPage() && /^[0-9]$/.test(e.key)) {
+    var nth = e.key === '0' ? 9 : parseInt(e.key, 10) - 1;
+    var link = document.querySelectorAll('.settings-nav a')[nth];
+    var sec = link && document.querySelector(link.getAttribute('href'));
     if (sec) { e.preventDefault(); sec.scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
   }
 
@@ -1821,6 +1825,20 @@ document.body.addEventListener('htmx:confirm', function(e) {
   showConfirm(e.detail.question, function() { e.detail.issueRequest(true); }, ds.confirmDanger, ds.confirmOk, alt);
 });
 
+// htmx raises htmx:confirm only for requests it issues itself, so an
+// hx-confirm on a plain form (Stop, which has to navigate) would be inert.
+// form.submit() fires no submit event, so a confirmed form posts without
+// looping back here.
+var htmxVerbs = ['hx-get', 'hx-post', 'hx-put', 'hx-patch', 'hx-delete'];
+document.body.addEventListener('submit', function(e) {
+  var form = e.target;
+  if (!form.hasAttribute || !form.hasAttribute('hx-confirm')) return;
+  if (htmxVerbs.some(function(v) { return form.hasAttribute(v); })) return;
+  e.preventDefault();
+  var ds = form.dataset;
+  showConfirm(form.getAttribute('hx-confirm'), function() { form.submit(); }, ds.confirmDanger, ds.confirmOk);
+});
+
 // Page jump: dialog that sets ?page= on the current URL. Works for both
 // the HTMX gallery and the full-page tags pagination.
 document.addEventListener('click', function(e) {
@@ -2428,6 +2446,28 @@ document.addEventListener('click', function (e) {
   document.getElementById('tagger-cmd-host-copy').dataset.copy = host;
   document.getElementById('tagger-cmd-docker-copy').dataset.copy = docker;
   dlg.showModal();
+});
+
+// The directory picker: a browser cannot hand the server a filesystem path,
+// so the choice is made against a server-rendered listing. The Browse button
+// only opens the dialog - htmx has already been told to fetch the listing
+// into it - and "Use this folder" writes the result back into the input the
+// button named.
+document.addEventListener('click', function (e) {
+  if (e.target.closest('.dir-picker-open')) {
+    var dlg = document.getElementById('dir-picker-dialog');
+    if (dlg && !dlg.open) dlg.showModal();
+    return;
+  }
+  var use = e.target.closest('.dir-picker-use');
+  if (!use) return;
+  var input = document.getElementById(use.dataset.into || '');
+  if (input) {
+    input.value = use.dataset.path || '';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  var open = use.closest('dialog');
+  if (open) open.close();
 });
 
 // Auto-reload gallery/tags after job completes; auto-clear status after 30s

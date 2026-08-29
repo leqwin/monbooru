@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Monbooru
+Comment=Lightweight and fast private booru
+Exec=monbooru-run
+Icon=io.github.monbooru.Monbooru
+Terminal=false
+Categories=Graphics;2DGraphics;RasterGraphics;Viewer;
+Keywords=gallery;images;tags;booru;

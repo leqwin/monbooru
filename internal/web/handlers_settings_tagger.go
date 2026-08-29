@@ -39,6 +39,12 @@ type taggerRow struct {
 	Gated               bool
 	HostCommand         string
 	DockerCommand       string
+	// Files and TargetDir drive the desktop profile's click-through form of
+	// the install dialog: the browser downloads each file, which is what
+	// keeps the no-outbound-request promise true by construction rather
+	// than by argument. The shell snippets above answer the container.
+	Files     []tagger.CatalogFile
+	TargetDir string
 }
 
 // installedTaggerRow fills the fields every installed tagger shares; the

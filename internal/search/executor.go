@@ -1075,6 +1075,17 @@ func PinnedCollectionName(expr Expr) string {
 	return ""
 }
 
+// DefaultOrder is the direction a sort takes when the request names none.
+// Collection order reads forwards - 1..N is the reading order the
+// collection was put in - while every other sort leads with the newest or
+// the largest.
+func DefaultOrder(sort string) string {
+	if sort == "order" {
+		return "asc"
+	}
+	return "desc"
+}
+
 func buildOrder(sort, order string, randomSeed int64) string {
 	switch sort {
 	case "filesize":

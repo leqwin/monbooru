@@ -433,14 +433,24 @@ func (w *Watcher) renameIngested(id int64, path string) string {
 // runs, and Prune missing images would delete the row and its tags while
 // the bytes sit in the tree.
 func (w *Watcher) promoteSurvivingCopy(id int64, gonePath string) bool {
-	paths, err := db.QueryStrings(w.db.Read,
-		`SELECT path FROM image_paths WHERE image_id = ? AND is_canonical = 0`, id)
+	copies, err := AliasPathsFor(w.db.Read, []int64{id})
 	if err != nil {
 		logx.Warnf("watcher promote copy %d: list paths: %v", id, err)
 		return false
 	}
-	for _, p := range paths {
-		if _, statErr := os.Stat(p); statErr != nil {
+	for _, c := range copies[id] {
+		p := c.Path
+		info, statErr := os.Stat(p)
+		if statErr != nil {
+			continue
+		}
+		// Sync reaches the same decision with a fresh hash in hand; the
+		// length is the cheap half of that. Without it a copy overwritten
+		// while nothing was watching becomes the canonical, and sha256,
+		// md5 and file_size then describe bytes that are not there.
+		if info.Size() != c.Size {
+			logx.Warnf("watcher promote copy %d: %q holds %d bytes, not the row's %d - left alone",
+				id, p, info.Size(), c.Size)
 			continue
 		}
 		if err := repointCanonical(w.db.Write, id, p, FolderPath(w.galleryPath, p), gonePath); err != nil {

@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sync"
 
 	"golang.org/x/image/draw"
@@ -107,6 +108,18 @@ func decodedBytesPerPixel(m color.Model) int64 {
 		return 1
 	}
 	return 4
+}
+
+// largeDecodeBytes is the decoded-bitmap size past which the thumbnail
+// path hands the heap back before the next file. Below it, holding the
+// spent copy costs less than forcing the collection would.
+const largeDecodeBytes = 32 << 20
+
+// decodedBytes is what a decoded bitmap occupies, the same budget
+// decodeBudgetError applies to a header.
+func decodedBytes(img image.Image) int64 {
+	b := img.Bounds()
+	return int64(b.Dx()) * int64(b.Dy()) * decodedBytesPerPixel(img.ColorModel())
 }
 
 // decodeBudgetError refuses a header whose decoded bitmap would not fit
@@ -324,9 +337,20 @@ func generateImageThumb(srcPath, dstPath string) error {
 	if err != nil {
 		return fmt.Errorf("decoding image: %w", err)
 	}
+	// Asked here, not below: reading src after the release would keep the
+	// bitmap alive across it.
+	large := decodedBytes(src) >= largeDecodeBytes
 
 	thumb := scaleImage(src, thumbMaxDim)
-	return writeJPEGAtomic(thumb, dstPath, thumbQuality)
+	if err := writeJPEGAtomic(thumb, dstPath, thumbQuality); err != nil {
+		return err
+	}
+	// A spent bitmap stays resident until the heap next reaches its goal,
+	// so a sync over large files holds two of them at once.
+	if large {
+		debug.FreeOSMemory()
+	}
+	return nil
 }
 
 // scaleImage scales src so its longest side is at most maxDim.

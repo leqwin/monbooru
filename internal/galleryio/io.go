@@ -51,12 +51,13 @@ func SafeArchiveDest(root, rel string) (string, error) {
 // last_read_page / scheduled_lookup / scheduled_lookup_ptr / upload_batch,
 // image_tags.stale, image_paths.mtime_unix / mtime_nsec, tags.stale,
 // tag_implications.stale and the image_lookups /
-// collection_find_relations tables. Older imports down to
-// ExportMinSupported still round-trip (the new columns default, the
-// new tables stay empty or, for image_collections, derive from
-// images.series and, for the scheduled-lookup opt-ins, from the schema
-// default the pre-v10 library was running under).
-const ExportVersion = 10
+// collection_find_relations tables; v11 adds image_tag_sources. Older
+// imports down to ExportMinSupported still round-trip (the new columns
+// default, the new tables stay empty or, for image_collections, derive
+// from images.series, for image_tag_sources from image_tags.tagger_name
+// and, for the scheduled-lookup opt-ins, from the schema default the
+// pre-v10 library was running under).
+const ExportVersion = 11
 
 // ExportMinSupported is the oldest full-export version this
 // server reads; anything below is rejected.
@@ -97,6 +98,7 @@ type Export struct {
 	ImageAnnotations []ImageAnnotationRow `json:"image_annotations,omitempty"`
 	ImagePaths       []ImagePathRow       `json:"image_paths"`
 	ImageTags        []ImageTagRow        `json:"image_tags"`
+	ImageTagSources  []ImageTagSourceRow  `json:"image_tag_sources,omitempty"`
 	SDMetadata       []SDMetadataRow      `json:"sd_metadata"`
 	ComfyUIMetadata  []ComfyMetadataRow   `json:"comfyui_metadata"`
 	MangaMetadata    []MangaMetadataRow   `json:"manga_metadata,omitempty"`
@@ -240,6 +242,16 @@ type ImageTagRow struct {
 	TaggerName sql.NullString  `json:"tagger_name"`
 	CreatedAt  string          `json:"created_at"`
 	Stale      int             `json:"stale,omitempty"`
+}
+
+// ImageTagSourceRow is one line of the per-tag provenance ledger. It
+// travels on its own because image_tags.tagger_name keeps only the first
+// writer, so a tag several sources agree on cannot be rebuilt from it.
+type ImageTagSourceRow struct {
+	ImageID   int64  `json:"image_id"`
+	TagID     int64  `json:"tag_id"`
+	Source    string `json:"source"`
+	CreatedAt string `json:"created_at"`
 }
 
 type TagImplicationRow struct {
@@ -450,6 +462,9 @@ func ExportGalleryJSON(cx gallery.Handle, w io.Writer) error {
 		scanRow(func(r *ImageTagRow) []any {
 			return []any{&r.ImageID, &r.TagID, &r.IsAuto, &r.IsImplied, &r.Confidence, &r.TaggerName, &r.CreatedAt, &r.Stale}
 		}))
+	streamRows(bw, "image_tag_sources", cx.DB,
+		`SELECT image_id, tag_id, source, created_at FROM image_tag_sources ORDER BY image_id, tag_id, source`,
+		scanRow(func(r *ImageTagSourceRow) []any { return []any{&r.ImageID, &r.TagID, &r.Source, &r.CreatedAt} }))
 	streamRows(bw, "sd_metadata", cx.DB,
 		`SELECT image_id, prompt, negative_prompt, model, seed, sampler, steps, cfg_scale, raw_params, generation_hash FROM sd_metadata`,
 		func(rows *sql.Rows) (any, error) {
@@ -598,10 +613,12 @@ func writeGalleryFilesToZip(zw *zip.Writer, galleryPath string) error {
 	})
 }
 
-// ApplyImport runs the destructive file-system work outside ctxMu so the
-// caller can defer lock release around it. Kept as a package function so the
-// early-return error paths are linear. maxFileSizeMB caps each archive
-// entry's decompressed size; <= 0 disables the cap.
+// ApplyImport replaces the gallery's db, thumbnails and, for an archive,
+// its files. The caller closes the target first and reopens it after; this
+// runs with no lock held, since it is minutes of work on a real library.
+// Kept as a package function so the early-return error paths are linear.
+// maxFileSizeMB caps each archive entry's decompressed size; <= 0 disables
+// the cap.
 func ApplyImport(format, tmpPath, dbPath, thumbsPath, galleryPath string, maxFileSizeMB int) error {
 	switch format {
 	case "db":
@@ -890,6 +907,25 @@ func replaceDBFromJSON(srcPath, dbPath, thumbsPath, galleryPath string) error {
 	return nil
 }
 
+// classifyArchive picks the three shapes an export archive can carry and
+// the source files beside them. Shared with the merge importer, which
+// reads the same archive layout and would otherwise say so twice.
+func classifyArchive(files []*zip.File) (innerDB, innerJSON, innerLight *zip.File, gallery []*zip.File) {
+	for _, f := range files {
+		switch {
+		case f.Name == "monbooru.db":
+			innerDB = f
+		case f.Name == "monbooru.json":
+			innerJSON = f
+		case f.Name == "tags.json":
+			innerLight = f
+		case strings.HasPrefix(f.Name, "gallery/") && !strings.HasSuffix(f.Name, "/"):
+			gallery = append(gallery, f)
+		}
+	}
+	return innerDB, innerJSON, innerLight, gallery
+}
+
 // replaceFromArchive opens the uploaded ZIP, extracts the inner DB or JSON
 // via the matching replaceDBFrom* helper, and when `gallery/` entries are
 // present wipes the source folder and extracts them into it. maxFileSizeMB
@@ -902,20 +938,7 @@ func replaceFromArchive(srcPath, dbPath, thumbsPath, galleryPath string, maxFile
 	}
 	defer func() { _ = zr.Close() }()
 
-	var innerDB, innerJSON, innerLight *zip.File
-	var galleryFiles []*zip.File
-	for _, f := range zr.File {
-		switch {
-		case f.Name == "monbooru.db":
-			innerDB = f
-		case f.Name == "monbooru.json":
-			innerJSON = f
-		case f.Name == "tags.json":
-			innerLight = f
-		case strings.HasPrefix(f.Name, "gallery/") && !strings.HasSuffix(f.Name, "/"):
-			galleryFiles = append(galleryFiles, f)
-		}
-	}
+	innerDB, innerJSON, innerLight, galleryFiles := classifyArchive(zr.File)
 	if innerDB == nil && innerJSON == nil && innerLight == nil {
 		// No monbooru-native shape inside; fall through to the foreign-format translators.
 		// They synthesise a light manifest plus a {rel → zip.File} map and
@@ -1447,15 +1470,24 @@ func loadExportIntoDB(database *db.DB, exp Export) error {
 			return fmt.Errorf("insert image_tag (%d,%d): %w", r.ImageID, r.TagID, err)
 		}
 	}
-	// The export format doesn't carry the source ledger; derive it the
-	// way the upgrade backfill does, so an imported library answers
-	// per-tag provenance the same as one that migrated in place.
-	if _, err := tx.Exec(
-		`INSERT OR IGNORE INTO image_tag_sources (image_id, tag_id, source, created_at)
-		 SELECT image_id, tag_id, COALESCE(NULLIF(tagger_name, ''), 'user'), created_at
-		 FROM image_tags WHERE is_implied = 0`,
-	); err != nil {
-		return fmt.Errorf("backfill image_tag_sources: %w", err)
+	if err := insertAll(tx, "image_tag_source",
+		`INSERT OR IGNORE INTO image_tag_sources (image_id, tag_id, source, created_at) VALUES (?, ?, ?, ?)`,
+		exp.ImageTagSources, func(r ImageTagSourceRow) []any {
+			return []any{r.ImageID, r.TagID, r.Source, r.CreatedAt}
+		}); err != nil {
+		return err
+	}
+	if exp.Version < 11 {
+		// Pre-v11 documents carry no ledger; derive the one source each row
+		// can attest the way the upgrade backfill does, so an imported
+		// library answers per-tag provenance rather than nothing at all.
+		if _, err := tx.Exec(
+			`INSERT OR IGNORE INTO image_tag_sources (image_id, tag_id, source, created_at)
+			 SELECT image_id, tag_id, COALESCE(NULLIF(tagger_name, ''), 'user'), created_at
+			 FROM image_tags WHERE is_implied = 0`,
+		); err != nil {
+			return fmt.Errorf("backfill image_tag_sources: %w", err)
+		}
 	}
 	if err := insertAll(tx, "sd_metadata",
 		`INSERT INTO sd_metadata (image_id, prompt, negative_prompt, model, seed, sampler, steps, cfg_scale, raw_params, generation_hash)

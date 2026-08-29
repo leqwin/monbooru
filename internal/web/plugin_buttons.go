@@ -63,7 +63,7 @@ func (v pluginSlotView) AnyOpen() bool {
 func (s *Server) pluginSlot(r *http.Request, slot string, imageID int64, fileType string) pluginSlotView {
 	peers := s.plugins()
 	slices.SortFunc(peers, func(a, b config.PluginConfig) int { return strings.Compare(a.Name, b.Name) })
-	back, gallery := s.pageURL(r), s.activeName
+	back, gallery := s.pageURL(r), s.activeGallery()
 	view := pluginSlotView{ImageID: imageID}
 	for _, p := range peers {
 		// pluginAddress rather than pluginBase: the latter reports a paused

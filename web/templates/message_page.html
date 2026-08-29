@@ -1,0 +1,40 @@
+{{define "message_page.html"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+{{template "partials/head.html" .}}
+{{if .Poll}}<meta http-equiv="refresh" content="60;url=/">{{end}}
+</head>
+<body>
+  <div class="login-wrap">
+    <div class="login-box">
+      <h1>{{.Heading}}</h1>
+      <p class="field-hint">{{.Hint}}</p>
+    </div>
+  </div>
+  {{if .Poll}}
+  <script>
+    // Come back when the listener does, rather than on a fixed timer that
+    // lands on a refused connection whenever the new process takes longer to
+    // bind. Seeing it refuse once is the reliable signal; a restart can also
+    // be quick enough that no probe catches the gap, so after a few seconds
+    // a server that answers is taken to be the new one. The meta refresh
+    // above is the no-script fallback, past this poll's own cap.
+    (function () {
+      var down = false, tries = 0;
+      var probe = function () {
+        if (tries++ > 240) { return; }
+        var settled = down || tries > 8;
+        fetch("/health", { cache: "no-store" })
+          .then(function (r) {
+            if (r.ok && settled) { location.replace("/"); } else { setTimeout(probe, 250); }
+          })
+          .catch(function () { down = true; setTimeout(probe, 250); });
+      };
+      setTimeout(probe, 250);
+    })();
+  </script>
+  {{end}}
+</body>
+</html>
+{{end}}

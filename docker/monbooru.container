@@ -9,7 +9,7 @@ Image=ghcr.io/monbooru/monbooru:latest
 #AddDevice=/dev/dri
 #GroupAdd=993
 
-PublishPort=127.0.0.1:8080:8080
+PublishPort=127.0.0.1:8455:8455
 
 NoNewPrivileges=true
 ## Drop all capabilities. CHOWN + DAC_OVERRIDE are only needed if your
@@ -25,7 +25,7 @@ Volume=/path/to/your/gallery:/gallery
 Volume=/path/to/monbooru/config:/config
 Volume=/path/to/monbooru/data:/data
 
-Environment=MONBOORU_SERVER_BIND_ADDRESS=0.0.0.0:8080
+Environment=MONBOORU_SERVER_BIND_ADDRESS=0.0.0.0:8455
 #Environment=TZ=Etc/UTC
 
 HealthCmd=["/usr/local/bin/monbooru","healthcheck","-config","/config/monbooru.toml"]

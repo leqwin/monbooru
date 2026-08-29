@@ -396,6 +396,14 @@ func (cx *galleryCtx) close() {
 	}
 }
 
+// startBackground starts everything a freshly-opened gallery runs in the
+// background. Paired because a gallery given only the watcher never
+// evicts the pages its reader extracts, for the life of the process.
+func (cx *galleryCtx) startBackground(watchEnabled bool, maxFileSizeMB int, naming gallery.Naming, jm *jobs.Manager) {
+	cx.startWatcher(watchEnabled, maxFileSizeMB, naming, jm)
+	cx.startMangaReclaim()
+}
+
 // startWatcher no-ops when watching is disabled, the gallery is degraded,
 // or a watcher is already running.
 func (cx *galleryCtx) startWatcher(watchEnabled bool, maxFileSizeMB int, naming gallery.Naming, jm *jobs.Manager) {

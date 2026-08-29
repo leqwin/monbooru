@@ -11,15 +11,15 @@
     {{if gt .Total 0}}
       <span class="job-progress">{{.Processed}}/{{.Total}}</span>
     {{end}}
-    <span class="job-msg">{{.Message}}</span>
+    <span class="job-msg" title="{{.Message}}">{{.Message}}</span>
     {{if or (eq .JobType "autotag") (eq .JobType "sync") (eq .JobType "delete") (eq .JobType "re-extract") (eq .JobType "rebuild-thumbs") (eq .JobType "move") (eq .JobType "tag") (eq .JobType "prune-thumbs") (eq .JobType "relations") (eq .JobType "hashes") (eq .JobType "fold") (eq .JobType "lookup")}}
     <button class="job-dismiss" onclick="cancelJobStatus()" title="{{cancelTitle .JobType}}">×</button>
     {{end}}
   {{else if and . .Summary}}
-    <span class="job-done" id="job-done-msg">✓ {{.Summary}}</span>
+    <span class="job-done" id="job-done-msg" title="{{.Summary}}">✓ {{.Summary}}</span>
     <button class="job-dismiss" onclick="dismissJobStatus()" title="Dismiss">×</button>
   {{else if and . .Error}}
-    <span class="job-error" id="job-error-msg">✗ {{.Error}}</span>
+    <span class="job-error" id="job-error-msg" title="{{.Error}}">✗ {{.Error}}</span>
     <button class="job-dismiss" onclick="dismissJobStatus()" title="Dismiss">×</button>
   {{end}}
 </div>

@@ -2,6 +2,11 @@
 /monbooru
 /monbooru.exe
 
+/dist/
+/stage/
+/tools/
+/packaging/windows/payload/
+
 # Local config
 /monbooru.toml
 

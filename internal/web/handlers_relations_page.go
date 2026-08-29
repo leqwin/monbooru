@@ -123,12 +123,7 @@ func (s *Server) settingsRelationsPost(w http.ResponseWriter, r *http.Request) {
 // offering pairs the new settings reject until the operator switched to
 // it. Returns the number of rows dropped.
 func (s *Server) pruneRelationQueues(ctx context.Context, rc config.RelationsConfig) int {
-	s.ctxMu.RLock()
-	ctxs := make([]*galleryCtx, 0, len(s.contexts))
-	for _, cx := range s.contexts {
-		ctxs = append(ctxs, cx)
-	}
-	s.ctxMu.RUnlock()
+	ctxs := s.allContexts()
 	opts := relations.FindPairsOptions{
 		Distance:         rc.DefaultDistance,
 		TagPairs:         rc.TagPairs,
@@ -295,7 +290,7 @@ func (s *Server) relationsPage(w http.ResponseWriter, r *http.Request) {
 	s.renderTemplate(w, "relations.html", relationsPageData{
 		baseData:      s.base(r, "relations", "Relations - "+s.booruName()),
 		Counts:        counts,
-		ActiveGallery: s.activeName,
+		ActiveGallery: s.activeGallery(),
 	})
 }
 
@@ -990,7 +985,7 @@ func (s *Server) browseRelationsPage(w http.ResponseWriter, r *http.Request) {
 	}
 	s.renderTemplate(w, "relations_browse.html", browseRelationsData{
 		baseData:      s.base(r, "relations", "Browse relations - "+s.booruName()),
-		ActiveGallery: s.activeName,
+		ActiveGallery: s.activeGallery(),
 		Kind:          kind,
 		Cards:         cards,
 		Counts:        counts,

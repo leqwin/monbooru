@@ -4,12 +4,13 @@ import (
 	"cmp"
 	"flag"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"time"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/monbooru/monbooru/internal/desktop"
 )
 
 // runHealthcheck is the body of the `monbooru healthcheck` subcommand. It
@@ -52,15 +53,5 @@ func resolveHealthAddr(configPath string) string {
 			addr = mc.Server.BindAddress
 		}
 	}
-	addr = cmp.Or(addr, "127.0.0.1:8080")
-
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return addr // best-effort: let the dialer reject it
-	}
-	switch host {
-	case "", "0.0.0.0", "::", "[::]":
-		host = "127.0.0.1"
-	}
-	return net.JoinHostPort(host, port)
+	return desktop.LoopbackAddr(cmp.Or(addr, "127.0.0.1:8455"))
 }

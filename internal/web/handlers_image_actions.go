@@ -16,6 +16,7 @@ import (
 	"github.com/monbooru/monbooru/internal/gallery"
 	"github.com/monbooru/monbooru/internal/logx"
 	"github.com/monbooru/monbooru/internal/models"
+	"github.com/monbooru/monbooru/internal/search"
 	"github.com/monbooru/monbooru/internal/tags"
 	"github.com/monbooru/monbooru/internal/upgrade"
 )
@@ -142,7 +143,7 @@ func (s *Server) deleteImage(w http.ResponseWriter, r *http.Request) {
 		sortStr := back.Sort
 		sortStr = cmp.Or(sortStr, "newest")
 		orderStr := back.Order
-		orderStr = cmp.Or(orderStr, "desc")
+		orderStr = cmp.Or(orderStr, search.DefaultOrder(sortStr))
 		prevID, nextID = s.findAdjacentImages(r.Context(), id, back.Q, sortStr, orderStr, back.Seed, resolveCeiling(r, s.Active()))
 	}
 
@@ -398,10 +399,8 @@ func (s *Server) fetchSource(w http.ResponseWriter, r *http.Request) {
 	}
 	// The route bypasses ContextMiddleware so the outbound call below never
 	// runs under ctxMu (a hanging monloader would stall a gallery switch);
-	// snapshot the active name under a short lock instead.
-	s.ctxMu.RLock()
-	galleryName := s.activeName
-	s.ctxMu.RUnlock()
+	// snapshot the active name instead.
+	galleryName := s.activeGallery()
 	s.recordFetchStatus(galleryName, id, "pending", "")
 	if err := s.EnqueueMetadataFetch(r.Context(), id, galleryName, url); err != nil {
 		s.clearFetchStatus(galleryName, id)
@@ -949,7 +948,7 @@ func (s *Server) singleName(ctx context.Context, tmpl *gallery.NameTemplate, lit
 	if !tmpl.HasTokens() {
 		return literal, nil
 	}
-	facts, err := gallery.LoadNameFacts(ctx, s.db(), s.activeName, id, 0, tmpl)
+	facts, err := gallery.LoadNameFacts(ctx, s.db(), s.activeGallery(), id, 0, tmpl)
 	if err != nil {
 		return "", err
 	}

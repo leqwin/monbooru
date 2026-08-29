@@ -25,7 +25,7 @@ services:
     user: "1000:1000"
 
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8455:8455"
     security_opt:
       - no-new-privileges:true
 
@@ -46,32 +46,32 @@ services:
       - /path/to/monbooru/config:/config
       - /path/to/monbooru/data:/data
     environment:
-      - MONBOORU_SERVER_BIND_ADDRESS=0.0.0.0:8080
+      - MONBOORU_SERVER_BIND_ADDRESS=0.0.0.0:8455
       # Base URL (The one you use to reach monbooru from the browser)
-      - MONBOORU_SERVER_BASE_URL=http://localhost:8080
+      - MONBOORU_SERVER_BASE_URL=http://localhost:8455
       # - TZ=Etc/UTC
     restart: unless-stopped
 
   ## monloader is an optional online boorus and galleries downloader.
   ## it allows you to download images and their tags directly into monbooru.
   ## see https://github.com/monbooru/monloader for more details.
-  #monloader:
-  #  image: ghcr.io/monbooru/monloader:latest
-  #  container_name: monloader
-  #  user: "1000:1000"
-  #  ports:
-  #    - "127.0.0.1:8081:8081"
-  #  security_opt:
-  #    - no-new-privileges:true
-  #  cap_drop:
-  #    - ALL
-  #  volumes:
-  #    - /path/to/monloader/config:/config
-  #    # If you want to enable the Public Tag Repository syncing (>70GB required)
-  #    # - /path/to/monloader/ptr:/ptr
-  #  environment:
-  #    - MONLOADER_SERVER_BIND_ADDRESS=0.0.0.0:8081
-  #    - MONLOADER_SERVER_BASE_URL=http://localhost:8081
-  #  depends_on:
-  #    - monbooru
-  #  restart: unless-stopped
+  monloader:
+    image: ghcr.io/monbooru/monloader:latest
+    container_name: monloader
+    user: "1000:1000"
+    ports:
+      - "127.0.0.1:8456:8456"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - /path/to/monloader/config:/config
+      # If you want to enable the Public Tag Repository syncing (>70GB required)
+      # - /path/to/monloader/ptr:/ptr
+    environment:
+      - MONLOADER_SERVER_BIND_ADDRESS=0.0.0.0:8456
+      - MONLOADER_SERVER_BASE_URL=http://localhost:8456
+    depends_on:
+      - monbooru
+    restart: unless-stopped

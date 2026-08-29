@@ -23,6 +23,7 @@
 {{template "layout_head" .}}
 <div id="sidebar-inner">
   <nav class="settings-nav">
+    {{if .DesktopProfile}}<a href="#desktop">Desktop</a>{{end}}
     <a href="#general">General</a>
     <a href="#galleries">Galleries</a>
     <a href="#plugins">Plugins</a>
@@ -46,6 +47,67 @@
 
 <div id="settings-page">
   <h2>Settings</h2>
+
+  {{if .DesktopProfile}}
+  {{$dk := .Desktop}}
+  <section id="desktop" class="settings-section">
+    <h3>Desktop</h3>
+    <div id="flash-desktop"></div>
+    {{/* The folder buttons sit inside the switches form to share its row;
+         hx-params narrows each click to its own two values, since htmx would
+         otherwise post the switches to the opener. */}}
+    <form id="desktop-switches" hx-post="/settings/desktop" hx-target="#flash-desktop" hx-swap="innerHTML">
+      <input type="hidden" name="_csrf" value="{{$csrf}}">
+      <div class="settings-cols">
+        <div class="field">
+          <label>Folders</label>
+          <div class="desktop-folders">
+            {{range $kind := .DesktopFolders}}
+            <button type="button" class="btn-sm" hx-post="/internal/open-folder" hx-params="_csrf,kind"
+                    hx-vals='{"_csrf":"{{$csrf}}","kind":"{{$kind}}"}'
+                    hx-target="#flash-desktop" hx-swap="innerHTML">{{$kind}}</button>
+            {{end}}
+          </div>
+        </div>
+        {{if $dk.Supported}}
+        <div class="field">
+          <label>Launching</label>
+          {{if $dk.MenuSupported}}
+          <label><input type="checkbox" name="menu_entry" {{if $dk.MenuEnabled}}checked{{end}}> Add to the applications menu</label>
+          {{end}}
+          {{if $dk.AutostartSupported}}
+          <label><input type="checkbox" name="start_at_login" {{if $dk.AutostartEnabled}}checked{{end}}> Start at login</label>
+          {{end}}
+        </div>
+        {{end}}
+        {{if $dk.TraySupported}}
+        <div class="field">
+          <label>Tray</label>
+          <label><input type="checkbox" name="tray" {{if $dk.TrayEnabled}}checked{{end}}> Show the tray icon</label>
+          <span class="field-hint">Takes effect after a restart.</span>
+        </div>
+        {{end}}
+      </div>
+    </form>
+    <div class="desktop-actions">
+      <div class="desktop-power">
+        <form method="post" action="/settings/restart"
+              hx-confirm="Restart monbooru?" data-confirm-ok="Restart"
+              {{with .DesktopJobWarning}}data-confirm-danger="{{.}}"{{end}}>
+          <input type="hidden" name="_csrf" value="{{$csrf}}">
+          <button type="submit">Restart monbooru</button>
+        </form>
+        <form method="post" action="/settings/quit" class="desktop-quit"
+              hx-confirm="Stop monbooru?" data-confirm-ok="Stop"
+              {{with .DesktopJobWarning}}data-confirm-danger="{{.}}"{{end}}>
+          <input type="hidden" name="_csrf" value="{{$csrf}}">
+          <button type="submit" class="btn-danger">Stop monbooru</button>
+        </form>
+      </div>
+      {{if or $dk.Supported $dk.TraySupported}}<button type="submit" form="desktop-switches">Save</button>{{end}}
+    </div>
+  </section>
+  {{end}}
 
   <section id="general" class="settings-section">
     <h3>General</h3>
@@ -199,7 +261,14 @@
         </div>
         <div class="field">
           <label>Gallery path</label>
-          <input type="text" name="gallery_path" required>
+          <div class="path-row">
+            <input type="text" name="gallery_path" id="gallery-add-path" required>
+            {{if .DesktopProfile}}
+            <button type="button" class="btn-sm dir-picker-open" data-into="gallery-add-path"
+                    hx-get="/internal/browse?into=gallery-add-path" hx-target="#dir-picker-body"
+                    hx-swap="innerHTML">Browse</button>
+            {{end}}
+          </div>
         </div>
         <div class="field">
           <label><input type="checkbox" id="gallery-add-import-toggle"> Import an existing gallery</label>
@@ -472,26 +541,46 @@
 
   // Runs after the import POST settles. Unwinds the busy state and, when
   // the server replied with a flash-ok body (written to the in-dialog
-  // #flash-gallery-import by the hx-target), relays the flash out to
-  // #flash-galleries so it survives the dialog close and then closes the
-  // modal. Error responses keep the flash inside the dialog so the user
-  // can read it and fix the confirm-name or file input.
+  // #flash-gallery-import by the hx-target), closes the modal. Error
+  // responses keep the flash inside the dialog so the user can read it and
+  // fix the confirm-name or file input.
   //
-  // A successful import also flips the server-side active gallery, so the
-  // page has to repaint to show the new badge in the galleries table and
-  // the footer switcher. Delay the reload just long enough for the flash
-  // to be readable in #flash-galleries.
+  // A successful import flips the server-side active gallery, so the page
+  // has to repaint to show the new badge in the galleries table and the
+  // footer switcher. The summary is the whole point of the message on a
+  // merge - "0 image(s) added, 0 tagged, 431 not in this gallery" is often
+  // the honest answer - so it is handed to the next load rather than shown
+  // for a moment and repainted away.
   function onImportResponse(form) {
     setImportBusy(form, false);
     var flash = document.getElementById('flash-gallery-import');
     if (flash && flash.querySelector('.flash-ok')) {
-      var outer = document.getElementById('flash-galleries');
-      if (outer) outer.innerHTML = flash.innerHTML;
+      stashImportFlash(flash.innerHTML);
       flash.innerHTML = '';
       document.getElementById('gallery-import-dialog').close();
-      setTimeout(function(){ window.location.reload(); }, 1500);
+      window.location.reload();
     }
   }
+
+  // The stash carries a timestamp so a summary the reload never consumed
+  // does not pop on a settings visit an hour later.
+  function stashImportFlash(html) {
+    try {
+      sessionStorage.setItem('monbooru_import_flash', JSON.stringify({h: html, t: Date.now()}));
+    } catch (e) {}
+  }
+  document.addEventListener('DOMContentLoaded', function() {
+    var raw, stash;
+    try {
+      raw = sessionStorage.getItem('monbooru_import_flash');
+      if (raw) sessionStorage.removeItem('monbooru_import_flash');
+    } catch (e) { return; }
+    if (!raw) return;
+    try { stash = JSON.parse(raw); } catch (e) { return; }
+    var outer = document.getElementById('flash-galleries');
+    if (!stash || !stash.h || !outer || Date.now() - stash.t > 30000) return;
+    outer.innerHTML = stash.h;
+  });
   </script>
 
   <section id="plugins" class="settings-section">
@@ -585,12 +674,17 @@
               <div class="tagger-actions">
               {{if not $r.Installed}}
                 {{if $r.Supported}}
+                {{if $.DesktopProfile}}
+                <button type="button" class="btn-sm tagger-act-state"
+                        onclick="document.getElementById('tagger-get-{{$r.Name}}').showModal()">Install</button>
+                {{else}}
                 <button type="button" class="btn-sm tagger-act-state btn-tagger-cmd"
                         data-tagger-name="{{$r.Name}}"
                         data-tagger-desc="{{$r.Description}}"
                         data-gated="{{if $r.Gated}}1{{end}}"
                         data-host-cmd="{{$r.HostCommand}}"
                         data-docker-cmd="{{$r.DockerCommand}}">Install</button>
+                {{end}}
                 {{end}}
               {{else}}
                 {{if $r.Enabled}}
@@ -636,6 +730,33 @@
       <div id="tagger-config-{{.Name}}-body">Loading...</div>
     </dialog>
     {{end}}{{end}}
+    {{if .DesktopProfile}}
+    {{range $rows}}{{if and (not .Installed) .Supported}}
+    <dialog id="tagger-get-{{.Name}}" class="tagger-get-dialog">
+      <p><strong>{{.Name}}</strong> - {{.Description}}</p>
+      {{if .Gated}}
+      <p class="field-hint">This model is login-gated on Hugging Face: accept its terms on the model page while signed in to this browser, then use the links below.</p>
+      {{end}}
+      <ol class="tagger-get-steps">
+        <li>Download each file:
+          <ul class="tagger-get-files">
+            {{range .Files}}<li><a href="{{.URL}}" target="_blank" rel="noopener">{{.Filename}}</a></li>{{end}}
+          </ul>
+        </li>
+        <li>Put them in <code>{{.TargetDir}}</code>, keeping the names they download with.
+          <button type="button" class="btn-sm" hx-post="/internal/open-folder"
+                  hx-vals='{"_csrf":"{{$csrf}}","kind":"models","name":"{{.Name}}"}'
+                  hx-target="#tagger-get-flash-{{.Name}}" hx-swap="innerHTML">Open the folder</button>
+        </li>
+        <li>Reload this page.</li>
+      </ol>
+      <div id="tagger-get-flash-{{.Name}}"></div>
+      <div class="dialog-actions">
+        <button type="button" onclick="this.closest('dialog').close()">Close</button>
+      </div>
+    </dialog>
+    {{end}}{{end}}
+    {{else}}
     <dialog id="tagger-cmd-dialog">
       <p><strong id="tagger-cmd-name"></strong> - <span id="tagger-cmd-desc"></span></p>
       <p class="field-hint">Run one of the commands below on a host with internet access, then reload the Settings page.</p>
@@ -654,6 +775,7 @@
         <button type="button" onclick="this.closest('dialog').close()">Close</button>
       </div>
     </dialog>
+    {{end}}
   </section>
 
   <section id="relations" class="settings-section">
@@ -764,7 +886,7 @@
     <p class="field-hint">Runs the selected maintenance actions once per day at the configured time, on every configured gallery in sequence. Skipped silently if another job is already running at fire time.</p>
     <p class="field-hint">
       {{if $schedSt.LastRun.IsZero}}Last run: never.{{else}}Last run: {{$schedSt.LastRun.Format "2006-01-02 15:04:05"}} ({{$schedSt.LastInfo}}, {{schedDuration $schedSt.LastDur}}).{{end}}
-      {{if $schedSt.NextRun.IsZero}}No next run scheduled (every action is off).{{else}}Next run: {{$schedSt.NextRun.Format "2006-01-02 15:04:05"}}.{{end}}
+      {{if $schedSt.NextRun.IsZero}}{{$schedSt.NextRunNote}}{{else}}Next run: {{$schedSt.NextRun.Format "2006-01-02 15:04:05"}}.{{end}}
     </p>
     {{if $schedSt.LookupInfo}}
     <p class="field-hint">
@@ -777,6 +899,15 @@
         <label>Time of day (24h, HH:MM) <input type="text" name="time" value="{{$sched.Time}}"
                pattern="^([01]\d|2[0-3]):[0-5]\d$" placeholder="HH:MM" maxlength="5"
                class="schedule-time-input" required></label>
+      </div>
+      <div class="field">
+        <label>When it runs</label>
+        {{$mode := $sched.EffectiveMode}}
+        <div class="radio-grid">
+          {{range .ScheduleModes}}
+          <label><input type="radio" name="mode" value="{{.Name}}"{{if eq $mode .Name}} checked{{end}}> {{.Label}}</label>
+          {{end}}
+        </div>
       </div>
       <div class="schedule-grid">
         <div class="field">
@@ -805,7 +936,11 @@
         </div>
         {{end}}
       </div>
-      <div class="settings-actions"><button type="submit">Save</button></div>
+      <div class="settings-actions">
+        <button type="button" hx-post="/settings/schedule/run"
+                hx-vals='{"_csrf":"{{$csrf}}"}' hx-target="#flash-schedule" hx-swap="innerHTML">Run now</button>
+        <button type="submit">Save</button>
+      </div>
     </form>
   </section>
 
@@ -822,8 +957,9 @@
           <tr><th>Memory used (PSS)</th><td>{{humanBytes $stats.Mem.Total}}</td></tr>
           {{if or $stats.Mem.Anon $stats.Mem.File}}
           <tr><th class="stats-d1">Private (anonymous)</th><td>{{humanBytes $stats.Mem.Anon}}</td></tr>
-          <tr><th class="stats-d2">Go runtime (reserved)</th><td>{{humanBytes $stats.Mem.Sys}}</td></tr>
+          <tr><th class="stats-d2">Go runtime (in use)</th><td>{{humanBytes $stats.Mem.GoInuse}}</td></tr>
           <tr><th class="stats-d3">Go heap (live objects)</th><td>{{humanBytes $stats.Mem.HeapAlloc}}</td></tr>
+          <tr><th class="stats-d2">Go runtime (idle)</th><td>{{humanBytes $stats.Mem.GoIdle}}</td></tr>
           <tr><th class="stats-d2">Native heap (SQLite, CGO)</th><td>{{humanBytes $stats.Mem.Native}}</td></tr>
           <tr><th class="stats-d1">Shared (file-backed)</th><td>{{humanBytes $stats.Mem.File}}</td></tr>
           {{if $stats.Mem.DB}}
@@ -916,6 +1052,13 @@
     </div>
   </section>
 </div>
+
+{{if .DesktopProfile}}
+<dialog id="dir-picker-dialog" class="dir-picker-dialog">
+  <h4>Choose a folder</h4>
+  <div id="dir-picker-body">Loading...</div>
+</dialog>
+{{end}}
 
 {{template "layout_end" .}}
 {{end}}

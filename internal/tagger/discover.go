@@ -90,6 +90,13 @@ func DiscoverTaggers(cfg *config.Config) []TaggerStatus {
 		byName[t.Name] = t
 	}
 
+	// The library blocks every row at once, so it is resolved once per
+	// pass rather than per row.
+	noLibrary := ""
+	if buildSupportsInference() {
+		noLibrary = missingRuntimeLibrary()
+	}
+
 	out := make([]TaggerStatus, 0, len(order))
 	for _, name := range order {
 		t := byName[name]
@@ -99,16 +106,25 @@ func DiscoverTaggers(cfg *config.Config) []TaggerStatus {
 		status := TaggerStatus{TaggerInstance: t, Available: true}
 		onnxPath := filepath.Join(dir, t.ModelFile)
 		tagsPath := filepath.Join(dir, t.TagsFile)
-		if _, err := os.Stat(onnxPath); err != nil {
+		switch {
+		case noLibrary != "":
+			status.Available = false
+			status.Reason = noLibrary
+		case statMissing(onnxPath):
 			status.Available = false
 			status.Reason = "missing " + t.ModelFile
-		} else if _, err := os.Stat(tagsPath); err != nil {
+		case statMissing(tagsPath):
 			status.Available = false
 			status.Reason = "missing " + t.TagsFile
 		}
 		out = append(out, status)
 	}
 	return out
+}
+
+func statMissing(path string) bool {
+	_, err := os.Stat(path)
+	return err != nil
 }
 
 // EnabledTaggers returns taggers that are both enabled in config and

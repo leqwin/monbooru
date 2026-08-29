@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -61,12 +62,19 @@ type settingsData struct {
 	ScheduleStatus     ScheduleStatus
 	Stats              statsData
 	ExecutionProviders []executionProviderRow
+	ScheduleModes      []scheduleModeRow
 	PluginPending      []pairReq
 	PluginPaired       int
 	PluginRows         []pluginRowView
 	PluginsDir         string
 	Themes             themeCluster
 	ThemesDir          string
+	// DesktopProfile gates the section's local-machine controls, which the
+	// endpoints behind them refuse to serve anywhere else.
+	DesktopProfile    bool
+	DesktopFolders    []string
+	Desktop           desktopIntegration
+	DesktopJobWarning string
 }
 
 func (s *Server) settingsHandler(w http.ResponseWriter, r *http.Request) {
@@ -111,6 +119,8 @@ func (s *Server) settingsHandler(w http.ResponseWriter, r *http.Request) {
 				Gated:         e.Gated,
 				HostCommand:   e.HostCommand(),
 				DockerCommand: e.DockerCommand("monbooru"),
+				Files:         e.Files,
+				TargetDir:     filepath.Join(modelPath, e.Name),
 			})
 		}
 	}
@@ -125,19 +135,24 @@ func (s *Server) settingsHandler(w http.ResponseWriter, r *http.Request) {
 	taggerRows := append(supportedRows, unsupportedRows...)
 	s.renderTemplate(w, "settings.html", settingsData{
 		baseData:           base,
-		Galleries:          s.galleryRowsWithSnapshot(s.activeName, base.VisibleCount, base.TagCount),
+		Galleries:          s.galleryRowsWithSnapshot(s.activeGallery(), base.VisibleCount, base.TagCount),
 		Config:             s.cfgSnapshot(),
 		Taggers:            taggers,
 		TaggerRows:         taggerRows,
 		ScheduleStatus:     s.ScheduleStatus(),
 		Stats:              s.gatherStats(),
 		ExecutionProviders: executionProviderRows(),
+		ScheduleModes:      scheduleModeRows(),
 		PluginPending:      s.pairs.listPending(),
 		PluginPaired:       s.pairedPeerCount(),
 		PluginRows:         s.pluginRows(),
 		PluginsDir:         s.pluginsDir(),
 		Themes:             s.themeCluster(),
 		ThemesDir:          s.themesDir(),
+		DesktopProfile:     s.desktopLocal(r),
+		DesktopFolders:     s.availableFolders(),
+		Desktop:            s.desktopIntegration(),
+		DesktopJobWarning:  s.desktopJobWarning(),
 	})
 }
 
@@ -151,8 +166,13 @@ func (s *Server) settingsSchedulePost(w http.ResponseWriter, r *http.Request) {
 		writeInlineFlash(w, "err", err.Error())
 		return
 	}
+	mode := strings.TrimSpace(r.FormValue("mode"))
+	if !config.IsValidScheduleMode(mode) {
+		mode = config.ScheduleAtTime
+	}
 	s.cfgMu.Lock()
 	s.cfg.Schedule.Time = timeVal
+	s.cfg.Schedule.Mode = mode
 	s.cfg.Schedule.SyncGallery = r.FormValue("sync_gallery") == "on"
 	s.cfg.Schedule.RemoveOrphans = r.FormValue("remove_orphans") == "on"
 	s.cfg.Schedule.RunAutoTaggers = r.FormValue("run_auto_taggers") == "on"
@@ -168,8 +188,39 @@ func (s *Server) settingsSchedulePost(w http.ResponseWriter, r *http.Request) {
 	case s.schedReload <- struct{}{}:
 	default:
 	}
-	logx.Infof("settings: schedule updated (time=%s)", timeVal)
+	logx.Infof("settings: schedule updated (time=%s mode=%s)", timeVal, mode)
 	writeInlineFlash(w, "ok", "Saved.")
+}
+
+// settingsScheduleRunPost starts the nightly pass now. Useful on a container
+// too - "did my settings do anything?" is the same question everywhere - so
+// it is not gated on the desktop profile.
+func (s *Server) settingsScheduleRunPost(w http.ResponseWriter, r *http.Request) {
+	if !parseFormOK(w, r) {
+		return
+	}
+	if s.jobs.IsRunning() {
+		writeInlineFlash(w, "err", "A job is already running.")
+		return
+	}
+	go s.runScheduledActions()
+	writeInlineFlash(w, "ok", "Started. Watch the job status bar.")
+}
+
+// scheduleModeRow is one entry of the mode selector, described in plain
+// words rather than by its stored key.
+type scheduleModeRow struct {
+	Name  string
+	Label string
+}
+
+func scheduleModeRows() []scheduleModeRow {
+	return []scheduleModeRow{
+		{config.ScheduleAtTime, "Every day at the time above"},
+		{config.ScheduleAtTimeCatchup, "Every day at the time above, and at startup if a day was missed"},
+		{config.ScheduleOnStart, "At startup only, at most once a day"},
+		{config.ScheduleOff, "Never"},
+	}
 }
 
 // settingsGeneralPost saves the unified Settings → General form: the Files

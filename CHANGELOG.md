@@ -1,5 +1,35 @@
 # Changelog
 
+## [v1.20.0] - 2026-08-29
+### Added
+- Add Windows installer, Flatpak, and binary tarballs. ([#114](https://github.com/monbooru/monbooru/issues/114))
+- A desktop install adds a first-run setup page to set monbooru's gallery folder and who can reach it, opens a browser, adds a tray icon (on supported systems), can start at login, adds buttons to restart/stop monbooru, adds buttons to open its folders. ([#114](https://github.com/monbooru/monbooru/issues/114))
+- Scheduled actions can catch up a missed day or run at startup, plus a Run now button. ([#114](https://github.com/monbooru/monbooru/issues/114))
+- Tagger models install from the browser on a desktop install, instead of a shell snippet.
+
+### Changed
+- BREAKING: new configs and the container images serve 8455 by default, not 8080; a compose that sets MONBOORU_SERVER_BIND_ADDRESS like the default one is unaffected.
+- The container images and bundled downloads ship a trimmed ffmpeg build: far smaller, documented formats only.
+- A tagger row reports a missing ONNX Runtime instead of failing when a job runs.
+
+### Fixed
+- Switching, renaming or importing a gallery no longer blocks every other request.
+- A gallery repoint or rename that fails leaves the gallery open and where it was.
+- A finished job releases its memory immediately, and a sync of large images peaks lower.
+- A gallery added or imported at runtime no longer holds every manga page it opened.
+- A JSON export round trip keeps every tag's source, not just the first writer.
+- A batch lookup that fails part way no longer leaves stale counts behind.
+- A batch tag add names the tags it refused instead of reporting a clean run.
+- An implied tag whose parent is gone shows on the detail page and can be removed.
+- A merge import's summary survives the reload that follows it.
+- Adding a tag with an unknown prefix says the prefix was kept as part of the name.
+- The login page carries the user's theme and custom CSS.
+- A long watcher filename no longer pushes the nav out of the top bar.
+- The detail page's Prev button no longer hangs over the image.
+- Disabling a managed plugin no longer races a relaunch that leaves it running.
+
+Thanks to @gary-host-laptop for the suggestions (https://github.com/monbooru/monbooru/issues/114).
+
 ## [v1.19.1] - 2026-08-24
 ### Added
 - The PTR look-up for tags can pull in either direction, keeping the local spelling or the repository's.

@@ -147,12 +147,12 @@ func (s *Server) SessionMiddleware(next http.Handler) http.Handler {
 }
 
 // isPublicPath lists the routes a browser reaches before it holds a
-// session. The operator assets are on it because the login page renders
-// them too, and gated they resolve to the login HTML - a stylesheet that
-// never applies and a favicon that never draws.
+// session. The operator assets are on it because the login page and the
+// first-run wizard render them too, and gated they resolve to the login
+// HTML - a stylesheet that never applies and a favicon that never draws.
 func isPublicPath(path string) bool {
 	switch path {
-	case "/login", "/manifest.json", "/custom.css", "/custom.logo":
+	case "/login", "/manifest.json", "/custom.css", "/custom.logo", "/theme.css", "/theme.logo":
 		return true
 	}
 	return false

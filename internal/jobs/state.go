@@ -34,6 +34,10 @@ type Manager struct {
 	// viewed is set after MarkViewed; the auto-dismiss timer then drops
 	// from 30s ("no one is looking") to a few seconds.
 	viewed bool
+	// finished counts terminal transitions. The state itself is cleared
+	// by the auto-dismiss, so a watcher sampling less often than that
+	// would otherwise miss a whole job.
+	finished uint64
 }
 
 // NewManager returns a new Manager with no active job.
@@ -180,6 +184,7 @@ func (m *Manager) Complete(summary string) {
 	m.state.FinishedAt = &now
 	m.state.Summary = summary
 	m.state.Message = ""
+	m.finished++
 	m.scheduleAutoDismiss()
 }
 
@@ -195,6 +200,7 @@ func (m *Manager) Fail(errMsg string) {
 	m.state.Running = false
 	m.state.FinishedAt = &now
 	m.state.Error = errMsg
+	m.finished++
 	m.scheduleAutoDismiss()
 }
 
@@ -220,6 +226,15 @@ func (m *Manager) IsRunning() bool {
 		return true
 	}
 	return m.state != nil && m.state.Running
+}
+
+// Finished counts the jobs that have reached a terminal state. It only
+// grows, so a caller can tell that one ended between two samples however
+// far apart they are.
+func (m *Manager) Finished() uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.finished
 }
 
 // MarkViewed shortens the auto-dismiss timer to a few seconds once at

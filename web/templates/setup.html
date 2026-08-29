@@ -1,0 +1,59 @@
+{{define "setup.html"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+{{template "partials/head.html" .}}
+  <script src="/static/htmx.min.js"></script>
+  <script src="/static/main.js" defer></script>
+</head>
+<body>
+<div id="setup-page">
+  <h1>{{.BooruName}} setup</h1>
+  {{if .Err}}<div class="flash flash-err">{{.Err}}</div>{{end}}
+
+  <form method="post" action="/setup">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+
+    <h2>Where are your images?</h2>
+    <div class="field">
+      <div class="path-row">
+        <input type="text" name="gallery_path" id="setup-gallery-path" value="{{.GalleryPath}}" required>
+        <button type="button" class="btn-sm dir-picker-open" data-into="setup-gallery-path"
+                hx-get="/internal/browse?into=setup-gallery-path" hx-target="#dir-picker-body"
+                hx-swap="innerHTML">Browse</button>
+      </div>
+      <p class="field-hint">Other folders can be added later as further galleries in the Settings.</p>
+    </div>
+
+    <h2>Who can reach it?</h2>
+    <div class="field">
+      <label><input type="radio" name="reach" value="local" {{if not .LAN}}checked{{end}}> Only this computer</label>
+      <p class="field-hint">{{.BooruName}} answers at http://localhost:{{.Port}} and at no other address.</p>
+      <label><input type="radio" name="reach" value="lan" {{if .LAN}}checked{{end}}> Other devices on the LAN too</label>
+      <p class="field-hint">Another device on the same network opens it at this machine's address, port {{.Port}}. Takes effect when {{.BooruName}} restarts.</p>
+    </div>
+
+    {{if .Integration.Supported}}
+    <h2>Launching {{.BooruName}}</h2>
+    <div class="field">
+      {{if .Integration.MenuSupported}}
+      <label><input type="checkbox" name="menu_entry" {{if .Menu}}checked{{end}}> Add {{.BooruName}} to the applications menu</label>
+      {{end}}
+      {{if .Integration.AutostartSupported}}
+      <label><input type="checkbox" name="start_at_login" {{if .Autostart}}checked{{end}}> Start at login</label>
+      {{end}}
+    </div>
+    {{end}}
+    <div class="setup-actions">
+      <button type="submit">Open {{.BooruName}}</button>
+    </div>
+  </form>
+</div>
+
+<dialog id="dir-picker-dialog" class="dir-picker-dialog">
+  <h4>Choose a folder</h4>
+  <div id="dir-picker-body">Loading...</div>
+</dialog>
+</body>
+</html>
+{{end}}

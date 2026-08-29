@@ -27,6 +27,9 @@ type pluginRowView struct {
 	Companion bool
 	APIURL    string // companion only
 	WebURL    string
+	// WebURLHint is what a blank WebURL resolves to: monloader's own port,
+	// which is the same wherever the pair runs.
+	WebURLHint string
 	// Command and RunState are set on a managed plugin: the launch line
 	// declared on disk, shown read-only, and what its process is doing.
 	Command  string
@@ -98,17 +101,18 @@ func (s *Server) monloaderRow() pluginRowView {
 	s.cfgMu.RUnlock()
 	name, scopes := s.pairedTokenInfo(monloaderApp)
 	return pluginRowView{
-		Name:      monloaderApp,
-		Version:   version,
-		Address:   s.monloaderAPIBase(),
-		Conn:      peerConn(paused, conn),
-		TokenName: name,
-		Scopes:    scopes,
-		Paused:    paused,
-		Paired:    s.pairedWith(monloaderApp),
-		Companion: true,
-		APIURL:    apiURL,
-		WebURL:    webURL,
+		Name:       monloaderApp,
+		Version:    version,
+		Address:    s.monloaderAPIBase(),
+		Conn:       peerConn(paused, conn),
+		TokenName:  name,
+		Scopes:     scopes,
+		Paused:     paused,
+		Paired:     s.pairedWith(monloaderApp),
+		Companion:  true,
+		APIURL:     apiURL,
+		WebURL:     webURL,
+		WebURLHint: "http://localhost:8456",
 	}
 }
 
